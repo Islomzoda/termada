@@ -58,7 +58,10 @@ servers:
   - name: prod
     host: prod.example.com
     user: deploy
-    auth: prod-ssh-key            # references a vault entry, not the key itself
+    # auth is OPTIONAL: a vault entry name to use a Termada-stored credential.
+    # Omit it to connect with your own ssh-agent / ~/.ssh key (no vault needed) —
+    # if you can already `ssh deploy@prod`, so can Termada.
+    auth: prod-ssh-key
     tags: [web, prod]
     tmux: auto
 

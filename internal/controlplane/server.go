@@ -176,10 +176,9 @@ func (s *Server) hServerAdd(w http.ResponseWriter, r *http.Request) {
 		s.mgr.Redactor().AddLiteral(req.Secret)
 		auth = req.Name
 	}
-	if auth == "" {
-		writeErr(w, errs.New(errs.InvalidArgument, "provide a credential (secret) or an existing vault entry (auth)"))
-		return
-	}
+	// auth may be empty: the SSH runner then uses the operator's own ssh-agent /
+	// default ~/.ssh keys, so a server you can already `ssh` into needs no stored
+	// secret (and no vault/passphrase).
 	if err := s.fleet.AddServer(fleet.Server{Name: req.Name, Host: req.Host, Port: req.Port, User: req.User, Auth: auth, Tags: req.Tags}); err != nil {
 		writeErr(w, err)
 		return

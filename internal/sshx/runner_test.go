@@ -1,10 +1,13 @@
 package sshx
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/pem"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -47,6 +50,44 @@ func startTestSSHServer(t *testing.T, password string) string {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serveConn(conn, cfg)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// startTestSSHServerPubkey accepts exactly the given public key (no password).
+func startTestSSHServerPubkey(t *testing.T, authorized ssh.PublicKey) string {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := authorized.Marshal()
+	cfg := &ssh.ServerConfig{
+		PublicKeyCallback: func(c ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if bytes.Equal(key.Marshal(), want) {
+				return nil, nil
+			}
+			return nil, errAuth
+		},
+	}
+	cfg.AddHostKey(signer)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -195,6 +236,44 @@ func TestSSHViaFleet(t *testing.T) {
 	}
 	if res.Status != "ok" || len(res.Results) != 1 || res.Results[0].Status != "ok" {
 		t.Fatalf("fleet result = %+v", res)
+	}
+}
+
+// A server with no stored credential (Auth=="") connects using the operator's
+// own default ~/.ssh key — no vault, no passphrase.
+func TestSSHDefaultKeyNoVault(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "") // isolate from any real agent — exercise the on-disk key path
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	blk, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "id_ed25519"), pem.EncodeToMemory(blk), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	addr := startTestSSHServerPubkey(t, signer.PublicKey())
+	host, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+
+	// nil vault — proving agent/default-key auth needs no vault at all.
+	r := NewRunner(nil, filepath.Join(t.TempDir(), "known_hosts"), 5*time.Second)
+	r.keyDir = dir
+	res := r.Run(fleet.Server{Name: "keyhost", Host: host, Port: port, User: "tester", Auth: ""},
+		[]string{"echo", "via-default-key"})
+	if res.Status != "ok" {
+		t.Fatalf("status=%s err=%s", res.Status, res.Error)
+	}
+	if !strings.Contains(res.Stdout, "via-default-key") {
+		t.Fatalf("stdout=%q", res.Stdout)
 	}
 }
 

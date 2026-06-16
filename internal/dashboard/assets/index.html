@@ -134,9 +134,9 @@
       <input id="sf-user" placeholder="ssh user  (e.g. deploy)">
       <input id="sf-port" placeholder="port  (default 22)">
       <input id="sf-tags" placeholder="tags  (e.g. web,prod)">
-      <textarea id="sf-secret" placeholder="SSH private key or password — stored encrypted in the vault"></textarea>
-      <input id="sf-vault" type="password" placeholder="vault passphrase — encrypts the credential (pick any the 1st time, reuse after)">
-      <div class="sf-hint">The SSH key/password is encrypted at rest in a vault; the passphrase is its encryption key — you choose it the first time and reuse it. It protects the credential if the vault file is ever copied (backup, sync, stolen disk).</div>
+      <textarea id="sf-secret" placeholder="SSH key/password — leave BLANK to use your own ssh-agent / ~/.ssh key (no vault needed)"></textarea>
+      <input id="sf-vault" type="password" placeholder="vault passphrase — only if you typed a key/password above">
+      <div class="sf-hint"><b>Leave the key blank</b> to connect with your existing ssh-agent / <code>~/.ssh</code> key — no vault, no passphrase. Fill it only if you want Termada to <i>store</i> a credential; then the passphrase is its at-rest encryption key (protects it if the vault file is ever copied — backup, sync, stolen disk).</div>
       <div class="row"><button class="on" onclick="addServer()">Add &amp; test</button>
         <button onclick="toggleServerForm()">cancel</button></div>
       <div id="sf-msg" class="muted"></div>

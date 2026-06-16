@@ -51,7 +51,7 @@ var (
 
 func (s *Server) registerTools() {
 	mgr := s.backend
-	agent := s.agentID
+	// handlers read s.agentID live, since initialize may set it from clientInfo
 
 	s.add(toolDef{
 		Name:        "exec_run",
@@ -67,7 +67,7 @@ func (s *Server) registerTools() {
 			if e != nil {
 				return nil, e
 			}
-			res, err := mgr.Run(agent, argString(a, "session"), argv, argString(a, "mode"), argInt(a, "timeout_ms"))
+			res, err := mgr.Run(s.agentID, argString(a, "session"), argv, argString(a, "mode"), argInt(a, "timeout_ms"))
 			return res, asErr(err)
 		},
 	})
@@ -85,7 +85,7 @@ func (s *Server) registerTools() {
 			if e != nil {
 				return nil, e
 			}
-			snap, err := mgr.Start(agent, argString(a, "session"), argv, argString(a, "mode"))
+			snap, err := mgr.Start(s.agentID, argString(a, "session"), argv, argString(a, "mode"))
 			if err != nil {
 				return nil, asErr(err)
 			}
@@ -177,7 +177,7 @@ func (s *Server) registerTools() {
 			"mode":   map[string]any{"type": "string", "enum": []string{"shell"}},
 		}),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			sess, err := mgr.CreateSession(agent, argString(a, "target"), argString(a, "mode"))
+			sess, err := mgr.CreateSession(s.agentID, argString(a, "target"), argString(a, "mode"))
 			if err != nil {
 				return nil, asErr(err)
 			}
@@ -263,7 +263,7 @@ func (s *Server) registerTools() {
 			"session": strSchema,
 		}, "name"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			res, err := mgr.RecipeRun(agent, argString(a, "session"), argString(a, "name"))
+			res, err := mgr.RecipeRun(s.agentID, argString(a, "session"), argString(a, "name"))
 			return res, asErr(err)
 		},
 	})
@@ -323,7 +323,7 @@ func (s *Server) registerTools() {
 		InputSchema: emptySchema,
 		Handler: func(a map[string]any) (any, *errs.Error) {
 			return map[string]any{
-				"agent_id":    agent,
+				"agent_id":    s.agentID,
 				"api_version": "0.x",
 				"tools":       s.order,
 				"modes":       []string{engine.ModeAuto, engine.ModeForeground, engine.ModeBackground},

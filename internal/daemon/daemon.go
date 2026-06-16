@@ -138,6 +138,23 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go notifier.Subscribe(nch)
 	defer cancelNotify()
 
+	// Periodically health-check servers so the dashboard shows online/offline
+	// without the human clicking.
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		time.Sleep(2 * time.Second)
+		d.fleet.HealthCheck()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				d.fleet.HealthCheck()
+			}
+		}
+	}()
+
 	cp := controlplane.New(d.mgr, d.bus, d.audit, d.fleet, d.vault, d.plugins, d.version)
 	root := http.NewServeMux()
 	root.Handle("/api/", cp.Mux())

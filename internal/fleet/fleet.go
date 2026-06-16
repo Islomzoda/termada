@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/termada/termada/internal/errs"
 )
@@ -28,11 +29,13 @@ type Server struct {
 
 // ServerInfo is the secret-free view returned to agents (spec server_list).
 type ServerInfo struct {
-	Name    string   `json:"name"`
-	Host    string   `json:"host"`
-	User    string   `json:"user"`
-	Tags    []string `json:"tags,omitempty"`
-	Managed bool     `json:"managed"`
+	Name        string   `json:"name"`
+	Host        string   `json:"host"`
+	User        string   `json:"user"`
+	Tags        []string `json:"tags,omitempty"`
+	Managed     bool     `json:"managed"`
+	Status      string   `json:"status,omitempty"`       // last health-check state
+	CheckedUnix int64    `json:"checked_unix,omitempty"` // when last checked
 }
 
 // Result is one server's outcome.
@@ -64,7 +67,9 @@ type Manager struct {
 	servers     []Server
 	runner      Runner
 	parallelism int
-	storePath   string // where dashboard-added (managed) servers persist
+	storePath   string            // where dashboard-added (managed) servers persist
+	status      map[string]string // server name -> last health-check state
+	checked     map[string]int64  // server name -> unix time of last check
 }
 
 // New builds a fleet manager.
@@ -72,7 +77,25 @@ func New(servers []Server, runner Runner, parallelism int) *Manager {
 	if parallelism <= 0 {
 		parallelism = 5
 	}
-	return &Manager{servers: servers, runner: runner, parallelism: parallelism}
+	return &Manager{servers: servers, runner: runner, parallelism: parallelism,
+		status: map[string]string{}, checked: map[string]int64{}}
+}
+
+// HealthCheck tests every server (runs `true` over SSH) and caches the per-server
+// status so the dashboard can show online/offline without the human clicking. A
+// no-op when there are no servers.
+func (m *Manager) HealthCheck() {
+	res, err := m.Run([]string{"true"}, nil, m.parallelism)
+	if err != nil || res == nil {
+		return
+	}
+	now := time.Now().Unix()
+	m.mu.Lock()
+	for _, r := range res.Results {
+		m.status[r.Server] = r.Status
+		m.checked[r.Server] = now
+	}
+	m.mu.Unlock()
 }
 
 // SetServers replaces the inventory (hot-reload).
@@ -88,7 +111,8 @@ func (m *Manager) ServerList() []ServerInfo {
 	defer m.mu.RUnlock()
 	out := make([]ServerInfo, 0, len(m.servers))
 	for _, s := range m.servers {
-		out = append(out, ServerInfo{Name: s.Name, Host: s.Host, User: s.User, Tags: s.Tags, Managed: s.Managed})
+		out = append(out, ServerInfo{Name: s.Name, Host: s.Host, User: s.User, Tags: s.Tags,
+			Managed: s.Managed, Status: m.status[s.Name], CheckedUnix: m.checked[s.Name]})
 	}
 	return out
 }

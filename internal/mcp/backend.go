@@ -31,6 +31,7 @@ type Backend interface {
 	FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error)
 	PluginTools() []plugin.ToolSpec
 	PluginCall(name string, args map[string]any) (any, error)
+	RecordConnect(agent string)
 }
 
 // LocalBackend adapts an in-process *engine.Manager to the Backend interface.
@@ -96,6 +97,8 @@ func (b *LocalBackend) RecipeRun(owner, session, name string) (*engine.RecipeRun
 
 // ServerList / FleetRun are daemon-only (they need the vault and server
 // inventory); the in-process fallback has neither.
+func (b *LocalBackend) RecordConnect(agent string) { b.m.RecordConnect(agent) }
+
 func (b *LocalBackend) ServerList() []fleet.ServerInfo { return nil }
 
 func (b *LocalBackend) FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error) {

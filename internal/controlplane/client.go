@@ -214,6 +214,11 @@ func (c *Client) PluginCall(name string, args map[string]any) (any, error) {
 	return out, err
 }
 
+// RecordConnect notifies the daemon that an agent connected (best-effort).
+func (c *Client) RecordConnect(agent string) {
+	_ = c.post("/api/agent/connect", map[string]string{"agent": agent}, nil)
+}
+
 // Unlock sends the vault passphrase to the daemon.
 func (c *Client) Unlock(passphrase string) (int, error) {
 	var out struct {

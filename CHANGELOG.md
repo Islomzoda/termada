@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## [0.6.0] — 2026-06-16
+
+Agent observability and automatic server status.
+
+### Added
+- **Agent panel** (spec MA-1/MA-2): the dashboard shows each connected agent —
+  auto-detected by name from MCP `clientInfo` (e.g. `claude-code`, `cursor`) — with
+  connection count, jobs run, sessions opened, denied commands, last command and
+  last-seen time. Sessions and jobs are attributed to the owning agent. The engine
+  keeps a per-agent registry; the shim records a connection on `initialize`
+  (`/api/agent/connect`).
+- **Automatic server health checks**: the daemon health-checks every configured
+  server every 30s (runs `true` over SSH) and caches the result, so the dashboard
+  shows online/offline status with a colored dot without anyone clicking. Manual
+  per-server **test** still available.
+
 ## [0.5.1] — 2026-06-16
 
 Dashboard fixes (found by driving it in a real browser) and UI server management.

@@ -76,6 +76,7 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/api/servers/add", s.hServerAdd)
 	mux.HandleFunc("/api/servers/remove", s.hServerRemove)
 	mux.HandleFunc("/api/servers/test", s.hServerTest)
+	mux.HandleFunc("/api/agent/connect", s.hAgentConnect)
 	return mux
 }
 
@@ -630,6 +631,15 @@ func (s *Server) hDeny(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+func (s *Server) hAgentConnect(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Agent string `json:"agent"`
+	}
+	_ = decode(r, &req)
+	s.mgr.RecordConnect(req.Agent)
+	writeJSON(w, map[string]any{"ok": true})
+}
+
 func (s *Server) hStatus(w http.ResponseWriter, r *http.Request) {
 	servers := []fleet.ServerInfo{}
 	if s.fleet != nil {
@@ -641,6 +651,7 @@ func (s *Server) hStatus(w http.ResponseWriter, r *http.Request) {
 		"jobs":     s.mgr.ListJobs("active"),
 		"pending":  s.mgr.ListPending(),
 		"servers":  servers,
+		"agents":   s.mgr.Agents(),
 	})
 }
 

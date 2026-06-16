@@ -131,6 +131,19 @@ func (s *Server) handleLine(line []byte) {
 func (s *Server) dispatch(req rpcRequest) (any, *rpcError) {
 	switch req.Method {
 	case "initialize":
+		// Auto-detect the agent from clientInfo (e.g. "claude-code", "cursor") so
+		// the dashboard attributes activity to a real name, and count the
+		// connection (spec MA-1/MA-2).
+		var p struct {
+			ClientInfo struct {
+				Name string `json:"name"`
+			} `json:"clientInfo"`
+		}
+		_ = json.Unmarshal(req.Params, &p)
+		if p.ClientInfo.Name != "" && (s.agentID == "" || s.agentID == "default") {
+			s.agentID = p.ClientInfo.Name
+		}
+		s.backend.RecordConnect(s.agentID)
 		return map[string]any{
 			"protocolVersion": protocolVersion,
 			"serverInfo":      map[string]any{"name": "termada", "version": s.version},

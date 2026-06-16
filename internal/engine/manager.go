@@ -50,6 +50,7 @@ type Manager struct {
 	defaults map[string]string          // owner -> default session id
 	pending  map[string]*pendingConfirm // confirmation_id -> pending exec
 	recipes  map[string]Recipe
+	agents   map[string]*AgentStat // agent id -> activity stats
 }
 
 // NewManager builds a manager.
@@ -63,6 +64,7 @@ func NewManager(cfg Config) *Manager {
 		defaults:      map[string]string{},
 		pending:       map[string]*pendingConfirm{},
 		recipes:       map[string]Recipe{},
+		agents:        map[string]*AgentStat{},
 	}
 }
 
@@ -138,6 +140,7 @@ func (m *Manager) CreateSession(owner, target, mode string) (*Session, error) {
 	m.mu.Unlock()
 	m.publish(bus.Event{Type: bus.EvSessionCreated, AgentID: owner, SessionID: sess.ID,
 		Data: map[string]any{"target": target, "mode": mode}})
+	m.touchAgent(owner, func(a *AgentStat) { a.Sessions++ })
 	return sess, nil
 }
 
@@ -196,6 +199,7 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 			m.publish(bus.Event{Type: bus.EvPolicyDenied, AgentID: owner, SessionID: sess.ID,
 				Message: strings.Join(command, " "),
 				Data:    map[string]any{"reason": dec.Reason, "matched": dec.Matched}})
+			m.touchAgent(owner, func(a *AgentStat) { a.Denied++ })
 			return nil, errs.New(errs.DeniedByPolicy, "command denied by policy (%s)", dec.Reason)
 		case policy.Confirm:
 			return m.enqueueConfirm(owner, sess, command, mode, dec), nil
@@ -215,6 +219,7 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 		if err == nil {
 			m.publishStarted(job)
 			m.watch(job)
+			m.touchAgent(owner, func(a *AgentStat) { a.Jobs++; a.LastCommand = cmdString(command) })
 		}
 	}
 	return job, err
@@ -248,6 +253,7 @@ func (m *Manager) watch(job *Job) {
 // awaiting_confirmation. A timer denies it by default after the configured
 // timeout (spec §18a: deny-by-default).
 func (m *Manager) enqueueConfirm(owner string, sess *Session, command []string, mode string, dec policy.Result) *Job {
+	m.touchAgent(owner, func(a *AgentStat) { a.Jobs++; a.LastCommand = cmdString(command) })
 	job := newConfirmJob(sess, command, mode)
 	cid := ids.New("cnf")
 	job.setConfirmID(cid)

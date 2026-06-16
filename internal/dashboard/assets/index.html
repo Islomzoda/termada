@@ -71,6 +71,8 @@
   .item.srv{flex-wrap:wrap}
   .srv-name{flex-basis:100%;display:flex;align-items:center;gap:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .srv-name .muted{font-size:11px}
+  .amini{font-size:11px;color:var(--muted);padding:0 8px 6px 24px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .agent-name{font-weight:600;color:var(--blue)}
 </style>
 </head>
 <body>
@@ -103,6 +105,7 @@
       <div id="sf-msg" class="muted"></div>
     </div>
     <div id="servers"><div class="empty">none</div></div>
+    <h2>Agents</h2><div id="agents"><div class="empty">none connected yet</div></div>
     <h2>Activity</h2><div id="feed" class="feed"></div>
   </aside>
   <main>
@@ -127,6 +130,9 @@ async function api(path, opts={}){
 function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function cmd(c){return Array.isArray(c)?c.join(' '):(c||'');}
 function short(s,n){s=s||'';return s.length>n?s.slice(0,n)+'…':s;}
+function relTime(unix){ if(!unix)return''; const d=Math.max(0,Math.floor(Date.now()/1000-unix));
+  if(d<5)return'just now'; if(d<60)return d+'s ago'; if(d<3600)return Math.floor(d/60)+'m ago';
+  if(d<86400)return Math.floor(d/3600)+'h ago'; return Math.floor(d/86400)+'d ago'; }
 const TERMINAL = ['exited','killed','failed','timed_out','orphaned'];
 
 // ---- generic live terminal ------------------------------------------------
@@ -263,7 +269,7 @@ async function refresh(){
       <span class="badge st-${esc(j.status)}">${esc(j.status)}</span></div>`).join('') : '<div class="empty">none</div>';
 
   document.getElementById('servers').innerHTML=(s.servers&&s.servers.length)? s.servers.map(x=>{
-    const st=srvStatus[x.name]||''; const c={ok:'#3fb950',testing:'#d29922'}[st]||(st?'#f85149':'#8b949e');
+    const st=srvStatus[x.name]||x.status||''; const c={ok:'#3fb950',testing:'#d29922'}[st]||(st?'#f85149':'#8b949e');
     const dot=st==='testing'?'…':'●';
     return `<div class="item srv" title="${esc(st||'click test')}">
       <span class="srv-name"><span class="sdot" style="color:${c}">${dot}</span><b>${esc(x.name)}</b>
@@ -273,6 +279,18 @@ async function refresh(){
       <button class="mini" onclick="testServer('${esc(x.name)}')">test</button>
       ${x.managed?`<button class="mini" onclick="removeServer('${esc(x.name)}')">✕</button>`:''}
     </div>`; }).join('') : '<div class="empty">none yet — click <b>+ add</b></div>';
+
+  // agents: who connected, how often, what they did
+  document.getElementById('agents').innerHTML=(s.agents&&s.agents.length)? s.agents.map(a=>{
+    const ago=relTime(a.last_seen_unix);
+    return `<div class="item srv" title="first seen ${relTime(a.first_seen_unix)}">
+        <span class="srv-name agent-name">🤖 ${esc(a.id)}</span>
+        <span class="badge">×${a.connections||0} conn</span>
+        <span class="badge">${a.jobs||0} jobs</span>
+        ${a.sessions?`<span class="badge">${a.sessions} sess</span>`:''}
+        ${a.denied?`<span class="badge st-failed">${a.denied} denied</span>`:''}
+      </div>${a.last_command?`<div class="amini">↳ ${esc(a.last_command)} · ${ago}</div>`:`<div class="amini">${ago}</div>`}`;
+  }).join('') : '<div class="empty">none connected yet</div>';
 
   for(const key in terms){ if(!key.startsWith('job:')) continue; const id=key.slice(4); const j=lastJobs[id]; if(!j) continue;
     const hi=document.getElementById('hi-'+id), ho=document.getElementById('ho-'+id), ht=document.getElementById('ht-'+id);

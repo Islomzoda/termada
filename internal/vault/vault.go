@@ -75,7 +75,9 @@ func (v *Vault) Unlock(pass string) error {
 	}
 	r, err := age.Decrypt(bytes.NewReader(data), id)
 	if err != nil {
-		return fmt.Errorf("decrypt vault (wrong passphrase?): %w", err)
+		// age's raw error is a noisy "identity did not match…" chain; for a vault
+		// a scrypt-decrypt failure is the wrong passphrase (or a corrupt file).
+		return fmt.Errorf("incorrect vault passphrase (or the vault file is corrupt)")
 	}
 	plain, err := io.ReadAll(r)
 	if err != nil {

@@ -78,6 +78,7 @@
   #server-form textarea{height:54px;resize:vertical}
   #server-form .row{display:flex;gap:6px;margin-top:6px}
   #sf-msg{margin-top:6px;font-size:11px}
+  .sf-hint{font-size:10.5px;color:var(--muted);line-height:1.5;margin:5px 2px 2px;opacity:.85}
   h2 .mini{float:right;margin-top:-2px}
   .item.srv{flex-wrap:wrap}
   .srv-name{flex-basis:100%;display:flex;align-items:center;gap:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -133,8 +134,9 @@
       <input id="sf-user" placeholder="ssh user  (e.g. deploy)">
       <input id="sf-port" placeholder="port  (default 22)">
       <input id="sf-tags" placeholder="tags  (e.g. web,prod)">
-      <textarea id="sf-secret" placeholder="SSH private key or password"></textarea>
-      <input id="sf-vault" type="password" placeholder="vault passphrase  (set on first use)">
+      <textarea id="sf-secret" placeholder="SSH private key or password (optional — leave blank to use a key already on the host)"></textarea>
+      <input id="sf-vault" type="password" placeholder="vault passphrase — encrypts the credential (pick any the 1st time, reuse after)">
+      <div class="sf-hint">The SSH key/password is stored in an encrypted vault. The passphrase locks it — you choose it the first time and reuse it. Leave the key blank if no secret needs storing.</div>
       <div class="row"><button class="on" onclick="addServer()">Add &amp; test</button>
         <button onclick="toggleServerForm()">cancel</button></div>
       <div id="sf-msg" class="muted"></div>
@@ -271,16 +273,29 @@ const val=id=>document.getElementById(id).value.trim();
 function toggleServerForm(){ const f=document.getElementById('server-form'); f.style.display=f.style.display==='block'?'none':'block'; }
 async function addServer(){
   const msg=document.getElementById('sf-msg');
-  const name=val('sf-name'), host=val('sf-host'), user=val('sf-user'), secret=document.getElementById('sf-secret').value, pass=document.getElementById('sf-vault').value;
-  if(!name||!host||!user){ msg.style.color='var(--red)'; msg.textContent='✗ name, host and user are required'; return; }
-  msg.style.color='var(--muted)'; msg.textContent='adding…';
-  if(secret && pass){ await api('/api/vault/unlock',{method:'POST',body:JSON.stringify({passphrase:pass})}); }
+  const set=(c,t)=>{ msg.style.color='var(--'+c+')'; msg.textContent=t; };
+  const name=val('sf-name'), host=val('sf-host'), user=val('sf-user'),
+        secret=document.getElementById('sf-secret').value, pass=document.getElementById('sf-vault').value;
+  if(!name||!host||!user){ set('red','✗ name, host and user are required'); return; }
+  // An SSH key/password is kept in the encrypted vault, which a passphrase opens.
+  if(secret && !pass){
+    set('yellow','🔒 Pick a vault passphrase below — it encrypts this credential. You choose it the first time, then reuse it to add more servers.');
+    document.getElementById('sf-vault').focus(); return;
+  }
+  set('muted','adding…');
+  if(secret && pass){
+    const u=await api('/api/vault/unlock',{method:'POST',body:JSON.stringify({passphrase:pass})});
+    if(u&&u.error){ set('red','✗ vault didn’t open: '+(u.error.message||u.error.code)+' — the passphrase must match the one you first set.'); return; }
+  }
   const body={name,host,user,port:parseInt(val('sf-port'))||0,
     tags:val('sf-tags').split(',').map(t=>t.trim()).filter(Boolean), secret};
   const r=await api('/api/servers/add',{method:'POST',body:JSON.stringify(body)});
-  if(r&&r.error){ msg.style.color='var(--red)'; msg.textContent='✗ '+(r.error.message||r.error.code);
-    if(r.error.code==='vault_locked') msg.textContent+=' — enter the vault passphrase above'; return; }
-  msg.style.color='var(--green)'; msg.textContent='✓ added';
+  if(r&&r.error){
+    if(r.error.code==='vault_locked'){ set('yellow','🔒 Enter a vault passphrase below to encrypt the credential (you set it on first use).'); document.getElementById('sf-vault').focus(); }
+    else set('red','✗ '+(r.error.message||r.error.code));
+    return;
+  }
+  set('green','✓ added');
   ['sf-name','sf-host','sf-user','sf-port','sf-tags','sf-secret','sf-vault'].forEach(i=>document.getElementById(i).value='');
   toggleServerForm(); await refresh(); setTimeout(()=>testServer(name),300);
 }

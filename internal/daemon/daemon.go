@@ -92,6 +92,8 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 
 	// audit uses the same redactor as the engine so secrets are masked in the log.
 	aud.SetRedactor(mgr.Redactor())
+	// dangerous commands fail closed if the audit log can't record them (RE-7).
+	mgr.SetAuditHealth(aud.Healthy)
 
 	v := vault.New(config.ExpandPath(cfg.Vault.File))
 	runner := sshx.NewRunner(v, filepath.Join(RuntimeDir(), "known_hosts"), 20*time.Second)

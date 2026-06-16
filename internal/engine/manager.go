@@ -40,6 +40,7 @@ type Manager struct {
 	pol            *policy.Engine
 	agentPolicies  map[string]string
 	timeoutClasses map[string]int // class name -> timeout ms (LR-2)
+	auditOK        func() bool    // audit health probe; dangerous ops fail closed if false
 
 	persistPath string
 	snapshotDir string
@@ -89,6 +90,13 @@ func (m *Manager) SetPolicy(p *policy.Engine, agentPolicies map[string]string) {
 // SetTimeoutClasses installs the per-class adaptive timeouts (LR-2).
 func (m *Manager) SetTimeoutClasses(classes map[string]int) {
 	m.timeoutClasses = classes
+}
+
+// SetAuditHealth installs a probe for audit-log health. When it reports
+// unhealthy, dangerous (confirmation-gated) commands are refused — fail-closed
+// (spec RE-7): if we can't record an action, we don't take it.
+func (m *Manager) SetAuditHealth(probe func() bool) {
+	m.auditOK = probe
 }
 
 // classTimeout returns the adaptive timeout (ms) for a command: per-class if
@@ -221,6 +229,9 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 			m.touchAgent(owner, func(a *AgentStat) { a.Denied++ })
 			return nil, errs.New(errs.DeniedByPolicy, "command denied by policy (%s)", dec.Reason)
 		case policy.Confirm:
+			if m.auditOK != nil && !m.auditOK() {
+				return nil, errs.New(errs.Internal, "audit log unavailable — refusing dangerous command (fail-closed)")
+			}
 			return m.enqueueConfirm(owner, sess, command, mode, dec), nil
 		}
 	}

@@ -72,6 +72,34 @@ func TestAuditRecoversChainAcrossReopen(t *testing.T) {
 	}
 }
 
+func TestAuditRotationKeepsChainVerifiable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	l, _ := Open(path, output.NewRedactor(nil))
+	l.SetMaxBytes(600) // tiny → forces several rotations
+	for i := 0; i < 60; i++ {
+		if err := l.Append(Record{Type: "job.started", Message: "a reasonably long message to grow the file"}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	l.Close()
+
+	// rotation actually happened
+	segs, _ := filepath.Glob(path + ".*")
+	if len(segs) == 0 {
+		t.Fatalf("expected at least one sealed segment, got none")
+	}
+	// active log verifies
+	if _, err := Verify(path); err != nil {
+		t.Fatalf("active log verify: %v", err)
+	}
+	// every sealed segment verifies independently (chain intact within each)
+	for _, seg := range segs {
+		if _, err := Verify(seg); err != nil {
+			t.Fatalf("segment %s verify: %v", seg, err)
+		}
+	}
+}
+
 func TestAuditRedactsSecrets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.log")
 	l, _ := Open(path, output.NewRedactor(nil))

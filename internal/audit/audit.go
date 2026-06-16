@@ -47,6 +47,31 @@ type Logger struct {
 	w        *bufio.Writer
 	lastHash string
 	seq      int64
+	size     int64
+	maxBytes int64
+	healthy  bool
+}
+
+// SetMaxBytes sets the segment size at which the log rotates (0 = default 10MB).
+func (l *Logger) SetMaxBytes(n int64) {
+	l.mu.Lock()
+	l.maxBytes = n
+	l.mu.Unlock()
+}
+
+// Healthy reports whether the last write succeeded. When false the audit log
+// cannot be trusted to record actions, so callers should fail closed (RE-7).
+func (l *Logger) Healthy() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.healthy
+}
+
+func (l *Logger) maxSegment() int64 {
+	if l.maxBytes > 0 {
+		return l.maxBytes
+	}
+	return 10 << 20 // 10 MiB
 }
 
 // Open opens (or creates) the audit log at path, recovering the last hash and
@@ -55,7 +80,7 @@ func Open(path string, redactor *output.Redactor) (*Logger, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	l := &Logger{path: path, redactor: redactor}
+	l := &Logger{path: path, redactor: redactor, healthy: true}
 	if err := l.recover(); err != nil {
 		return nil, err
 	}
@@ -65,7 +90,34 @@ func Open(path string, redactor *output.Redactor) (*Logger, error) {
 	}
 	l.f = f
 	l.w = bufio.NewWriter(f)
+	if fi, err := f.Stat(); err == nil {
+		l.size = fi.Size()
+	}
 	return l, nil
+}
+
+// rotate seals the current segment (renaming it with a timestamp) and starts a
+// fresh one. The hash chain continues: the next record's prev_hash is the sealed
+// segment's head, so cross-segment tampering is still detectable. Caller holds
+// l.mu.
+func (l *Logger) rotate(stamp string) error {
+	if err := l.w.Flush(); err != nil {
+		return err
+	}
+	if err := l.f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(l.path, l.path+"."+stamp); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	l.f = f
+	l.w = bufio.NewWriter(f)
+	l.size = 0
+	return nil
 }
 
 // recover scans the existing log to find the last hash and sequence number.
@@ -124,16 +176,28 @@ func (l *Logger) Append(rec Record) error {
 	if err != nil {
 		return err
 	}
+	if l.size > 0 && l.size+int64(len(line)+1) > l.maxSegment() {
+		stamp := fmt.Sprintf("%s-%d", time.Now().Format("20060102-150405"), l.seq)
+		if err := l.rotate(stamp); err != nil {
+			l.healthy = false
+			return err
+		}
+	}
 	if _, err := l.w.Write(append(line, '\n')); err != nil {
+		l.healthy = false
 		return err
 	}
 	if err := l.w.Flush(); err != nil {
+		l.healthy = false
 		return err
 	}
 	if err := l.f.Sync(); err != nil {
+		l.healthy = false
 		return err
 	}
+	l.size += int64(len(line) + 1)
 	l.lastHash = rec.Hash
+	l.healthy = true
 	return nil
 }
 
@@ -200,6 +264,7 @@ func Verify(path string) (int64, error) {
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	var n, expectSeq int64
 	prev := ""
+	first := true
 	for sc.Scan() {
 		line := sc.Bytes()
 		if len(line) == 0 {
@@ -209,17 +274,25 @@ func Verify(path string) (int64, error) {
 		if err := json.Unmarshal(line, &rec); err != nil {
 			return n, fmt.Errorf("record %d: corrupt JSON: %w", n+1, err)
 		}
-		expectSeq++
-		if rec.Seq != expectSeq {
-			return n, fmt.Errorf("record %d: seq=%d, expected %d", n+1, rec.Seq, expectSeq)
-		}
-		if rec.PrevHash != prev {
-			return n, fmt.Errorf("record %d (seq %d): prev_hash mismatch — chain broken", n+1, rec.Seq)
+		// Segments (from rotation) start at an arbitrary seq and carry the prior
+		// segment's head as prev_hash, so the base is taken from the first record;
+		// every record's own hash is still verified (which covers prev_hash too).
+		if first {
+			expectSeq = rec.Seq
+			first = false
+		} else {
+			if rec.Seq != expectSeq {
+				return n, fmt.Errorf("record %d: seq=%d, expected %d", n+1, rec.Seq, expectSeq)
+			}
+			if rec.PrevHash != prev {
+				return n, fmt.Errorf("record %d (seq %d): prev_hash mismatch — chain broken", n+1, rec.Seq)
+			}
 		}
 		if got := hashOf(rec); got != rec.Hash {
 			return n, fmt.Errorf("record %d (seq %d): hash mismatch — record altered", n+1, rec.Seq)
 		}
 		prev = rec.Hash
+		expectSeq++
 		n++
 	}
 	return n, sc.Err()

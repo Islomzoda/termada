@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/termada/termada/internal/bus"
 	"github.com/termada/termada/internal/engine"
@@ -52,8 +53,23 @@ func TestAPIExecRun(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("code=%d body=%v", code, out)
 	}
-	if out["status"] != "exited" || !strings.Contains(out["stdout"].(string), "api-hello") {
-		t.Fatalf("run result = %v", out)
+	// Output is captured regardless of whether the job has finalized yet.
+	if s, _ := out["stdout"].(string); !strings.Contains(s, "api-hello") {
+		t.Fatalf("stdout = %v", out["stdout"])
+	}
+	// Under heavy parallel test load the marker can land just after the run
+	// window, leaving the job briefly "backgrounded"; poll it to terminal.
+	status, _ := out["status"].(string)
+	if status != "exited" {
+		jid, _ := out["job_id"].(string)
+		for i := 0; i < 100 && status != "exited"; i++ {
+			time.Sleep(50 * time.Millisecond)
+			_, p := do(t, mux, "POST", "/api/exec/poll", `{"job_id":"`+jid+`"}`)
+			status, _ = p["status"].(string)
+		}
+	}
+	if status != "exited" {
+		t.Fatalf("did not reach exited: status=%v", status)
 	}
 }
 

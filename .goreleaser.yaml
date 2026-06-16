@@ -69,6 +69,12 @@ nfpms:
 
 brews:
   - name: termada
+    # The formula is generated, but NOT pushed: the Islomzoda/homebrew-tap repo
+    # doesn't exist yet and the default GITHUB_TOKEN can't write to a separate
+    # repo anyway (this is why the v0.7.0 release workflow went red). To enable
+    # `brew install`: create the homebrew-tap repo + a PAT, then flip this off.
+    # See docs/PUBLISHING.md.
+    skip_upload: "true"
     repository:
       owner: Islomzoda
       name: homebrew-tap

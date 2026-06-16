@@ -18,7 +18,7 @@ func TestPerAgentQuota(t *testing.T) {
 		if err != nil {
 			t.Fatalf("session: %v", err)
 		}
-		return m.Start(agent, s.ID, []string{"sleep", "5"}, "")
+		return m.Start(agent, s.ID, []string{"sleep", "2"}, "")
 	}
 	if _, err := start("A"); err != nil {
 		t.Fatalf("job 1: %v", err)

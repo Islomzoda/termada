@@ -83,11 +83,18 @@ The `io.github.Islomzoda/...` namespace is proven by the GitHub login. The
 - **awesome-mcp-servers** — open a PR adding Termada to
   `https://github.com/punkpeye/awesome-mcp-servers` (fork + PR; your GitHub).
 
-## Homebrew
+## Homebrew (currently formula-only, not pushed)
 
-The tap is configured in `.goreleaser.yaml` (`brews:` → `Islomzoda/homebrew-...`).
-On a tagged release goreleaser updates the formula, then:
+`brews:` in `.goreleaser.yaml` has `skip_upload: "true"` — goreleaser builds the
+formula but does NOT push it, because the `Islomzoda/homebrew-tap` repo doesn't
+exist yet and the default `GITHUB_TOKEN` can't write to a separate repo anyway.
+(Pushing to a non-existent tap is what turned the v0.7.0 release red.)
 
-```bash
-brew install islomzoda/termada/termada
-```
+To enable `brew install islomzoda/termada/termada`:
+1. Create a public repo `Islomzoda/homebrew-tap`.
+2. Create a PAT (classic, `repo` scope) and add it as the `HOMEBREW_TAP_TOKEN`
+   secret on the termada repo.
+3. In `.goreleaser.yaml`: remove `skip_upload`, and set
+   `brews[].repository.token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"`.
+4. In `release.yml`, pass `HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}`
+   in the goreleaser step's `env:`.

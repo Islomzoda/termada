@@ -173,11 +173,15 @@ async function api(path, opts={}){
   if(r.status===401){ showGate(); throw new Error('unauthorized'); }
   return r.json().catch(()=>({}));
 }
-function showGate(){ const g=document.getElementById('gate'); if(g) g.style.display='flex'; }
+// Only shown if the daemon actually rejects us (401) — i.e. strict mode without a
+// valid token. In the default local-trust mode the API answers without a token,
+// so the gate never appears and the dashboard just loads.
+let gated=false;
+function showGate(){ gated=true; const g=document.getElementById('gate'); if(g) g.style.display='flex'; }
 function submitGate(){
   const t=(document.getElementById('gate-token').value||'').trim();
   if(!t){ return; }
-  token=t; q='token='+encodeURIComponent(t);
+  token=t; q='token='+encodeURIComponent(t); gated=false;
   try{ localStorage.setItem('termada_token', t); }catch(_){}
   const g=document.getElementById('gate'); if(g) g.style.display='none';
   refresh();
@@ -298,8 +302,7 @@ async function refresh(){
   let s;
   try{ s=await api('/api/status'); document.getElementById('conn').textContent='connected'; document.getElementById('dot').classList.add('live'); }
   catch(e){
-    if(!token){ showGate(); document.getElementById('conn').textContent='locked'; }
-    else { document.getElementById('conn').textContent='offline'; }
+    document.getElementById('conn').textContent = gated ? 'locked' : 'offline';
     document.getElementById('dot').classList.remove('live'); return; }
   document.getElementById('ver').textContent='v'+(s.version||'?');
 
@@ -375,8 +378,8 @@ try{
 }catch(e){}
 
 window.addEventListener('resize',()=>{ if(active&&terms[active]&&terms[active].fit){try{terms[active].fit.fit();}catch(_){}}});
-if(!token){ showGate(); } else { refresh(); }
-setInterval(()=>{ if(token) refresh(); }, 1500);
+refresh(); // always try — local-trust answers without a token; a 401 shows the gate
+setInterval(()=>{ if(!gated) refresh(); }, 1500);
 </script>
 </body>
 </html>

@@ -4,6 +4,11 @@
 dashboard:
   enabled: true
   open_browser: false
+  # local_trust (default true): on your own machine, opening http://127.0.0.1:7717
+  # just works — no token. The loopback Host/Origin checks already block websites
+  # and remote hosts. Set false on a SHARED/multi-user box to require the token
+  # even on loopback (other local users could otherwise reach the dashboard).
+  local_trust: true
 http:
   bind: 127.0.0.1:7717
 

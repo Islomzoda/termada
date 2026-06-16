@@ -444,12 +444,20 @@ func cmdDashboard(args []string) {
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"
 	}
-	tok, err := os.ReadFile(daemon.TokenPath())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "no dashboard token at %s — is the daemon running?\nstart it with:  termada serve\n", daemon.TokenPath())
-		os.Exit(1)
+	// local-trust (default): same-machine access needs no token, so print the
+	// clean bare URL. Only append ?token= when strict mode is on.
+	localTrust := cfg.Dashboard.LocalTrust == nil || *cfg.Dashboard.LocalTrust
+	var url string
+	if localTrust {
+		url = fmt.Sprintf("http://%s:%s/", host, port)
+	} else {
+		tok, err := os.ReadFile(daemon.TokenPath())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "no dashboard token at %s — is the daemon running?\nstart it with:  termada serve\n", daemon.TokenPath())
+			os.Exit(1)
+		}
+		url = fmt.Sprintf("http://%s:%s/?token=%s", host, port, strings.TrimSpace(string(tok)))
 	}
-	url := fmt.Sprintf("http://%s:%s/?token=%s", host, port, strings.TrimSpace(string(tok)))
 	fmt.Println(url)
 	if open {
 		if err := openURL(url); err != nil {

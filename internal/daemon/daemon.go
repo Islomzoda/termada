@@ -210,9 +210,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return fmt.Errorf("dashboard bind %s failed (another daemon already running?): %w", d.cfg.HTTP.Bind, err)
 		}
 		{
-			tcpSrv = &http.Server{Handler: tokenAuth(d.token, root)}
+			// local-trust defaults ON (absent config field == nil == trusted).
+			localTrust := d.cfg.Dashboard.LocalTrust == nil || *d.cfg.Dashboard.LocalTrust
+			tcpSrv = &http.Server{Handler: tokenAuth(d.token, localTrust, root)}
 			go func() { _ = tcpSrv.Serve(ln) }()
-			d.logger.Printf("dashboard:  http://%s/?token=%s", ln.Addr().String(), d.token)
+			if localTrust {
+				d.logger.Printf("dashboard:  http://%s/   (open on this machine — no token needed; `termada dashboard` opens it)", ln.Addr().String())
+			} else {
+				d.logger.Printf("dashboard:  http://%s/?token=%s", ln.Addr().String(), d.token)
+			}
 		}
 	}
 
@@ -306,7 +312,7 @@ func pingSocket(path string) bool {
 
 // tokenAuth enforces the dashboard token and guards against DNS-rebinding by
 // requiring a loopback Host/Origin (spec M12).
-func tokenAuth(token string, h http.Handler) http.Handler {
+func tokenAuth(token string, localTrust bool, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !hostLoopback(r.Host) {
 			http.Error(w, "forbidden host", http.StatusForbidden)
@@ -317,18 +323,23 @@ func tokenAuth(token string, h http.Handler) http.Handler {
 			return
 		}
 		// The token gates the API (the privileged surface). Static dashboard
-		// assets (the SPA, vendored xterm, css) are served freely on loopback —
-		// they hold no secrets and the page reads the token from its own URL for
-		// API calls. (Sub-resources can't carry the token, so gating them would
-		// break the page.) Anti-rebinding Host/Origin checks above still apply.
+		// assets (the SPA, vendored xterm, css) are served freely on loopback.
 		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/metrics" {
-			got := bearer(r)
-			if got == "" {
-				got = r.URL.Query().Get("token")
-			}
-			if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
+			// The Host + Origin checks above already reject every cross-site and
+			// DNS-rebinding request, so anything reaching here is a genuine
+			// same-machine client. In local-trust mode (the default) that's
+			// enough — no token, so http://127.0.0.1:7717 just works on your own
+			// machine. The token is still accepted, and REQUIRED when local-trust
+			// is off (shared / multi-user hosts).
+			if !localTrust {
+				got := bearer(r)
+				if got == "" {
+					got = r.URL.Query().Get("token")
+				}
+				if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
 			}
 		}
 		h.ServeHTTP(w, r)

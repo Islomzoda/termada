@@ -34,6 +34,13 @@ type DashboardConfig struct {
 	Enabled     bool   `yaml:"enabled"`
 	OpenBrowser bool   `yaml:"open_browser"`
 	Socket      string `yaml:"socket"` // uds | tcp
+	// LocalTrust: when true (the default), a request that already passed the
+	// loopback Host + Origin anti-rebinding checks is treated as a trusted
+	// same-machine client and served WITHOUT a token — so opening
+	// http://127.0.0.1:7717 on your own machine just works. Set false on shared /
+	// multi-user hosts to require the token even on loopback. A pointer so an
+	// absent field defaults to true (see daemon.localTrust).
+	LocalTrust *bool `yaml:"local_trust"`
 }
 
 type NotificationsConfig struct {

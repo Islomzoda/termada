@@ -73,6 +73,11 @@
   .srv-name .muted{font-size:11px}
   .amini{font-size:11px;color:var(--muted);padding:0 8px 6px 24px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .agent-name{font-weight:600;color:var(--blue)}
+  @media(max-width:760px){
+    .layout{grid-template-columns:1fr}
+    aside{max-height:42vh;border-right:none;border-bottom:1px solid var(--border)}
+    header{flex-wrap:wrap;gap:8px}
+  }
 </style>
 </head>
 <body>
@@ -283,13 +288,17 @@ async function refresh(){
   // agents: who connected, how often, what they did
   document.getElementById('agents').innerHTML=(s.agents&&s.agents.length)? s.agents.map(a=>{
     const ago=relTime(a.last_seen_unix);
-    return `<div class="item srv" title="first seen ${relTime(a.first_seen_unix)}">
-        <span class="srv-name agent-name">🤖 ${esc(a.id)}</span>
+    const online=(Date.now()/1000 - (a.last_seen_unix||0)) < 60;
+    const hist=(a.history||[]).slice().reverse().map(h=>'• '+h).join('\n');
+    const titleAttr=`first seen ${relTime(a.first_seen_unix)}${hist?'\nrecent:\n'+hist:''}`;
+    return `<div class="item srv" title="${esc(titleAttr)}">
+        <span class="srv-name agent-name"><span class="sdot" style="color:${online?'#3fb950':'#8b949e'}">●</span>${esc(a.id)}
+          <span class="muted">${online?'online':'idle · '+ago}</span></span>
         <span class="badge">×${a.connections||0} conn</span>
         <span class="badge">${a.jobs||0} jobs</span>
         ${a.sessions?`<span class="badge">${a.sessions} sess</span>`:''}
         ${a.denied?`<span class="badge st-failed">${a.denied} denied</span>`:''}
-      </div>${a.last_command?`<div class="amini">↳ ${esc(a.last_command)} · ${ago}</div>`:`<div class="amini">${ago}</div>`}`;
+      </div>${a.last_command?`<div class="amini" title="${esc(hist)}">↳ ${esc(a.last_command)} · ${ago}</div>`:''}`;
   }).join('') : '<div class="empty">none connected yet</div>';
 
   for(const key in terms){ if(!key.startsWith('job:')) continue; const id=key.slice(4); const j=lastJobs[id]; if(!j) continue;

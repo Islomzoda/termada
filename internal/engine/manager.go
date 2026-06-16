@@ -239,7 +239,7 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 			m.publishStarted(job)
 			m.watch(job)
 			m.autoAnswerWatch(job, owner)
-			m.touchAgent(owner, func(a *AgentStat) { a.Jobs++; a.LastCommand = cmdString(command) })
+			m.touchAgent(owner, func(a *AgentStat) { a.Jobs++; a.recordCommand(cmdString(command)) })
 		}
 	}
 	return job, err
@@ -313,7 +313,7 @@ func (m *Manager) watch(job *Job) {
 // awaiting_confirmation. A timer denies it by default after the configured
 // timeout (spec §18a: deny-by-default).
 func (m *Manager) enqueueConfirm(owner string, sess *Session, command []string, mode string, dec policy.Result) *Job {
-	m.touchAgent(owner, func(a *AgentStat) { a.Jobs++; a.LastCommand = cmdString(command) })
+	m.touchAgent(owner, func(a *AgentStat) { a.Jobs++; a.recordCommand(cmdString(command)) })
 	job := newConfirmJob(sess, command, mode)
 	cid := ids.New("cnf")
 	job.setConfirmID(cid)

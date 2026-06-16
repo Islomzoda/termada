@@ -190,8 +190,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if d.cfg.Dashboard.Enabled {
 		ln, err := net.Listen("tcp", d.cfg.HTTP.Bind)
 		if err != nil {
-			d.logger.Printf("warning: dashboard tcp listen failed: %v", err)
-		} else {
+			// Fatal, not a warning: a failed bind almost always means another
+			// daemon already holds the port. Half-running (UDS only, no dashboard)
+			// causes confusing split-brain state.
+			_ = os.Remove(SocketPath())
+			return fmt.Errorf("dashboard bind %s failed (another daemon already running?): %w", d.cfg.HTTP.Bind, err)
+		}
+		{
 			tcpSrv = &http.Server{Handler: tokenAuth(d.token, root)}
 			go func() { _ = tcpSrv.Serve(ln) }()
 			d.logger.Printf("dashboard:  http://%s/?token=%s", ln.Addr().String(), d.token)

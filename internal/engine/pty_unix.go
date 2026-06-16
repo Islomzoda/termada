@@ -7,7 +7,25 @@ import (
 	"os/exec"
 
 	"github.com/creack/pty"
+	"github.com/termada/termada/internal/errs"
 )
+
+// Signal delivers a signal to the running foreground command's process group
+// (spec EX-5/§18b). Returns not_found if only the session shell is running.
+func (p *ptyShell) Signal(name string) error {
+	sig, e := mapSignal(name)
+	if e != nil {
+		return e
+	}
+	pgid, err := foregroundPgid(p.f.Fd())
+	if err != nil {
+		return errs.New(errs.Internal, "foreground pgid: %v", err)
+	}
+	if pgid == p.pid() {
+		return errs.New(errs.NotFound, "no command is currently running")
+	}
+	return killGroup(pgid, sig)
+}
 
 // shellPath is the shell used for persistent-shell sessions. bash is required
 // for `set -m` (job control) which lets us signal a running command's process

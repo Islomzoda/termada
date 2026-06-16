@@ -12,3 +12,7 @@ import "errors"
 func startShell(cols, rows int) (*ptyShell, error) {
 	return nil, errors.New("local PTY sessions are not yet supported on Windows (ConPTY backend pending)")
 }
+
+func (p *ptyShell) Signal(name string) error {
+	return errors.New("signals are not supported on Windows yet")
+}

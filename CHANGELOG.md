@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## [0.7.0] — 2026-06-16
+
+The "road to 1.0" pass — closing the gaps from the self-review.
+
+### Added
+- **Persistent remote SSH sessions** (§14/P-10): `session_create target=<server>`
+  opens a live shell over SSH (vault creds, TOFU host key) running the same
+  marker-based exec protocol as local — cwd/env persist across commands, and the
+  agent gets the full exec/poll/write/kill surface remotely. Session transport is
+  now an interface (local PTY or SSH) behind one engine. *Integration-tested
+  against an in-process SSH server with a real bash PTY.*
+- **Execution heuristics** (§13): adaptive per-class timeouts (build/test/install/
+  db/network) and auto-backgrounding of long-running daemons (dev servers,
+  watchers, `compose up`, `tail -f`) instead of blocking; on timeout a job is left
+  running, not killed.
+- **Policy auto-answers** (IN-2) to confirmed prompts; **no-newline prompts now
+  surface immediately** to `awaiting_input` (fixed a reader hold-back bug).
+- **Agent observability**: online/offline, connection counts, jobs/sessions,
+  denied, last command + history; auto-detected agent names from MCP clientInfo.
+- **Audit log rotation** with verifiable sealed segments + **disk-full fail-closed**
+  for dangerous commands (RE-4/RE-7).
+- **Job GC** (EX-9), **Prometheus `/metrics`** (§8.6).
+- **Distribution**: Dockerfile (build-verified), `.deb`/`.rpm` + Homebrew via
+  goreleaser; **docs**: threat model (SECURITY.md) and plugin guide.
+- Integration tests for the control-plane HTTP API.
+
+### Fixed
+- Dashboard terminals (token gating broke vendored xterm), default port moved off
+  macOS AirPlay's :7000 to :7717, daemon double-bind now fatal.
+
 ## [0.6.0] — 2026-06-16
 
 Agent observability and automatic server status.

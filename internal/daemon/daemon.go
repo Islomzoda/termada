@@ -99,6 +99,15 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	runner := sshx.NewRunner(v, filepath.Join(RuntimeDir(), "known_hosts"), 20*time.Second)
 	fl := fleet.New(buildServers(cfg), runner, 5)
 	fl.LoadStore(filepath.Join(RuntimeDir(), "servers.json"))
+	// enable persistent remote sessions: session_create against a server name
+	// opens a shell over SSH (spec §14/P-10).
+	mgr.SetRemoteDialer(func(target string, cols, rows int) (engine.ShellConn, error) {
+		srv, ok := fl.Get(target)
+		if !ok {
+			return nil, fmt.Errorf("no server named %q", target)
+		}
+		return runner.OpenShell(srv, cols, rows)
+	})
 
 	plugins := plugin.New(filepath.Join(RuntimeDir(), "plugins"))
 	if err := plugins.Load(); err != nil {

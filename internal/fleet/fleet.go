@@ -117,6 +117,19 @@ func (m *Manager) ServerList() []ServerInfo {
 	return out
 }
 
+// Get returns the full server record (including the vault Auth reference) by
+// name. Used to open a remote session.
+func (m *Manager) Get(name string) (Server, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, s := range m.servers {
+		if s.Name == name {
+			return s, true
+		}
+	}
+	return Server{}, false
+}
+
 // LoadStore loads previously dashboard-added servers from path and merges them
 // into the inventory.
 func (m *Manager) LoadStore(path string) {

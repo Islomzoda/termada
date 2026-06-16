@@ -41,6 +41,7 @@ type Manager struct {
 	agentPolicies  map[string]string
 	timeoutClasses map[string]int // class name -> timeout ms (LR-2)
 	auditOK        func() bool    // audit health probe; dangerous ops fail closed if false
+	remoteDial     RemoteDialer   // opens a shell to a named remote server (wired by daemon)
 
 	persistPath string
 	snapshotDir string
@@ -91,6 +92,15 @@ func (m *Manager) SetPolicy(p *policy.Engine, agentPolicies map[string]string) {
 func (m *Manager) SetTimeoutClasses(classes map[string]int) {
 	m.timeoutClasses = classes
 }
+
+// RemoteDialer opens a persistent shell transport to a named remote target (a
+// configured server). It is wired by the daemon, which holds the server
+// inventory and the vault, so the engine stays free of SSH/vault dependencies.
+type RemoteDialer func(target string, cols, rows int) (ShellConn, error)
+
+// SetRemoteDialer installs the remote-session dialer (enables session_create
+// against a server name).
+func (m *Manager) SetRemoteDialer(d RemoteDialer) { m.remoteDial = d }
 
 // SetAuditHealth installs a probe for audit-log health. When it reports
 // unhealthy, dangerous (confirmation-gated) commands are refused — fail-closed
@@ -152,13 +162,24 @@ func (m *Manager) CreateSession(owner, target, mode string) (*Session, error) {
 	if target == "" {
 		target = "local"
 	}
-	if target != "local" {
-		return nil, errs.New(errs.NotSupported, "remote sessions are a phase-2 feature")
-	}
 	if mode == "" {
 		mode = "shell"
 	}
-	sess, err := newSession(owner, target, mode, SessionConfig{OutputRetentionBytes: m.cfg.OutputRetentionBytes}, m.redactor)
+	scfg := SessionConfig{OutputRetentionBytes: m.cfg.OutputRetentionBytes}
+	var sess *Session
+	var err error
+	if target == "local" {
+		sess, err = newSession(owner, target, mode, scfg, m.redactor)
+	} else {
+		if m.remoteDial == nil {
+			return nil, errs.New(errs.NotSupported, "remote sessions require a configured server and unlocked vault")
+		}
+		conn, derr := m.remoteDial(target, 200, 50)
+		if derr != nil {
+			return nil, errs.New(errs.ServerUnreachable, "connect to %s: %v", target, derr)
+		}
+		sess, err = newSessionConn(owner, target, mode, conn, scfg, m.redactor)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -586,26 +607,12 @@ func (m *Manager) Signal(jobID, signal string) error {
 	if err != nil {
 		return err
 	}
-	sig, serr := mapSignal(signal)
-	if serr != nil {
-		return serr
-	}
 	sess := job.sess
 	if sess.currentJob() != job {
 		return errs.New(errs.NotFound, "job %s is not currently running", jobID)
 	}
-	pgid, gerr := foregroundPgid(sess.shell.f.Fd())
-	if gerr != nil {
-		return errs.New(errs.Internal, "get foreground pgid: %v", gerr)
-	}
-	if pgid == sess.shell.pid() {
-		return errs.New(errs.NotFound, "no command is running in session %s", sess.ID)
-	}
 	job.requestKill(signal)
-	if kerr := killGroup(pgid, sig); kerr != nil {
-		return errs.New(errs.Internal, "signal: %v", kerr)
-	}
-	return nil
+	return sess.shell.Signal(signal)
 }
 
 // Kill force-terminates a job (SIGKILL to its process group).

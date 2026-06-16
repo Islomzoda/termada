@@ -34,7 +34,7 @@ type Session struct {
 
 	cfg      SessionConfig
 	redactor *output.Redactor
-	shell    *ptyShell
+	shell    ShellConn
 
 	// session-wide live terminal buffer: every byte the shell emits (across all
 	// jobs) is appended here so the dashboard can show one continuous terminal
@@ -57,6 +57,12 @@ func newSession(owner, target, mode string, cfg SessionConfig, redactor *output.
 	if err != nil {
 		return nil, errs.New(errs.Internal, "start shell: %v", err)
 	}
+	return newSessionConn(owner, target, mode, shell, cfg, redactor)
+}
+
+// newSessionConn builds a session over an arbitrary shell transport (local PTY
+// or remote SSH) and runs the init sequence over it.
+func newSessionConn(owner, target, mode string, shell ShellConn, cfg SessionConfig, redactor *output.Redactor) (*Session, error) {
 	s := &Session{
 		ID:        ids.New("sess"),
 		Target:    target,
@@ -77,13 +83,13 @@ func newSession(owner, target, mode string, cfg SessionConfig, redactor *output.
 	// kills).
 	job, err := s.runRaw("stty -echo -onlcr 2>/dev/null; set -m 2>/dev/null; true", nil, "init")
 	if err != nil {
-		shell.close()
+		shell.Close()
 		return nil, err
 	}
 	select {
 	case <-job.Done():
 	case <-time.After(5 * time.Second):
-		shell.close()
+		shell.Close()
 		return nil, errs.New(errs.Internal, "session init timed out")
 	}
 	s.mu.Lock()
@@ -125,7 +131,7 @@ func (s *Session) startJob(job *Job, line string) error {
 	//   RS "TERMADA:" <marker> ":" <exit> RS
 	payload := line + "; " +
 		fmt.Sprintf("printf '\\036TERMADA:%s:%%d\\036' \"$?\"\n", job.marker)
-	if _, err := s.shell.f.Write([]byte(payload)); err != nil {
+	if _, err := s.shell.Write([]byte(payload)); err != nil {
 		s.mu.Lock()
 		s.current = nil
 		s.mu.Unlock()
@@ -154,7 +160,7 @@ func (s *Session) runRaw(line string, command []string, mode string) (*Job, erro
 func (s *Session) readLoop() {
 	buf := make([]byte, 32*1024)
 	for {
-		n, err := s.shell.f.Read(buf)
+		n, err := s.shell.Read(buf)
 		if n > 0 {
 			s.consume(buf[:n])
 		}
@@ -286,7 +292,7 @@ func (s *Session) writeInput(b []byte) error {
 	if s.closed {
 		return errs.New(errs.NotFound, "session closed")
 	}
-	_, err := s.shell.f.Write(b)
+	_, err := s.shell.Write(b)
 	if err != nil {
 		return errs.New(errs.Internal, "pty write: %v", err)
 	}
@@ -318,7 +324,7 @@ func (s *Session) close() {
 	if job != nil {
 		job.finalize(-1, StatusKilled, "session closed")
 	}
-	s.shell.close()
+	_ = s.shell.Close()
 }
 
 var safeArg = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)

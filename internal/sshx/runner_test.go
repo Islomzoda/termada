@@ -3,6 +3,7 @@ package sshx
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"io"
 	"net"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
+	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/fleet"
 	"github.com/termada/termada/internal/vault"
 	"golang.org/x/crypto/ssh"
@@ -80,27 +83,41 @@ func serveConn(nConn net.Conn, cfg *ssh.ServerConfig) {
 		}
 		go func() {
 			for req := range requests {
-				if req.Type != "exec" {
-					_ = req.Reply(false, nil)
-					continue
-				}
-				var payload struct{ Command string }
-				_ = ssh.Unmarshal(req.Payload, &payload)
-				_ = req.Reply(true, nil)
-				cmd := exec.Command("/bin/sh", "-c", payload.Command)
-				cmd.Stdout = ch
-				cmd.Stderr = ch.Stderr()
-				code := 0
-				if err := cmd.Run(); err != nil {
-					if ee, ok := err.(*exec.ExitError); ok {
-						code = ee.ExitCode()
-					} else {
-						code = 1
+				switch req.Type {
+				case "pty-req":
+					_ = req.Reply(true, nil)
+				case "shell":
+					// interactive shell on a PTY (for persistent remote sessions)
+					_ = req.Reply(true, nil)
+					f, err := pty.Start(exec.Command("/bin/bash"))
+					if err != nil {
+						_ = ch.Close()
+						return
 					}
+					go func() { _, _ = io.Copy(f, ch) }() // channel -> pty
+					go func() { _, _ = io.Copy(ch, f) }() // pty -> channel
+					return
+				case "exec":
+					var payload struct{ Command string }
+					_ = ssh.Unmarshal(req.Payload, &payload)
+					_ = req.Reply(true, nil)
+					cmd := exec.Command("/bin/sh", "-c", payload.Command)
+					cmd.Stdout = ch
+					cmd.Stderr = ch.Stderr()
+					code := 0
+					if err := cmd.Run(); err != nil {
+						if ee, ok := err.(*exec.ExitError); ok {
+							code = ee.ExitCode()
+						} else {
+							code = 1
+						}
+					}
+					_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(code)}))
+					_ = ch.Close()
+					return
+				default:
+					_ = req.Reply(false, nil)
 				}
-				_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(code)}))
-				_ = ch.Close()
-				return
 			}
 		}()
 	}
@@ -178,5 +195,48 @@ func TestSSHViaFleet(t *testing.T) {
 	}
 	if res.Status != "ok" || len(res.Results) != 1 || res.Results[0].Status != "ok" {
 		t.Fatalf("fleet result = %+v", res)
+	}
+}
+
+func TestRemoteSessionOverSSH(t *testing.T) {
+	addr := startTestSSHServer(t, "sshpass")
+	r := newTestRunner(t, "sshpass")
+	srv := serverAt(t, addr)
+
+	m := engine.NewManager(engine.DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	m.SetRemoteDialer(func(target string, cols, rows int) (engine.ShellConn, error) {
+		return r.OpenShell(srv, cols, rows)
+	})
+
+	// open a PERSISTENT remote session (shell over SSH) and run two commands;
+	// cwd must persist between them just like a local session.
+	sess, err := m.CreateSession("agent", "remote", "shell")
+	if err != nil {
+		t.Fatalf("create remote session: %v", err)
+	}
+	wait := func(j *engine.Job) {
+		select {
+		case <-j.Done():
+		case <-time.After(8 * time.Second):
+			t.Fatalf("remote job did not finish (status=%v)", j.Snapshot().Status)
+		}
+	}
+	j1, err := m.Start("agent", sess.ID, []string{"cd", "/tmp"}, "")
+	if err != nil {
+		t.Fatalf("remote cd: %v", err)
+	}
+	wait(j1)
+	j2, err := m.Start("agent", sess.ID, []string{"pwd"}, "")
+	if err != nil {
+		t.Fatalf("remote pwd: %v", err)
+	}
+	wait(j2)
+	res, err := m.Poll(j2.ID, "")
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if !strings.Contains(res.StdoutChunk, "tmp") {
+		t.Fatalf("remote pwd = %q, want it to contain tmp (cwd persisted over SSH)", res.StdoutChunk)
 	}
 }

@@ -171,9 +171,9 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "session_create",
-		Description: "Create a persistent-shell session that preserves cwd/env between commands.",
+		Description: "Create a persistent-shell session that preserves cwd/env between commands. target=local, or a configured server name for a persistent remote SSH session.",
 		InputSchema: obj(map[string]any{
-			"target": map[string]any{"type": "string", "description": "local (remote is phase 2)"},
+			"target": map[string]any{"type": "string", "description": "\"local\" (default) or a configured server name for a remote SSH session"},
 			"mode":   map[string]any{"type": "string", "enum": []string{"shell"}},
 		}),
 		Handler: func(a map[string]any) (any, *errs.Error) {

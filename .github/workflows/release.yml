@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  packages: write   # push the Docker image to ghcr.io
 
 jobs:
   goreleaser:
@@ -20,6 +21,12 @@ jobs:
           go-version: '1.26'
       - name: Run tests before releasing
         run: go test ./...
+      - name: Log in to GHCR (for the Docker image)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: '~> v2'

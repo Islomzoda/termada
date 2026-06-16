@@ -38,6 +38,23 @@ archives:
       - LICENSE
       - CHANGELOG.md
 
+dockers:
+  # Publishes ghcr.io/islomzoda/termada (amd64) so the server is installable from
+  # an OCI package — what the official MCP registry / server.json points at.
+  - id: termada
+    ids: [termada]
+    goos: linux
+    goarch: amd64
+    dockerfile: Dockerfile.release
+    image_templates:
+      - "ghcr.io/islomzoda/termada:{{ .Version }}"
+      - "ghcr.io/islomzoda/termada:latest"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.source=https://github.com/Islomzoda/termada"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+
 nfpms:
   - id: termada
     package_name: termada

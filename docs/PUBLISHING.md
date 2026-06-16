@@ -53,17 +53,21 @@ to apply + verify in CI, since a broken docker step would fail the release.
 ### Official MCP Registry (registry.modelcontextprotocol.io)
 
 ```bash
-# 1. install the publisher CLI (Go is already set up here)
-go install github.com/modelcontextprotocol/registry/cmd/mcp-publisher@latest
+# 1. install the publisher CLI — download the prebuilt `mcp-publisher` binary
+#    from https://github.com/modelcontextprotocol/registry/releases
+#    (the `go install .../cmd/mcp-publisher` path does NOT exist in the module).
+#    e.g. on macOS:
+#    curl -fsSL https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_darwin_arm64.tar.gz | tar xz
 
-# 2. (optional) regenerate/validate server.json against the current schema
-mcp-publisher init        # writes a fresh server.json template; merge with ours
+# 2. (recommended) regenerate/validate server.json against the CURRENT schema —
+#    this is the source of truth for the `packages` block (ours is a draft):
+./mcp-publisher init      # writes a fresh server.json; merge our name/description/oci package
 
 # 3. authenticate — THIS step is yours (opens a GitHub OAuth device flow in your browser)
-mcp-publisher login github
+./mcp-publisher login github
 
-# 4. publish
-mcp-publisher publish
+# 4. publish (needs the ghcr.io/islomzoda/termada image to exist — i.e. after a release)
+./mcp-publisher publish
 ```
 
 The `io.github.Islomzoda/...` namespace is proven by the GitHub login. The

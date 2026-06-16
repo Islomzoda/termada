@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## [0.3.0] — 2026-06-16
+
+Remote access, files, recipes and notifications — the rest of phase 2.
+
+### Added
+- **Fleet / remote** (§14/§15): `fleet_run` executes a command across servers
+  selected by name or tag, with a bounded-parallelism aggregator and per-server
+  structured results (ok / nonzero_exit / unreachable / timeout / conn_lost /
+  denied) and a summary; `server_list` exposes the inventory with no secrets. SSH
+  backend uses `golang.org/x/crypto/ssh` with credentials from the vault and TOFU
+  host-key verification (rejects mismatches). *Live SSH needs a reachable server;
+  the selection/aggregation logic is unit-tested via a mock runner.*
+- **Vault unlock in the daemon** (§CR-5): `termada unlock` sends the passphrase to
+  the running daemon, which holds the key in memory and registers secret values
+  with the redactor so they can never echo back to an agent.
+- **File tools** (§16): `file_read` (with best-effort redaction + size limit) and
+  `file_write`.
+- **Recipes** (§19/RC-1): `recipe_list` and `recipe_run` execute configured
+  command macros step-by-step, each step policy-checked, stopping on failure.
+- **Notifications** (§8.3/OB-7): desktop (osascript / notify-send) and optional
+  Telegram on approval-needed, denial, failed jobs and agent connects.
+- CLI: `servers`, `unlock`.
+
+### MCP tools (18)
+exec_run, exec_start, exec_poll, exec_write, exec_signal, exec_kill, exec_list,
+session_create, session_list, session_close, logs_tail, file_read, file_write,
+recipe_list, recipe_run, server_list, fleet_run, capabilities.
+
 ## [0.2.0] — 2026-06-16
 
 Phase 2 + the phase-1 daemon pillar. termada is now a long-lived daemon with a

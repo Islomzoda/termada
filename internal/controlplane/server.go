@@ -14,6 +14,8 @@ import (
 	"github.com/termada/termada/internal/bus"
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/errs"
+	"github.com/termada/termada/internal/fleet"
+	"github.com/termada/termada/internal/vault"
 )
 
 // Server exposes the engine over HTTP/JSON.
@@ -21,12 +23,14 @@ type Server struct {
 	mgr     *engine.Manager
 	bus     *bus.Bus
 	audit   *audit.Logger
+	fleet   *fleet.Manager
+	vault   *vault.Vault
 	version string
 }
 
 // New builds a control-plane server.
-func New(mgr *engine.Manager, b *bus.Bus, a *audit.Logger, version string) *Server {
-	return &Server{mgr: mgr, bus: b, audit: a, version: version}
+func New(mgr *engine.Manager, b *bus.Bus, a *audit.Logger, fl *fleet.Manager, v *vault.Vault, version string) *Server {
+	return &Server{mgr: mgr, bus: b, audit: a, fleet: fl, vault: v, version: version}
 }
 
 // Mux returns the HTTP handler for the API and (later) the dashboard.
@@ -50,7 +54,111 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/api/stop_all", s.hStopAll)
 	mux.HandleFunc("/api/audit", s.hAudit)
 	mux.HandleFunc("/api/events", s.hEvents)
+	mux.HandleFunc("/api/file/read", s.hFileRead)
+	mux.HandleFunc("/api/file/write", s.hFileWrite)
+	mux.HandleFunc("/api/recipe/list", s.hRecipeList)
+	mux.HandleFunc("/api/recipe/run", s.hRecipeRun)
+	mux.HandleFunc("/api/servers", s.hServers)
+	mux.HandleFunc("/api/fleet/run", s.hFleetRun)
+	mux.HandleFunc("/api/vault/unlock", s.hVaultUnlock)
+	mux.HandleFunc("/api/vault/status", s.hVaultStatus)
 	return mux
+}
+
+func (s *Server) hServers(w http.ResponseWriter, r *http.Request) {
+	if s.fleet == nil {
+		writeJSON(w, map[string]any{"servers": []any{}})
+		return
+	}
+	writeJSON(w, map[string]any{"servers": s.fleet.ServerList()})
+}
+
+func (s *Server) hFleetRun(w http.ResponseWriter, r *http.Request) {
+	if s.fleet == nil {
+		writeErr(w, errs.New(errs.NotSupported, "no servers configured"))
+		return
+	}
+	var req struct {
+		Command     []string `json:"command"`
+		Servers     []string `json:"servers"`
+		Tags        []string `json:"tags"`
+		Parallelism int      `json:"parallelism"`
+	}
+	_ = decode(r, &req)
+	selector := append(append([]string{}, req.Servers...), req.Tags...)
+	res, err := s.fleet.Run(req.Command, selector, req.Parallelism)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, res)
+}
+
+func (s *Server) hVaultUnlock(w http.ResponseWriter, r *http.Request) {
+	if s.vault == nil {
+		writeErr(w, errs.New(errs.NotSupported, "no vault configured"))
+		return
+	}
+	var req struct {
+		Passphrase string `json:"passphrase"`
+	}
+	_ = decode(r, &req)
+	if err := s.vault.Unlock(req.Passphrase); err != nil {
+		writeErr(w, errs.New(errs.VaultLocked, "%v", err))
+		return
+	}
+	// Register secrets with the redactor so they can never echo back to agents.
+	for _, val := range s.vault.Values() {
+		s.mgr.Redactor().AddLiteral(val)
+	}
+	writeJSON(w, map[string]any{"ok": true, "secrets": len(s.vault.List())})
+}
+
+func (s *Server) hVaultStatus(w http.ResponseWriter, r *http.Request) {
+	locked := true
+	exists := false
+	if s.vault != nil {
+		locked = s.vault.Locked()
+		exists = s.vault.Exists()
+	}
+	writeJSON(w, map[string]any{"exists": exists, "locked": locked})
+}
+
+func (s *Server) hFileRead(w http.ResponseWriter, r *http.Request) {
+	var req execReq
+	_ = decode(r, &req)
+	res, err := s.mgr.FileRead(req.Path, req.MaxBytes)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, res)
+}
+
+func (s *Server) hFileWrite(w http.ResponseWriter, r *http.Request) {
+	var req execReq
+	_ = decode(r, &req)
+	res, err := s.mgr.FileWrite(req.Path, req.Content, req.FileMode)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, res)
+}
+
+func (s *Server) hRecipeList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"recipes": s.mgr.RecipeList()})
+}
+
+func (s *Server) hRecipeRun(w http.ResponseWriter, r *http.Request) {
+	var req execReq
+	_ = decode(r, &req)
+	res, err := s.mgr.RunRecipe(req.Owner, req.Session, req.Name)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, res)
 }
 
 // ---- helpers ----
@@ -93,6 +201,11 @@ type execReq struct {
 	SessionID     string   `json:"session_id"`
 	ConfirmID     string   `json:"confirmation_id"`
 	By            string   `json:"by"`
+	Path          string   `json:"path"`
+	MaxBytes      int      `json:"max_bytes"`
+	Content       string   `json:"content"`
+	FileMode      string   `json:"file_mode"`
+	Name          string   `json:"name"`
 }
 
 func (s *Server) hSessionCreate(w http.ResponseWriter, r *http.Request) {

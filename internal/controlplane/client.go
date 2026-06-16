@@ -11,6 +11,7 @@ import (
 
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/errs"
+	"github.com/termada/termada/internal/fleet"
 )
 
 // Client talks to a running daemon's control-plane over a Unix socket. It
@@ -144,6 +145,67 @@ func (c *Client) Tail(jobID, cursor string) (*engine.TailResult, error) {
 		return nil, err
 	}
 	return &out, nil
+}
+
+func (c *Client) FileRead(path string, maxBytes int) (*engine.FileReadResult, error) {
+	var out engine.FileReadResult
+	err := c.post("/api/file/read", execReq{Path: path, MaxBytes: maxBytes}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) FileWrite(path, content, mode string) (*engine.FileWriteResult, error) {
+	var out engine.FileWriteResult
+	err := c.post("/api/file/write", execReq{Path: path, Content: content, FileMode: mode}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) RecipeList() []engine.RecipeInfo {
+	var out struct {
+		Recipes []engine.RecipeInfo `json:"recipes"`
+	}
+	_ = c.get("/api/recipe/list", &out)
+	return out.Recipes
+}
+
+func (c *Client) RecipeRun(owner, session, name string) (*engine.RecipeRunResult, error) {
+	var out engine.RecipeRunResult
+	err := c.post("/api/recipe/run", execReq{Owner: owner, Session: session, Name: name}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) ServerList() []fleet.ServerInfo {
+	var out struct {
+		Servers []fleet.ServerInfo `json:"servers"`
+	}
+	_ = c.get("/api/servers", &out)
+	return out.Servers
+}
+
+func (c *Client) FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error) {
+	body := map[string]any{"command": command, "servers": selector, "parallelism": parallelism}
+	var out fleet.RunResult
+	if err := c.post("/api/fleet/run", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Unlock sends the vault passphrase to the daemon.
+func (c *Client) Unlock(passphrase string) (int, error) {
+	var out struct {
+		Secrets int `json:"secrets"`
+	}
+	err := c.post("/api/vault/unlock", map[string]string{"passphrase": passphrase}, &out)
+	return out.Secrets, err
 }
 
 // ---- human/CLI calls ----

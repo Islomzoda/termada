@@ -25,7 +25,11 @@ import (
 	"github.com/termada/termada/internal/controlplane"
 	"github.com/termada/termada/internal/dashboard"
 	"github.com/termada/termada/internal/engine"
+	"github.com/termada/termada/internal/fleet"
+	"github.com/termada/termada/internal/notify"
 	"github.com/termada/termada/internal/policy"
+	"github.com/termada/termada/internal/sshx"
+	"github.com/termada/termada/internal/vault"
 )
 
 // RuntimeDir is where the socket, token and audit log live.
@@ -51,6 +55,8 @@ type Daemon struct {
 	mgr     *engine.Manager
 	bus     *bus.Bus
 	audit   *audit.Logger
+	vault   *vault.Vault
+	fleet   *fleet.Manager
 	token   string
 }
 
@@ -75,16 +81,22 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	mgr := engine.NewManager(ec)
 	mgr.SetBus(b)
 	mgr.SetPolicy(policy.NewEngine(buildPolicies(cfg)), buildAgentPolicies(cfg))
+	mgr.SetRecipes(buildRecipes(cfg))
 
 	// audit uses the same redactor as the engine so secrets are masked in the log.
 	aud.SetRedactor(mgr.Redactor())
+
+	v := vault.New(config.ExpandPath(cfg.Vault.File))
+	runner := sshx.NewRunner(v, filepath.Join(RuntimeDir(), "known_hosts"), 20*time.Second)
+	fl := fleet.New(buildServers(cfg), runner, 5)
 
 	token, err := loadOrCreateToken()
 	if err != nil {
 		return nil, err
 	}
 
-	return &Daemon{cfg: cfg, version: version, logger: logger, mgr: mgr, bus: b, audit: aud, token: token}, nil
+	return &Daemon{cfg: cfg, version: version, logger: logger, mgr: mgr, bus: b, audit: aud,
+		vault: v, fleet: fl, token: token}, nil
 }
 
 // Run starts the listeners and blocks until ctx is cancelled.
@@ -104,7 +116,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}()
 	defer cancelSub()
 
-	cp := controlplane.New(d.mgr, d.bus, d.audit, d.version)
+	// Notifications (desktop + optional Telegram) on key events.
+	notifier := notify.New(d.cfg.Notifications.Desktop, notify.TelegramConfig{
+		Enabled:  d.cfg.Notifications.Telegram.Enabled,
+		BotToken: d.cfg.Notifications.Telegram.BotToken,
+		ChatID:   d.cfg.Notifications.Telegram.ChatID,
+	})
+	nch, cancelNotify := d.bus.Subscribe(256)
+	go notifier.Subscribe(nch)
+	defer cancelNotify()
+
+	cp := controlplane.New(d.mgr, d.bus, d.audit, d.fleet, d.vault, d.version)
 	root := http.NewServeMux()
 	root.Handle("/api/", cp.Mux())
 	root.Handle("/", dashboard.Handler())
@@ -162,6 +184,24 @@ func buildAgentPolicies(cfg config.Config) map[string]string {
 	out := map[string]string{}
 	for _, a := range cfg.Agents {
 		out[a.ID] = a.Policy
+	}
+	return out
+}
+
+func buildServers(cfg config.Config) []fleet.Server {
+	out := make([]fleet.Server, 0, len(cfg.Servers))
+	for _, s := range cfg.Servers {
+		out = append(out, fleet.Server{
+			Name: s.Name, Host: s.Host, Port: s.Port, User: s.User, Auth: s.Auth, Tags: s.Tags,
+		})
+	}
+	return out
+}
+
+func buildRecipes(cfg config.Config) map[string]engine.Recipe {
+	out := map[string]engine.Recipe{}
+	for name, rc := range cfg.Recipes {
+		out[name] = engine.Recipe{Name: name, Target: rc.Target, Steps: rc.Steps}
 	}
 	return out
 }

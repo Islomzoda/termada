@@ -3,95 +3,110 @@
 **The reliable, transparent terminal runtime for AI agents.**
 
 Termada is a single-binary, local-first runtime that sits between an AI agent and
-the terminal (local now, remote over SSH in a later phase). The agent talks to it
-over the [Model Context Protocol](https://modelcontextprotocol.io) and gets a
-sturdy toolset instead of a raw shell: commands that don't hang, persistent
-sessions that keep `cwd`/env, async jobs with streamed output, PTY input for
-interactive prompts, structured results — and (coming next) a live dashboard so a
-human can see and stop everything in real time.
+the terminal (local, and remote over SSH). The agent talks to it over the
+[Model Context Protocol](https://modelcontextprotocol.io) and gets a sturdy
+toolset instead of a raw shell: commands that don't hang, persistent sessions
+that keep `cwd`/env, async jobs with streamed output, PTY input for interactive
+prompts, structured results — while a human watches and controls everything from
+a live dashboard with a kill-switch and approval queue.
 
-> Status: **0.x, phase 1 (local engine).** See [docs/tz/Termada-TZ.md](docs/tz/Termada-TZ.md)
-> for the full product spec and the phased roadmap (§30). License: Apache-2.0.
+> Status: **0.3.0 — phases 1 & 2.** See [docs/tz/Termada-TZ.md](docs/tz/Termada-TZ.md)
+> for the full spec / roadmap (§30) and [CHANGELOG.md](CHANGELOG.md). License: Apache-2.0.
 
-## What works today (phase 1)
+## What works
 
-- Persistent-shell sessions over a PTY that preserve `cwd`, env and venv (SS-1/SS-3).
-- Async job model: `exec_start` returns a `job_id` immediately; poll incrementally by cursor (EX-2/EX-3).
-- Convenience `exec_run` with timeout and auto-background of long-running commands (EX-7).
-- PTY input for prompts via `exec_write`, with `secret` redaction for passwords (EX-4/IN-3).
-- Signals / kill by process group, with clean job-control isolation (EX-5/§18b).
-- Output processing: stateful ANSI/VT cleaning, CR-collapse, head/tail retention, best-effort secret redaction (OUT-3/OUT-5).
-- Full job status enum and a structured error catalog (§22a/§22b).
-- A dependency-light MCP server over newline-delimited JSON-RPC on stdio (§22).
+**Engine (phase 1)**
+- Persistent-shell sessions over a PTY that keep `cwd`/env/venv; one foreground command per session.
+- Async jobs: `exec_start` → `job_id`; poll incrementally by a stable cursor; full status state machine + structured errors.
+- PTY input for prompts (`exec_write`, `secret` redaction); signals/kill by process group.
+- Stateful ANSI/VT cleaning, CR-collapse, bounded retention, best-effort secret redaction.
 
-Not yet (later phases): the long-lived daemon + dashboard/TUI, SSH/fleet, vault,
-policy engine, tamper-evident audit, Windows parity. The code is structured so the
-engine becomes the core the daemon hosts.
+**Daemon, observability & control (phase 1 pillar)**
+- Long-lived daemon with a control-plane over a Unix socket; `serve --stdio` is a thin shim that proxies MCP to it (auto-spawn + in-process fallback) — so multiple agents share one dashboard.
+- Live web dashboard (sessions, jobs, SSE activity feed, **approval queue**, **Stop-All**) with token auth + anti-DNS-rebinding.
+- TUI (`termada top`) and a full inspection CLI.
+- Tamper-evident, hash-chained, secret-redacted audit log (`termada audit verify`).
+
+**Security & remote (phase 2)**
+- Policy engine: argv-level allow/deny/confirm; dangerous commands park in an approval queue (deny-by-default timeout; agents can't self-approve).
+- age-encrypted vault (CGO-free); secrets never returned to agents; unlocked into the daemon via `termada unlock`.
+- Fleet: `fleet_run` across servers by name/tag with structured per-server results; SSH with vault creds + TOFU host keys.
+- File tools, recipes, and desktop/Telegram notifications.
+
+Genuinely not done yet: on-disk registry crash-recovery (phase 3), Windows ConPTY,
+plugins, snapshots/undo, code-signing/auto-update (phase 4). The SSH execution
+path needs a reachable server to exercise live.
 
 ## Quick start
 
-Install the binary (needs Go 1.26+):
-
 ```bash
-./install.sh          # builds and installs to ~/.local/bin/termada
-# or:  make install   # same, honours BIN_DIR=
-# or:  make build     # just ./bin/termada
+./install.sh          # builds & installs ~/.local/bin/termada (needs Go 1.26+)
+termada serve         # start the daemon (prints the dashboard URL + token)
 ```
 
-Register it with your MCP client.
+Register the MCP shim with your client (Claude Code):
 
-**Claude Code:**
 ```bash
-claude mcp add termada -- ~/.local/bin/termada serve
+claude mcp add termada -- ~/.local/bin/termada serve --stdio
 ```
-or drop a `.mcp.json` at your project root (copy `.mcp.json.example`); use the
-absolute path to the binary if `~/.local/bin` is not on your PATH:
+
+or a project `.mcp.json` (see `.mcp.json.example`):
+
 ```json
-{ "mcpServers": { "termada": { "command": "/Users/you/.local/bin/termada", "args": ["serve"] } } }
+{ "mcpServers": { "termada": { "command": "/abs/path/termada", "args": ["serve","--stdio"] } } }
 ```
 
-**Cursor / Claude Desktop:** add the same `mcpServers` block to the client's MCP
-config file.
+## Commands
 
-Verify it works by hand over stdio:
-
-```bash
-printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"cli","version":"0"}}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exec_run","arguments":{"command":["echo","hi from termada"]}}}' \
-  | termada serve
+```
+termada serve [--stdio]            daemon, or the MCP shim
+termada status | top               overview / live TUI
+termada jobs [-f] | sessions       list jobs / sessions
+termada logs <job> [-f]            stream a job's output
+termada kill <job> | stop          kill a job / kill-switch (stop all)
+termada pending | approve | deny   human-in-the-loop approvals
+termada audit [verify]             audit feed / verify the tamper chain
+termada servers | unlock           remote inventory / unlock the vault
+termada vault init|set|list|rm     manage credentials
 ```
 
-You should see an `initialize` reply and a tool result containing
-`"stdout": "hi from termada\n"`.
-
-## Tools (phase 1)
+## MCP tools (18)
 
 `exec_run` · `exec_start` · `exec_poll` · `exec_write` · `exec_signal` ·
 `exec_kill` · `exec_list` · `session_create` · `session_list` · `session_close` ·
-`logs_tail` · `capabilities`
+`logs_tail` · `file_read` · `file_write` · `recipe_list` · `recipe_run` ·
+`server_list` · `fleet_run` · `capabilities`
 
-Commands are passed as an **argv array** (e.g. `["echo","hi"]`), not a shell
-string: arguments are safely quoted so shell metacharacters are inert (spec R3).
+Commands are passed as an **argv array** (`["echo","hi"]`), not a shell string:
+arguments are quoted so shell metacharacters are inert (spec R3).
 
 ## Layout
 
 ```
-cmd/termada        CLI entrypoint (serve --stdio, version)
-internal/engine    sessions, jobs, PTY, status state machine, signals
-internal/output    cursor buffers, VT cleaner, best-effort redaction
-internal/mcp       minimal MCP JSON-RPC stdio server + tools
-internal/errs      structured error contract (§22b)
-internal/ids       id / marker generation
-docs/tz            product specification (Russian working spec)
+cmd/termada            CLI: daemon, shim, inspection/control, vault
+internal/engine        sessions, jobs, PTY, status machine, signals, files, recipes
+internal/output        cursor buffers, VT cleaner, redaction
+internal/policy        argv allow/deny/confirm classification
+internal/vault         age-encrypted credential store
+internal/audit         hash-chained tamper-evident log
+internal/bus           event bus (best-effort observability / durable audit)
+internal/daemon        long-lived process: listeners, auth, lifecycle
+internal/controlplane  HTTP/JSON API server + client (mcp.Backend over UDS)
+internal/dashboard     embedded web UI
+internal/tui           `termada top`
+internal/fleet         server selection + concurrent aggregation
+internal/sshx          SSH runner (vault creds, TOFU host keys)
+internal/mcp           MCP JSON-RPC stdio server + tools + backend interface
+internal/{config,errs,ids,notify}
+docs/tz                product specification
 ```
 
 ## Development
 
 ```bash
-make vet test       # vet + tests
-make race           # tests under the race detector
+make vet test    # vet + tests
+make race        # tests under the race detector
 ```
 
-The engine tests exercise a real PTY and `bash`, so they are integration tests by
-nature (spec RL-1).
+Engine tests exercise a real PTY and `bash`; fleet logic is unit-tested with a
+mock runner; the daemon stack is integration-tested end-to-end.

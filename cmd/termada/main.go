@@ -32,7 +32,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -66,6 +66,10 @@ func main() {
 		cmdTop()
 	case "vault":
 		cmdVault(os.Args[2:])
+	case "unlock":
+		cmdUnlock()
+	case "servers":
+		cmdServers()
 	case "setup":
 		cmdSetup()
 	case "version", "--version", "-v":
@@ -382,6 +386,28 @@ func cmdVault(args []string) {
 	default:
 		fmt.Fprintln(os.Stderr, "unknown vault subcommand:", args[0])
 		os.Exit(2)
+	}
+}
+
+func cmdUnlock() {
+	c := mustClient()
+	pass := readPassphrase("Vault passphrase: ")
+	n, err := c.Unlock(pass)
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Printf("vault unlocked (%d secrets available to the daemon)\n", n)
+}
+
+func cmdServers() {
+	c := mustClient()
+	servers := c.ServerList()
+	if len(servers) == 0 {
+		fmt.Println("no servers configured")
+		return
+	}
+	for _, s := range servers {
+		fmt.Printf("%-16s %s@%s  %v\n", s.Name, s.User, s.Host, s.Tags)
 	}
 }
 

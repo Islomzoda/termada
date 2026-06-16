@@ -45,6 +45,7 @@ type Manager struct {
 	jobs     map[string]*Job
 	defaults map[string]string          // owner -> default session id
 	pending  map[string]*pendingConfirm // confirmation_id -> pending exec
+	recipes  map[string]Recipe
 }
 
 // NewManager builds a manager.
@@ -57,6 +58,7 @@ func NewManager(cfg Config) *Manager {
 		jobs:          map[string]*Job{},
 		defaults:      map[string]string{},
 		pending:       map[string]*pendingConfirm{},
+		recipes:       map[string]Recipe{},
 	}
 }
 

@@ -220,6 +220,84 @@ func (s *Server) registerTools() {
 	})
 
 	s.add(toolDef{
+		Name:        "file_read",
+		Description: "Read a local file (secrets are best-effort redacted). Returns content, truncated and size.",
+		InputSchema: obj(map[string]any{
+			"path":      strSchema,
+			"max_bytes": intSchema,
+		}, "path"),
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			res, err := mgr.FileRead(argString(a, "path"), argInt(a, "max_bytes"))
+			return res, asErr(err)
+		},
+	})
+
+	s.add(toolDef{
+		Name:        "file_write",
+		Description: "Write content to a local file. mode 'append' appends, otherwise truncates.",
+		InputSchema: obj(map[string]any{
+			"path":    strSchema,
+			"content": strSchema,
+			"mode":    map[string]any{"type": "string", "enum": []string{"truncate", "append"}},
+		}, "path", "content"),
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			res, err := mgr.FileWrite(argString(a, "path"), argString(a, "content"), argString(a, "mode"))
+			return res, asErr(err)
+		},
+	})
+
+	s.add(toolDef{
+		Name:        "recipe_list",
+		Description: "List configured command recipes.",
+		InputSchema: emptySchema,
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			return map[string]any{"recipes": mgr.RecipeList()}, nil
+		},
+	})
+
+	s.add(toolDef{
+		Name:        "recipe_run",
+		Description: "Run a named recipe's steps in order, stopping on the first failure.",
+		InputSchema: obj(map[string]any{
+			"name":    strSchema,
+			"session": strSchema,
+		}, "name"),
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			res, err := mgr.RecipeRun(agent, argString(a, "session"), argString(a, "name"))
+			return res, asErr(err)
+		},
+	})
+
+	s.add(toolDef{
+		Name:        "server_list",
+		Description: "List configured remote servers (names/hosts/tags only — no secrets).",
+		InputSchema: emptySchema,
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			return map[string]any{"servers": mgr.ServerList()}, nil
+		},
+	})
+
+	s.add(toolDef{
+		Name:        "fleet_run",
+		Description: "Run a command across servers selected by name and/or tag, returning per-server results. Not atomic.",
+		InputSchema: obj(map[string]any{
+			"command":     argvSchema,
+			"servers":     map[string]any{"type": "array", "items": strSchema},
+			"tags":        map[string]any{"type": "array", "items": strSchema},
+			"parallelism": intSchema,
+		}, "command"),
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			argv, e := argArgv(a, "command")
+			if e != nil {
+				return nil, e
+			}
+			selector := append(argStrings(a, "servers"), argStrings(a, "tags")...)
+			res, err := mgr.FleetRun(argv, selector, argInt(a, "parallelism"))
+			return res, asErr(err)
+		},
+	})
+
+	s.add(toolDef{
 		Name:        "capabilities",
 		Description: "Report this agent's identity, the API version, available tools and execution modes.",
 		InputSchema: emptySchema,
@@ -268,6 +346,20 @@ func argInt(a map[string]any, k string) int {
 		return v
 	}
 	return 0
+}
+
+func argStrings(a map[string]any, k string) []string {
+	raw, ok := a[k].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, e := range raw {
+		if sv, ok := e.(string); ok {
+			out = append(out, sv)
+		}
+	}
+	return out
 }
 
 func argArgv(a map[string]any, k string) ([]string, *errs.Error) {

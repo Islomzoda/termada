@@ -1,6 +1,10 @@
 package mcp
 
-import "github.com/termada/termada/internal/engine"
+import (
+	"github.com/termada/termada/internal/engine"
+	"github.com/termada/termada/internal/errs"
+	"github.com/termada/termada/internal/fleet"
+)
 
 // Backend is the set of operations the MCP tools need. It is satisfied both by
 // an in-process engine (LocalBackend) and by a client that proxies to a running
@@ -18,6 +22,12 @@ type Backend interface {
 	ListSessions() []engine.SessionInfo
 	CloseSession(id string) error
 	Tail(jobID, cursor string) (*engine.TailResult, error)
+	FileRead(path string, maxBytes int) (*engine.FileReadResult, error)
+	FileWrite(path, content, mode string) (*engine.FileWriteResult, error)
+	RecipeList() []engine.RecipeInfo
+	RecipeRun(owner, session, name string) (*engine.RecipeRunResult, error)
+	ServerList() []fleet.ServerInfo
+	FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error)
 }
 
 // LocalBackend adapts an in-process *engine.Manager to the Backend interface.
@@ -64,4 +74,26 @@ func (b *LocalBackend) ListSessions() []engine.SessionInfo { return b.m.ListSess
 func (b *LocalBackend) CloseSession(id string) error       { return b.m.CloseSession(id) }
 func (b *LocalBackend) Tail(jobID, cursor string) (*engine.TailResult, error) {
 	return b.m.Tail(jobID, cursor)
+}
+
+func (b *LocalBackend) FileRead(path string, maxBytes int) (*engine.FileReadResult, error) {
+	return b.m.FileRead(path, maxBytes)
+}
+
+func (b *LocalBackend) FileWrite(path, content, mode string) (*engine.FileWriteResult, error) {
+	return b.m.FileWrite(path, content, mode)
+}
+
+func (b *LocalBackend) RecipeList() []engine.RecipeInfo { return b.m.RecipeList() }
+
+func (b *LocalBackend) RecipeRun(owner, session, name string) (*engine.RecipeRunResult, error) {
+	return b.m.RunRecipe(owner, session, name)
+}
+
+// ServerList / FleetRun are daemon-only (they need the vault and server
+// inventory); the in-process fallback has neither.
+func (b *LocalBackend) ServerList() []fleet.ServerInfo { return nil }
+
+func (b *LocalBackend) FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error) {
+	return nil, errs.New(errs.NotSupported, "fleet requires a running daemon (run: termada serve)")
 }

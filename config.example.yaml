@@ -1,0 +1,61 @@
+# termada config — copy to ~/.config/termada/config.yaml
+# Credentials live in the encrypted vault (termada vault ...), never here.
+
+dashboard:
+  enabled: true
+  open_browser: false
+http:
+  bind: 127.0.0.1:7000
+
+notifications:
+  desktop: true
+  telegram:
+    enabled: false
+    bot_token: ${TG_TOKEN}
+    chat_id: ${TG_CHAT}
+    allowed_user_ids: []
+
+defaults:
+  timeout_ms: 30000
+  output_retention_bytes: 5000000
+  max_foreground_jobs: 8
+  confirm_timeout_ms: 120000
+
+vault:
+  backend: encrypted_file        # encrypted_file (age, default) | keychain
+  file: ~/.config/termada/vault.age
+
+agents:
+  - id: claude-code
+    policy: prod-safe
+  - id: cursor
+    policy: read-only
+
+policies:
+  prod-safe:
+    deny: ["rm -rf /", "DROP DATABASE"]
+    confirm: ["rm -rf*", "DROP*", "systemctl stop*"]
+    auto_answer:
+      - { match: "[Y/n]", send: "y" }     # safe prompts only; host-key is NOT auto-answered
+  read-only:
+    allow: ["ls", "cat", "tail", "git status", "docker ps"]
+    deny: ["*"]
+
+redaction:
+  - "(?i)api[_-]?key\\s*=\\s*\\S+"
+
+servers:
+  - name: prod
+    host: prod.example.com
+    user: deploy
+    auth: prod-ssh-key            # references a vault entry, not the key itself
+    tags: [web, prod]
+    tmux: auto
+
+recipes:
+  deploy:
+    target: prod
+    steps:
+      - ["git", "pull"]
+      - ["docker", "compose", "build"]
+      - ["docker", "compose", "up", "-d"]

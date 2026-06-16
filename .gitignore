@@ -1,0 +1,23 @@
+# Build artifacts
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local runtime / config
+*.age
+/tmp/
+
+# Machine-specific MCP registration (committed template is .mcp.json.example)
+/.mcp.json
+
+# Transient Claude Code local state (the termada skill under .claude/skills IS tracked)
+/.claude/scheduled_tasks.lock
+/.claude/settings.local.json

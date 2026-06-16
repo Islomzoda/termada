@@ -36,9 +36,10 @@ type Manager struct {
 	cfg      Config
 	redactor *output.Redactor
 
-	bus           *bus.Bus
-	pol           *policy.Engine
-	agentPolicies map[string]string
+	bus            *bus.Bus
+	pol            *policy.Engine
+	agentPolicies  map[string]string
+	timeoutClasses map[string]int // class name -> timeout ms (LR-2)
 
 	persistPath string
 	snapshotDir string
@@ -83,6 +84,24 @@ func (m *Manager) SetPolicy(p *policy.Engine, agentPolicies map[string]string) {
 	if agentPolicies != nil {
 		m.agentPolicies = agentPolicies
 	}
+}
+
+// SetTimeoutClasses installs the per-class adaptive timeouts (LR-2).
+func (m *Manager) SetTimeoutClasses(classes map[string]int) {
+	m.timeoutClasses = classes
+}
+
+// classTimeout returns the adaptive timeout (ms) for a command: per-class if
+// configured, else the global default. A class value of 0 ("no limit") falls
+// back to the default so exec_run doesn't block forever.
+func (m *Manager) classTimeout(argv []string) int {
+	if v, ok := m.timeoutClasses[classify(argv)]; ok && v > 0 {
+		return v
+	}
+	if v, ok := m.timeoutClasses["default"]; ok && v > 0 {
+		return v
+	}
+	return m.cfg.DefaultTimeoutMS
 }
 
 // Policy returns the policy engine (may be nil).
@@ -363,14 +382,28 @@ func (m *Manager) Run(owner, sessionID string, command []string, mode string, ti
 	if err != nil {
 		return nil, err
 	}
-	if timeoutMS <= 0 {
-		timeoutMS = m.cfg.DefaultTimeoutMS
-	}
-	// background mode hands control back almost immediately after a short grace
-	// to capture any startup output; auto/foreground wait up to the timeout.
-	wait := time.Duration(timeoutMS) * time.Millisecond
-	if mode == ModeBackground {
+	// Choose how long to wait before handing control back (spec LR-1/LR-2):
+	//   - background mode: short grace to capture startup output, then return;
+	//   - auto mode + daemon signature (dev server/watcher): same short grace;
+	//   - otherwise: wait up to the adaptive (per-class) or explicit timeout.
+	// On timeout the job is NOT killed — it is reported as backgrounded so the
+	// agent gets control back and can poll/kill it.
+	autoBg := mode == ModeAuto || mode == ""
+	var wait time.Duration
+	reason := ""
+	switch {
+	case mode == ModeBackground:
 		wait = 250 * time.Millisecond
+		reason = "started in background"
+	case autoBg && isDaemon(command):
+		wait = 1500 * time.Millisecond
+		reason = "auto-backgrounded (long-running command)"
+	default:
+		if timeoutMS <= 0 {
+			timeoutMS = m.classTimeout(command)
+		}
+		wait = time.Duration(timeoutMS) * time.Millisecond
+		reason = "still running after timeout; left running in background"
 	}
 	select {
 	case <-job.Done():
@@ -378,8 +411,11 @@ func (m *Manager) Run(owner, sessionID string, command []string, mode string, ti
 	}
 	chunk, next, gap := job.clean.ReadFrom(0)
 	info := job.info()
-	if !info.Status.Terminal() && mode == ModeBackground {
+	if !info.Status.Terminal() {
 		info.Status = StatusBackgrounded
+		if info.Reason == "" {
+			info.Reason = reason
+		}
 	}
 	return &RunResult{
 		Info:       info,

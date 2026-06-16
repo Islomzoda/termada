@@ -84,6 +84,7 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	mgr.SetBus(b)
 	mgr.SetPolicy(policy.NewEngine(buildPolicies(cfg)), buildAgentPolicies(cfg))
 	mgr.SetRecipes(buildRecipes(cfg))
+	mgr.SetTimeoutClasses(cfg.TimeoutClasses)
 	if err := mgr.EnablePersistence(filepath.Join(RuntimeDir(), "registry.json")); err != nil {
 		logger.Printf("warning: registry recovery failed: %v", err)
 	}

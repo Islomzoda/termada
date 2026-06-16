@@ -389,10 +389,18 @@ type PollResult struct {
 	StdoutChunk string `json:"stdout_chunk"`
 	NextCursor  string `json:"next_cursor"`
 	Gap         bool   `json:"gap,omitempty"`
+	OutputHeld  bool   `json:"output_held,omitempty"`
 }
 
-// Poll returns incremental output from the cursor onward plus current status.
+// Poll returns incremental output for the agent (respects an output hold).
 func (m *Manager) Poll(jobID, cursor string) (*PollResult, error) {
+	return m.PollFor(jobID, cursor, false)
+}
+
+// PollFor returns incremental output from the cursor onward plus current status.
+// When human is false and the job's output is held, no new bytes are returned
+// (the agent is paused); the human dashboard passes human=true to always stream.
+func (m *Manager) PollFor(jobID, cursor string, human bool) (*PollResult, error) {
 	job, err := m.getJob(jobID)
 	if err != nil {
 		return nil, err
@@ -400,6 +408,9 @@ func (m *Manager) Poll(jobID, cursor string) (*PollResult, error) {
 	off, err := output.DecodeCursor(cursor)
 	if err != nil {
 		return nil, err
+	}
+	if _, ho := job.holds(); ho && !human {
+		return &PollResult{Info: job.info(), StdoutChunk: "", NextCursor: cursor, OutputHeld: true}, nil
 	}
 	chunk, next, gap := job.clean.ReadFrom(off)
 	return &PollResult{
@@ -436,11 +447,16 @@ func (m *Manager) Tail(jobID, cursor string) (*TailResult, error) {
 }
 
 // Write sends input to a job's PTY. If secret is true the value is registered
-// for redaction and is never echoed/logged (spec IN-3/§3a).
-func (m *Manager) Write(jobID, input string, appendNewline, secret bool) error {
+// for redaction and is never echoed/logged (spec IN-3/§3a). human=true marks
+// input typed by a person at the dashboard/TUI; when a job's input is held
+// (human takeover), agent writes (human=false) are rejected.
+func (m *Manager) Write(jobID, input string, appendNewline, secret, human bool) error {
 	job, err := m.getJob(jobID)
 	if err != nil {
 		return err
+	}
+	if hi, _ := job.holds(); hi && !human {
+		return errs.New(errs.DeniedByPolicy, "input is held by a human operator")
 	}
 	if secret {
 		m.redactor.AddLiteral(input)
@@ -450,6 +466,23 @@ func (m *Manager) Write(jobID, input string, appendNewline, secret bool) error {
 		data = append(data, '\n')
 	}
 	return job.sess.writeInput(data)
+}
+
+// Hold sets the human-intervention flags for a job (nil = unchanged). Used by
+// the dashboard/CLI so a person can take over input and/or pause the output the
+// agent receives, while still watching the live stream themselves.
+func (m *Manager) Hold(jobID string, input, output *bool) error {
+	job, err := m.getJob(jobID)
+	if err != nil {
+		return err
+	}
+	job.setHold(input, output)
+	if m.bus != nil {
+		hi, ho := job.holds()
+		m.publish(bus.Event{Type: "job.hold", JobID: jobID, SessionID: job.SessionID,
+			Message: "human intervention", Data: map[string]any{"hold_input": hi, "hold_output": ho}})
+	}
+	return nil
 }
 
 // Signal sends a signal to the running command's process group (spec EX-5/§18b).

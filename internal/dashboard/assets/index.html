@@ -4,131 +4,235 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Termada — live</title>
+<link rel="stylesheet" href="vendor/xterm.css">
+<script src="vendor/xterm.js"></script>
+<script src="vendor/xterm-addon-fit.js"></script>
 <style>
-  :root{--bg:#0d1117;--panel:#161b22;--border:#30363d;--fg:#e6edf3;--muted:#8b949e;
-        --green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff;--accent:#a371f7}
+  :root{--bg:#0a0c10;--panel:#11151c;--panel2:#161b22;--border:#272e3a;--fg:#e6edf3;
+        --muted:#8b949e;--green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff;--accent:#a371f7}
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
-  header{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--border);
-         position:sticky;top:0;background:var(--bg);z-index:10}
-  header h1{font-size:16px;margin:0;letter-spacing:.5px}
-  header .dot{width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block;margin-right:6px}
-  header .dot.live{background:var(--green)}
+  html,body{height:100%;margin:0}
+  body{background:var(--bg);color:var(--fg);font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+       display:grid;grid-template-rows:auto 1fr;height:100vh;overflow:hidden}
+  header{display:flex;align-items:center;gap:14px;padding:10px 18px;border-bottom:1px solid var(--border);background:var(--panel)}
+  header h1{font-size:15px;margin:0;letter-spacing:1px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block;margin-right:6px}
+  .dot.live{background:var(--green);box-shadow:0 0 6px var(--green)}
   .spacer{flex:1}
-  button{font:inherit;background:var(--panel);color:var(--fg);border:1px solid var(--border);
-         border-radius:6px;padding:6px 12px;cursor:pointer}
+  .stat{color:var(--muted)} .stat b{color:var(--fg)}
+  button{font:inherit;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:5px 10px;cursor:pointer}
   button:hover{border-color:var(--muted)}
   button.danger{background:#3d1418;border-color:var(--red);color:#ffb4ab}
-  button.approve{background:#0f2f17;border-color:var(--green);color:#7ee787}
-  button.deny{background:#3d1418;border-color:var(--red);color:#ffb4ab}
-  main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:20px;max-width:1300px;margin:0 auto}
-  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px;min-height:60px}
-  .panel h2{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:0 0 10px}
-  .full{grid-column:1/3}
-  .row{display:flex;gap:10px;align-items:center;padding:7px 0;border-top:1px solid var(--border)}
-  .row:first-of-type{border-top:none}
-  .mono{font-family:inherit}
-  .tag{font-size:11px;padding:1px 7px;border-radius:10px;border:1px solid var(--border);color:var(--muted)}
-  .st-running{color:var(--blue)} .st-exited{color:var(--green)} .st-killed,.st-failed,.st-timed_out{color:var(--red)}
-  .st-awaiting_input,.st-awaiting_confirmation{color:var(--yellow)} .st-backgrounded{color:var(--accent)}
-  .cmd{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg)}
-  .muted{color:var(--muted)}
-  .empty{color:var(--muted);font-style:italic;padding:6px 0}
-  #feed{max-height:280px;overflow:auto}
-  #feed .row{font-size:12.5px}
-  .time{color:var(--muted);font-size:11px;min-width:64px}
-  .pill{font-size:11px;color:var(--accent)}
+  button.on{background:#16301d;border-color:var(--green);color:#7ee787}
+  button.warn{background:#3a2d10;border-color:var(--yellow);color:#e3b341}
+  .layout{display:grid;grid-template-columns:300px 1fr;min-height:0}
+  aside{border-right:1px solid var(--border);background:var(--panel);overflow:auto;padding:10px}
+  aside h2{font-size:10.5px;text-transform:uppercase;letter-spacing:1.2px;color:var(--muted);margin:14px 4px 6px}
+  aside h2:first-child{margin-top:2px}
+  .item{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px;cursor:pointer;border:1px solid transparent}
+  .item:hover{background:var(--panel2)} .item.sel{background:var(--panel2);border-color:var(--border)}
+  .item .cmd{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .badge{font-size:10px;padding:1px 6px;border-radius:9px;border:1px solid var(--border);color:var(--muted)}
+  .st-running{color:var(--blue);border-color:var(--blue)} .st-exited{color:var(--green);border-color:var(--green)}
+  .st-killed,.st-failed,.st-timed_out,.st-orphaned{color:var(--red);border-color:var(--red)}
+  .st-awaiting_input,.st-awaiting_confirmation{color:var(--yellow);border-color:var(--yellow)}
+  .st-backgrounded{color:var(--accent);border-color:var(--accent)}
+  .empty{color:var(--muted);font-style:italic;padding:4px 8px}
+  .approve-card{background:#2a210c;border:1px solid var(--yellow);border-radius:8px;padding:8px;margin:4px}
+  .approve-card .cmd{color:#ffd; word-break:break-all;margin-bottom:6px}
+  .approve-card .row{display:flex;gap:6px}
+  main{display:grid;grid-template-rows:auto 1fr;min-height:0;min-width:0}
+  .tabs{display:flex;gap:4px;padding:8px 10px 0;background:var(--panel);border-bottom:1px solid var(--border);overflow-x:auto}
+  .tab{display:flex;align-items:center;gap:8px;padding:7px 12px;border:1px solid var(--border);border-bottom:none;
+       border-radius:7px 7px 0 0;background:var(--panel2);cursor:pointer;white-space:nowrap;color:var(--muted)}
+  .tab.active{background:var(--bg);color:var(--fg)}
+  .tab .x{color:var(--muted)} .tab .x:hover{color:var(--red)}
+  .termwrap{position:relative;min-height:0;min-width:0;background:#000}
+  .termhost{position:absolute;inset:0;display:none;flex-direction:column}
+  .termhost.active{display:flex}
+  .termctl{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--border)}
+  .termctl .grip{flex:1;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .termel{flex:1;min-height:0;padding:6px 8px}
+  .nudge{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);text-align:center;padding:30px}
+  .feed{font-size:11.5px}
+  .feed .e{display:flex;gap:6px;padding:3px 4px;border-top:1px solid var(--border)}
+  .feed .t{color:var(--muted);min-width:58px}
+  .feed .ty{color:var(--accent)}
+  .hold-tag{font-size:10px;color:var(--yellow)}
 </style>
 </head>
 <body>
 <header>
   <h1>▦ TERMADA</h1>
-  <span class="muted"><span class="dot" id="livedot"></span><span id="conn">connecting…</span></span>
+  <span class="stat"><span class="dot" id="dot"></span><span id="conn">connecting…</span></span>
+  <span class="stat">sess <b id="s-sess">0</b></span>
+  <span class="stat">active <b id="s-jobs">0</b></span>
+  <span class="stat">pending <b id="s-pend">0</b></span>
   <span class="spacer"></span>
-  <span class="muted" id="ver"></span>
+  <span class="stat" id="ver"></span>
   <button class="danger" onclick="stopAll()">⏹ Stop All</button>
 </header>
-<main>
-  <div class="panel full" id="approvals-panel" style="display:none">
-    <h2>⚠ Pending approvals</h2>
+<div class="layout">
+  <aside>
     <div id="approvals"></div>
-  </div>
-  <div class="panel">
-    <h2>Sessions</h2>
-    <div id="sessions"><div class="empty">none</div></div>
-  </div>
-  <div class="panel">
-    <h2>Active jobs</h2>
-    <div id="jobs"><div class="empty">none</div></div>
-  </div>
-  <div class="panel full">
-    <h2>Activity</h2>
-    <div id="feed"><div class="empty">waiting for events…</div></div>
-  </div>
-</main>
+    <h2>Sessions</h2><div id="sessions"><div class="empty">none</div></div>
+    <h2>Jobs (click to open terminal)</h2><div id="jobs"><div class="empty">none</div></div>
+    <h2>Servers</h2><div id="servers"><div class="empty">none</div></div>
+    <h2>Activity</h2><div id="feed" class="feed"></div>
+  </aside>
+  <main>
+    <div class="tabs" id="tabs"></div>
+    <div class="termwrap" id="termwrap">
+      <div class="nudge" id="nudge">Select a running job on the left to open its live terminal.<br><br>
+        You can type directly into it, take over input from the agent, or pause what the agent sees.</div>
+    </div>
+  </main>
+</div>
 <script>
 const token = new URLSearchParams(location.search).get('token') || '';
 const auth = token ? {'Authorization':'Bearer '+token} : {};
 const q = token ? ('?token='+encodeURIComponent(token)) : '';
+const FitAddon = window.FitAddon ? window.FitAddon.FitAddon : null;
 
 async function api(path, opts={}){
-  opts.headers = Object.assign({}, auth, opts.headers||{});
-  const r = await fetch(path, opts);
-  return r.json().catch(()=>({}));
+  opts.headers = Object.assign({'Content-Type':'application/json'}, auth, opts.headers||{});
+  const r = await fetch(path, opts); return r.json().catch(()=>({}));
 }
 function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function cmd(c){return Array.isArray(c)?c.join(' '):(c||'');}
+const TERMINAL = ['exited','killed','failed','timed_out','orphaned'];
 
+// ---- live terminals -------------------------------------------------------
+const terms = {};   // jobId -> {term, fit, es, host, tab, cmd, finished}
+let active = null;
+
+function openTerminal(job){
+  const id = job.job_id;
+  if(terms[id]){ focusTab(id); return; }
+  const host = document.createElement('div'); host.className='termhost';
+  host.innerHTML = `<div class="termctl">
+      <span class="grip">${esc(cmd(job.command))}</span>
+      <span class="hold-tag" id="ht-${id}"></span>
+      <button id="hi-${id}" onclick="toggleHold('${id}','input')">Block agent ⌨</button>
+      <button id="ho-${id}" onclick="toggleHold('${id}','output')">Pause agent ⏸</button>
+      <button class="danger" onclick="killJob('${id}')">kill</button>
+    </div><div class="termel" id="te-${id}"></div>`;
+  document.getElementById('termwrap').appendChild(host);
+
+  const term = new Terminal({convertEol:true, cursorBlink:true, fontSize:12.5, scrollback:5000,
+    fontFamily:'ui-monospace,SFMono-Regular,Menlo,monospace',
+    theme:{background:'#000000',foreground:'#e6edf3',cursor:'#58a6ff'}});
+  let fit=null;
+  term.open(host.querySelector('.termel'));
+  if(FitAddon){ fit=new FitAddon(); term.loadAddon(fit); }
+  // operator typing -> send straight to the PTY as a human
+  term.onData(d => { api('/api/exec/write',{method:'POST',body:JSON.stringify({job_id:id,input:d,append_newline:false,human:true})}); });
+
+  // tab
+  const tab=document.createElement('div'); tab.className='tab'; tab.id='tab-'+id;
+  tab.innerHTML = `<span>${esc(shortCmd(job.command))}</span><span class="x" onclick="event.stopPropagation();closeTerminal('${id}')">✕</span>`;
+  tab.onclick = ()=>focusTab(id);
+  document.getElementById('tabs').appendChild(tab);
+
+  const es = new EventSource('/api/exec/stream?job_id='+encodeURIComponent(id)+'&'+q.slice(1));
+  es.onmessage = ev => {
+    let m; try{ m=JSON.parse(ev.data); }catch(_){ return; }
+    if(m.chunk) term.write(m.chunk);
+    if(m.done){ terms[id].finished=true; term.write('\r\n\x1b[2m── '+(m.status||'ended')+' ──\x1b[0m\r\n'); es.close(); }
+  };
+  terms[id] = {term, fit, es, host, tab, finished:false};
+  focusTab(id);
+}
+function shortCmd(c){const s=cmd(c);return s.length>22?s.slice(0,22)+'…':s||'job';}
+function focusTab(id){
+  active=id;
+  for(const k in terms){
+    terms[k].host.classList.toggle('active', k===id);
+    terms[k].tab.classList.toggle('active', k===id);
+  }
+  const t=terms[id]; if(t&&t.fit){ setTimeout(()=>{try{t.fit.fit();t.term.focus();}catch(_){}} ,30); }
+  document.getElementById('nudge').style.display = active?'none':'flex';
+}
+function closeTerminal(id){
+  const t=terms[id]; if(!t) return;
+  try{t.es.close();}catch(_){}
+  t.host.remove(); t.tab.remove(); t.term.dispose(); delete terms[id];
+  if(active===id){ active=null; const rest=Object.keys(terms); if(rest.length) focusTab(rest[0]);
+    else document.getElementById('nudge').style.display='flex'; }
+}
+async function toggleHold(id,kind){
+  const info = lastJobs[id] || {};
+  const cur = kind==='input' ? info.hold_input : info.hold_output;
+  const body = {job_id:id}; body[kind==='input'?'hold_input':'hold_output'] = !cur;
+  await api('/api/exec/hold',{method:'POST',body:JSON.stringify(body)});
+  refresh();
+}
+async function killJob(id){ await api('/api/exec/kill',{method:'POST',body:JSON.stringify({job_id:id})}); refresh(); }
+
+// ---- sidebar / status -----------------------------------------------------
+let lastJobs = {};
 async function refresh(){
   let s;
-  try{ s = await api('/api/status'); document.getElementById('conn').textContent='connected';
-       document.getElementById('livedot').classList.add('live'); }
-  catch(e){ document.getElementById('conn').textContent='offline'; return; }
-  document.getElementById('ver').textContent = 'v'+(s.version||'?');
+  try{ s = await api('/api/status'); document.getElementById('conn').textContent='connected'; document.getElementById('dot').classList.add('live'); }
+  catch(e){ document.getElementById('conn').textContent='offline'; document.getElementById('dot').classList.remove('live'); return; }
+  document.getElementById('ver').textContent='v'+(s.version||'?');
 
-  const sess = s.sessions||[];
-  document.getElementById('sessions').innerHTML = sess.length ? sess.map(x=>
-    `<div class="row"><span class="mono">${esc(x.session_id)}</span>
-     <span class="tag">${esc(x.owner||'—')}</span>
-     <span class="spacer" style="flex:1"></span>
-     <span class="muted">${x.active_jobs?'1 running':'idle'}</span></div>`).join('') : '<div class="empty">none</div>';
+  const jobs=s.jobs||[]; lastJobs={}; jobs.forEach(j=>lastJobs[j.job_id]=j);
+  const active_jobs=jobs.filter(j=>!TERMINAL.includes(j.status));
+  document.getElementById('s-sess').textContent=(s.sessions||[]).length;
+  document.getElementById('s-jobs').textContent=active_jobs.length;
+  document.getElementById('s-pend').textContent=(s.pending||[]).length;
 
-  const jobs = (s.jobs||[]).filter(j=>!['exited','killed','failed','timed_out','orphaned'].includes(j.status));
-  document.getElementById('jobs').innerHTML = jobs.length ? jobs.map(j=>
-    `<div class="row"><span class="cmd">${esc(cmd(j.command))}</span>
-     <span class="st-${esc(j.status)}">${esc(j.status)}</span>
-     <button onclick="killJob('${esc(j.job_id)}')">kill</button></div>`).join('') : '<div class="empty">none</div>';
+  // approvals
+  document.getElementById('approvals').innerHTML = (s.pending||[]).map(p=>`
+    <div class="approve-card"><div style="color:var(--yellow);font-size:11px">⚠ APPROVAL NEEDED · ${esc(p.agent_id||'')}</div>
+      <div class="cmd">${esc(cmd(p.command))}</div>
+      <div class="row"><button class="on" onclick="resolve('approve','${p.confirmation_id}')">approve</button>
+      <button class="danger" onclick="resolve('deny','${p.confirmation_id}')">deny</button></div></div>`).join('');
 
-  const pend = s.pending||[];
-  document.getElementById('approvals-panel').style.display = pend.length ? 'block':'none';
-  document.getElementById('approvals').innerHTML = pend.map(p=>
-    `<div class="row"><span class="cmd">${esc(cmd(p.command))}</span>
-     <span class="tag">${esc(p.agent_id||'—')}</span>
-     <span class="muted">matched ${esc(p.matched)}</span>
-     <button class="approve" onclick="resolve('approve','${esc(p.confirmation_id)}')">approve</button>
-     <button class="deny" onclick="resolve('deny','${esc(p.confirmation_id)}')">deny</button></div>`).join('');
+  // sessions
+  document.getElementById('sessions').innerHTML = (s.sessions||[]).length ? (s.sessions||[]).map(x=>`
+    <div class="item"><span class="cmd">${esc(x.session_id)}</span><span class="badge">${esc(x.owner||'—')}</span>
+    <span class="badge ${x.active_jobs?'st-running':''}">${x.active_jobs?'busy':'idle'}</span></div>`).join('') : '<div class="empty">none</div>';
+
+  // jobs (clickable)
+  document.getElementById('jobs').innerHTML = jobs.length ? jobs.map(j=>`
+    <div class="item ${active===j.job_id?'sel':''}" onclick='openTermById("${j.job_id}")'>
+      <span class="cmd">${esc(cmd(j.command))}</span>
+      ${j.hold_input?'<span class="hold-tag">⌨</span>':''}${j.hold_output?'<span class="hold-tag">⏸</span>':''}
+      <span class="badge st-${esc(j.status)}">${esc(j.status)}</span></div>`).join('') : '<div class="empty">none</div>';
+
+  document.getElementById('servers').innerHTML = (s.servers&&s.servers.length)? s.servers.map(x=>`
+    <div class="item"><span class="cmd">${esc(x.name)}</span><span class="badge">${esc(x.user)}@${esc(x.host)}</span></div>`).join('') : '<div class="empty">none configured</div>';
+
+  // update open terminals' hold buttons
+  for(const id in terms){ const j=lastJobs[id]; if(!j) continue;
+    const hi=document.getElementById('hi-'+id), ho=document.getElementById('ho-'+id), ht=document.getElementById('ht-'+id);
+    if(hi) hi.className=j.hold_input?'on':''; if(ho) ho.className=j.hold_output?'warn':'';
+    if(ht) ht.textContent=(j.hold_input?'agent input BLOCKED ':'')+(j.hold_output?'agent output PAUSED':''); }
 }
-async function killJob(id){ await api('/api/exec/kill',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_id:id})}); refresh(); }
-async function resolve(kind,id){ await api('/api/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirmation_id:id,by:'dashboard'})}); refresh(); }
+async function openTermById(id){
+  let j=lastJobs[id]; if(!j){ const s=await api('/api/status'); (s.jobs||[]).forEach(x=>{if(x.job_id===id)j=x;}); }
+  if(j) openTerminal(j);
+}
+async function resolve(kind,id){ await api('/api/'+kind,{method:'POST',body:JSON.stringify({confirmation_id:id,by:'dashboard'})}); refresh(); }
 async function stopAll(){ if(!confirm('Kill ALL active jobs?'))return; await api('/api/stop_all',{method:'POST'}); refresh(); }
 
-const feed = document.getElementById('feed'); let feedInit=false;
-function addEvent(e){
-  if(!feedInit){feed.innerHTML='';feedInit=true;}
-  const t = new Date(e.time||Date.now()).toLocaleTimeString();
-  const div=document.createElement('div'); div.className='row';
-  div.innerHTML=`<span class="time">${t}</span><span class="pill">${esc(e.type)}</span>
-    <span class="cmd">${esc(e.message||'')}</span><span class="muted">${esc(e.agent_id||'')}</span>`;
-  feed.prepend(div);
-  while(feed.children.length>120) feed.removeChild(feed.lastChild);
-  if(['job.started','job.finished','confirm.requested','confirm.resolved','session.created'].includes(e.type)) refresh();
-}
+// activity feed
+const feed=document.getElementById('feed');
 try{
-  const es = new EventSource('/api/events'+q);
-  es.onmessage = ev => { try{ addEvent(JSON.parse(ev.data)); }catch(_){} };
+  const es=new EventSource('/api/events'+q);
+  es.onmessage=ev=>{ let e; try{e=JSON.parse(ev.data);}catch(_){return;}
+    const d=document.createElement('div'); d.className='e';
+    const t=new Date(e.time||Date.now()).toLocaleTimeString();
+    d.innerHTML=`<span class="t">${t}</span><span class="ty">${esc(e.type)}</span><span class="cmd">${esc(e.message||'')}</span>`;
+    feed.prepend(d); while(feed.children.length>80) feed.removeChild(feed.lastChild);
+    if(['job.started','job.finished','confirm.requested','confirm.resolved','session.created','job.hold'].includes(e.type)) refresh();
+  };
 }catch(e){}
 
-refresh(); setInterval(refresh, 2000);
+window.addEventListener('resize',()=>{ if(active&&terms[active]&&terms[active].fit){try{terms[active].fit.fit();}catch(_){}}});
+refresh(); setInterval(refresh, 1500);
 </script>
 </body>
 </html>

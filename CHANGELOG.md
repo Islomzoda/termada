@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## [0.5.0] — 2026-06-16
+
+Real-time terminal cockpit — the human-observability pillar done properly
+(spec §8.1/§8.2/OB-1/OB-2).
+
+### Added
+- **Live terminal dashboard**: each session/job renders as a real terminal
+  (xterm.js, vendored locally so it works offline), streaming output live over
+  Server-Sent Events (`/api/exec/stream`) instead of list polling. Tabs per job,
+  activity feed, approval cards, Stop-All.
+- **Operator takeover** (§ human intervention): from the dashboard a person can
+  **type directly into a job's PTY**; **hold agent input** (`/api/exec/hold` →
+  agent writes rejected with `denied_by_policy`); and **pause the output the
+  agent receives** while still watching the live stream. Engine tracks
+  `hold_input`/`hold_output` per job; `Write`/`Poll` are human-aware.
+
+### Tests
+- Engine: human-takeover input block + human input, output-hold pauses agent only.
+- All packages pass under the race detector; native + Windows cross-compile green.
+
+
 ## [0.4.0] — 2026-06-16
 
 The previously-deferred phase 3 & 4 work — recovery, snapshots, plugins,

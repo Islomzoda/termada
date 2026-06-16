@@ -116,7 +116,7 @@ func TestExecWriteAnswersPrompt(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	time.Sleep(150 * time.Millisecond) // let the inner read reach the prompt
-	if err := m.Write(job.ID, "pizza", true, false); err != nil {
+	if err := m.Write(job.ID, "pizza", true, false, false); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	waitDone(t, job, 5*time.Second)

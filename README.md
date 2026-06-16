@@ -10,7 +10,7 @@ that keep `cwd`/env, async jobs with streamed output, PTY input for interactive
 prompts, structured results — while a human watches and controls everything from
 a live dashboard with a kill-switch and approval queue.
 
-> Status: **0.4.0 — phases 1–4.** See [docs/tz/Termada-TZ.md](docs/tz/Termada-TZ.md)
+> Status: **0.5.0 — phases 1–4.** See [docs/tz/Termada-TZ.md](docs/tz/Termada-TZ.md)
 > for the full spec / roadmap (§30) and [CHANGELOG.md](CHANGELOG.md). License: Apache-2.0.
 
 ## What works
@@ -23,7 +23,7 @@ a live dashboard with a kill-switch and approval queue.
 
 **Daemon, observability & control (phase 1 pillar)**
 - Long-lived daemon with a control-plane over a Unix socket; `serve --stdio` is a thin shim that proxies MCP to it (auto-spawn + in-process fallback) — so multiple agents share one dashboard.
-- Live web dashboard (sessions, jobs, SSE activity feed, **approval queue**, **Stop-All**) with token auth + anti-DNS-rebinding.
+- Live web dashboard: **each job renders as a real terminal** (xterm.js, streamed over SSE) with **operator takeover** — type into a job's PTY, hold the agent's input, or pause the agent's output. Plus approval queue, activity feed, Stop-All; token auth + anti-DNS-rebinding.
 - TUI (`termada top`) and a full inspection CLI.
 - Tamper-evident, hash-chained, secret-redacted audit log (`termada audit verify`).
 

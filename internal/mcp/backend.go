@@ -56,7 +56,8 @@ func (b *LocalBackend) Poll(jobID, cursor string) (*engine.PollResult, error) {
 }
 
 func (b *LocalBackend) Write(jobID, input string, appendNewline, secret bool) error {
-	return b.m.Write(jobID, input, appendNewline, secret)
+	// Agent-originated input (human=false): rejected while a human holds input.
+	return b.m.Write(jobID, input, appendNewline, secret, false)
 }
 
 func (b *LocalBackend) Signal(jobID, signal string) error { return b.m.Signal(jobID, signal) }

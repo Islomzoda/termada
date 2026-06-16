@@ -27,6 +27,8 @@ type Job struct {
 	reason        string
 	confirmID     string
 	killRequested bool
+	holdInput     bool // human has taken over input; agent writes are blocked
+	holdOutput    bool // agent's polled output is paused (human still sees the live stream)
 	createdAt     time.Time
 	startedAt     time.Time
 	endedAt       time.Time
@@ -82,6 +84,25 @@ func (j *Job) setConfirmID(id string) {
 	j.mu.Lock()
 	j.confirmID = id
 	j.mu.Unlock()
+}
+
+// setHold updates the human-intervention flags. A nil pointer leaves that flag
+// unchanged.
+func (j *Job) setHold(input, output *bool) {
+	j.mu.Lock()
+	if input != nil {
+		j.holdInput = *input
+	}
+	if output != nil {
+		j.holdOutput = *output
+	}
+	j.mu.Unlock()
+}
+
+func (j *Job) holds() (input, output bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.holdInput, j.holdOutput
 }
 
 // appendOutput stores raw output for replay and the cleaned+redacted stream for
@@ -157,6 +178,8 @@ type Info struct {
 	ConfirmationID string   `json:"confirmation_id,omitempty"`
 	AwaitingInput  bool     `json:"awaiting_input"`
 	Prompt         string   `json:"prompt,omitempty"`
+	HoldInput      bool     `json:"hold_input"`
+	HoldOutput     bool     `json:"hold_output"`
 	DurationMS     int64    `json:"duration_ms"`
 }
 
@@ -184,6 +207,8 @@ func (j *Job) infoLocked() Info {
 		Signal:         j.signal,
 		Reason:         j.reason,
 		ConfirmationID: j.confirmID,
+		HoldInput:      j.holdInput,
+		HoldOutput:     j.holdOutput,
 	}
 	if !j.startedAt.IsZero() {
 		in.DurationMS = end.Sub(j.startedAt).Milliseconds()

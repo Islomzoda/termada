@@ -69,6 +69,8 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/api/snapshot/list", s.hSnapshotList)
 	mux.HandleFunc("/api/plugin/tools", s.hPluginTools)
 	mux.HandleFunc("/api/plugin/call", s.hPluginCall)
+	mux.HandleFunc("/api/exec/hold", s.hExecHold)
+	mux.HandleFunc("/api/exec/stream", s.hExecStream)
 	return mux
 }
 
@@ -264,6 +266,9 @@ type execReq struct {
 	Content       string   `json:"content"`
 	FileMode      string   `json:"file_mode"`
 	Name          string   `json:"name"`
+	Human         bool     `json:"human"`
+	HoldInput     *bool    `json:"hold_input"`
+	HoldOutput    *bool    `json:"hold_output"`
 }
 
 func (s *Server) hSessionCreate(w http.ResponseWriter, r *http.Request) {
@@ -331,11 +336,66 @@ func (s *Server) hExecWrite(w http.ResponseWriter, r *http.Request) {
 	if req.AppendNewline != nil {
 		appendNL = *req.AppendNewline
 	}
-	if err := s.mgr.Write(req.JobID, req.Input, appendNL, req.Secret); err != nil {
+	if err := s.mgr.Write(req.JobID, req.Input, appendNL, req.Secret, req.Human); err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) hExecHold(w http.ResponseWriter, r *http.Request) {
+	var req execReq
+	_ = decode(r, &req)
+	if err := s.mgr.Hold(req.JobID, req.HoldInput, req.HoldOutput); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// hExecStream streams a job's (redacted) output as Server-Sent Events for the
+// live terminal in the dashboard. It uses human=true so it always sees output,
+// even when the agent's output is held.
+func (s *Server) hExecStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	jobID := r.URL.Query().Get("job_id")
+	cursor := r.URL.Query().Get("cursor")
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	send := func(v any) {
+		b, _ := json.Marshal(v)
+		_, _ = w.Write([]byte("data: "))
+		_, _ = w.Write(b)
+		_, _ = w.Write([]byte("\n\n"))
+		flusher.Flush()
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		default:
+		}
+		res, err := s.mgr.PollFor(jobID, cursor, true)
+		if err != nil {
+			send(map[string]any{"error": err.Error()})
+			return
+		}
+		if res.StdoutChunk != "" {
+			send(map[string]any{"chunk": res.StdoutChunk, "status": res.Status})
+		}
+		cursor = res.NextCursor
+		if res.Status.Terminal() {
+			send(map[string]any{"status": res.Status, "done": true})
+			return
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
 }
 
 func (s *Server) hExecSignal(w http.ResponseWriter, r *http.Request) {

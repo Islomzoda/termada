@@ -285,7 +285,7 @@ async function addServer(){
   set('muted','adding…');
   if(secret && pass){
     const u=await api('/api/vault/unlock',{method:'POST',body:JSON.stringify({passphrase:pass})});
-    if(u&&u.error){ set('red','✗ vault didn’t open: '+(u.error.message||u.error.code)+' — the passphrase must match the one you first set.'); return; }
+    if(u&&u.error){ set('red','✗ vault didn’t open: '+(u.error.message||u.error.code)+' — the passphrase must match the one you first set. Forgot it? Reset with: termada vault reset'); return; }
   }
   const body={name,host,user,port:parseInt(val('sf-port'))||0,
     tags:val('sf-tags').split(',').map(t=>t.trim()).filter(Boolean), secret};

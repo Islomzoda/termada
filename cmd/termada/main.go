@@ -347,7 +347,7 @@ func cmdTop() {
 
 func cmdVault(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: termada vault <init|set|list|rm> ...")
+		fmt.Fprintln(os.Stderr, "usage: termada vault <init|set|list|rm|reset> ...")
 		os.Exit(2)
 	}
 	cfg, _ := config.Load(config.DefaultPath())
@@ -394,6 +394,27 @@ func cmdVault(args []string) {
 			fatal(err)
 		}
 		fmt.Println("removed", args[1])
+	case "reset":
+		// Escape hatch for a forgotten passphrase: back up the vault and clear the
+		// path so a fresh passphrase can be set (its contents stay recoverable in
+		// the .bak only if the old passphrase is remembered).
+		if !v.Exists() {
+			fmt.Println("no vault to reset")
+			return
+		}
+		p := v.PathString()
+		fmt.Printf("Reset the vault at %s?\nStored credentials become unrecoverable without the OLD passphrase.\nType 'reset' to confirm: ", p)
+		var confirm string
+		_, _ = fmt.Scanln(&confirm)
+		if confirm != "reset" {
+			fmt.Println("aborted")
+			return
+		}
+		bak := fmt.Sprintf("%s.bak-%d", p, time.Now().Unix())
+		if err := os.Rename(p, bak); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("vault moved to %s\nset a new passphrase by adding a server in the dashboard, or `termada vault init`\n", bak)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown vault subcommand:", args[0])
 		os.Exit(2)

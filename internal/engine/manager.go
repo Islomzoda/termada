@@ -16,6 +16,7 @@ import (
 type Config struct {
 	OutputRetentionBytes int
 	MaxForegroundJobs    int
+	MaxJobsPerAgent      int // per-agent concurrent-job quota (0 = unlimited, MA-3)
 	DefaultTimeoutMS     int
 	ConfirmTimeoutMS     int
 	RedactionPatterns    []string
@@ -39,9 +40,10 @@ type Manager struct {
 	bus            *bus.Bus
 	pol            *policy.Engine
 	agentPolicies  map[string]string
-	timeoutClasses map[string]int // class name -> timeout ms (LR-2)
-	auditOK        func() bool    // audit health probe; dangerous ops fail closed if false
-	remoteDial     RemoteDialer   // opens a shell to a named remote server (wired by daemon)
+	agentTokens    map[string]string // token -> agent id (non-spoofable identity)
+	timeoutClasses map[string]int    // class name -> timeout ms (LR-2)
+	auditOK        func() bool       // audit health probe; dangerous ops fail closed if false
+	remoteDial     RemoteDialer      // opens a shell to a named remote server (wired by daemon)
 
 	persistPath string
 	snapshotDir string
@@ -86,6 +88,25 @@ func (m *Manager) SetPolicy(p *policy.Engine, agentPolicies map[string]string) {
 	if agentPolicies != nil {
 		m.agentPolicies = agentPolicies
 	}
+}
+
+// SetAgentTokens installs token→agent-id bindings for non-spoofable identity.
+func (m *Manager) SetAgentTokens(tokens map[string]string) {
+	if tokens != nil {
+		m.agentTokens = tokens
+	}
+}
+
+// ResolveAgent maps a presented token to its configured agent id. If the token
+// is empty or unknown, the self-asserted fallback is used (local/dev mode); but
+// a configured token resolves to exactly its agent and cannot be spoofed (MA-2).
+func (m *Manager) ResolveAgent(token, fallback string) string {
+	if token != "" {
+		if id, ok := m.agentTokens[token]; ok {
+			return id
+		}
+	}
+	return fallback
 }
 
 // SetTimeoutClasses installs the per-class adaptive timeouts (LR-2).
@@ -231,6 +252,23 @@ func (m *Manager) activeForeground() int {
 	return n
 }
 
+// activeForAgent counts an agent's currently-running (non-terminal) jobs, for
+// per-agent quotas (MA-3).
+func (m *Manager) activeForAgent(owner string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, j := range m.jobs {
+		j.mu.Lock()
+		terminal := j.status.Terminal()
+		j.mu.Unlock()
+		if !terminal && j.sess.Owner == owner {
+			n++
+		}
+	}
+	return n
+}
+
 // Start runs a command asynchronously and returns the job immediately (EX-2).
 // The command is first classified by policy: denied commands error, commands
 // requiring confirmation are parked in awaiting_confirmation (spec §18/§18a).
@@ -257,6 +295,9 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 		}
 	}
 
+	if m.cfg.MaxJobsPerAgent > 0 && m.activeForAgent(owner) >= m.cfg.MaxJobsPerAgent {
+		return nil, errs.New(errs.ParallelismExceeded, "agent %q reached its concurrent-job quota (%d)", owner, m.cfg.MaxJobsPerAgent)
+	}
 	m.mu.Lock()
 	if m.cfg.MaxForegroundJobs > 0 && m.activeForeground() >= m.cfg.MaxForegroundJobs {
 		m.mu.Unlock()

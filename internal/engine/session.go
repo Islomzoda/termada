@@ -172,6 +172,16 @@ func (s *Session) readLoop() {
 }
 
 func (s *Session) handleEOF() {
+	if s.isClosed() {
+		return // deliberate close
+	}
+	// Remote transports can reconnect (the shell survives in tmux on the server);
+	// try that before giving up (spec RM-3).
+	if rc, ok := s.shell.(interface{ Reconnect() error }); ok {
+		if s.tryReconnect(rc) {
+			return
+		}
+	}
 	s.mu.Lock()
 	job := s.current
 	s.current = nil
@@ -181,6 +191,34 @@ func (s *Session) handleEOF() {
 		// The shell died with a command still running: it is orphaned, not exited.
 		job.finalize(-1, StatusOrphaned, "session shell exited")
 	}
+}
+
+// tryReconnect re-establishes a dropped remote transport (tmux re-attach). The
+// in-flight job is orphaned — its result can't be trusted across the gap — and
+// the reader is restarted so the session keeps serving new commands (spec RM-3).
+func (s *Session) tryReconnect(rc interface{ Reconnect() error }) bool {
+	for attempt := 0; attempt < 5; attempt++ {
+		if s.isClosed() {
+			return false
+		}
+		time.Sleep(time.Duration(200*(attempt+1)) * time.Millisecond)
+		if err := rc.Reconnect(); err != nil {
+			continue
+		}
+		s.mu.Lock()
+		job := s.current
+		s.current = nil
+		s.scan = s.scan[:0]
+		s.mu.Unlock()
+		if job != nil {
+			job.finalize(-1, StatusOrphaned, "connection dropped; session reconnected")
+		}
+		go s.readLoop()
+		// re-init the new PTY (echo off, job control); fire-and-forget.
+		_, _ = s.runRaw("stty -echo -onlcr 2>/dev/null; set -m 2>/dev/null; true", nil, "init")
+		return true
+	}
+	return false
 }
 
 // consume appends new bytes and extracts complete job output up to the marker.

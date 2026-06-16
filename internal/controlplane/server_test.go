@@ -107,6 +107,31 @@ func TestAPIServerAddRequiresVaultThenWorks(t *testing.T) {
 	}
 }
 
+func TestAPITokenIdentityNonSpoofable(t *testing.T) {
+	mux, m := newTestServer(t)
+	m.SetAgentTokens(map[string]string{"tok-123": "claude-code"})
+
+	// claim owner "evil" but present claude-code's token
+	r := httptest.NewRequest("POST", "/api/exec/run", strings.NewReader(`{"owner":"evil","command":["echo","hi"]}`))
+	r.Header.Set("X-Termada-Agent-Token", "tok-123")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d", rec.Code)
+	}
+	_, st := do(t, mux, "GET", "/api/status", "")
+	agents, _ := st["agents"].([]any)
+	ids := map[string]bool{}
+	for _, a := range agents {
+		if m, ok := a.(map[string]any); ok {
+			ids[m["id"].(string)] = true
+		}
+	}
+	if !ids["claude-code"] || ids["evil"] {
+		t.Fatalf("identity not enforced: token should map to claude-code, not evil; agents=%v", st["agents"])
+	}
+}
+
 func TestAPISessionLifecycle(t *testing.T) {
 	mux, _ := newTestServer(t)
 	code, out := do(t, mux, "POST", "/api/session/create", `{"owner":"t"}`)

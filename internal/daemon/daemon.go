@@ -76,6 +76,7 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	ec := engine.Config{
 		OutputRetentionBytes: cfg.Defaults.OutputRetentionBytes,
 		MaxForegroundJobs:    cfg.Defaults.MaxForegroundJobs,
+		MaxJobsPerAgent:      cfg.Defaults.MaxJobsPerAgent,
 		DefaultTimeoutMS:     cfg.Defaults.TimeoutMS,
 		ConfirmTimeoutMS:     cfg.Defaults.ConfirmTimeoutMS,
 		RedactionPatterns:    cfg.Redaction,
@@ -83,6 +84,7 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	mgr := engine.NewManager(ec)
 	mgr.SetBus(b)
 	mgr.SetPolicy(policy.NewEngine(buildPolicies(cfg)), buildAgentPolicies(cfg))
+	mgr.SetAgentTokens(buildAgentTokens(cfg))
 	mgr.SetRecipes(buildRecipes(cfg))
 	mgr.SetTimeoutClasses(cfg.TimeoutClasses)
 	if err := mgr.EnablePersistence(filepath.Join(RuntimeDir(), "registry.json")); err != nil {
@@ -244,6 +246,16 @@ func buildAgentPolicies(cfg config.Config) map[string]string {
 	out := map[string]string{}
 	for _, a := range cfg.Agents {
 		out[a.ID] = a.Policy
+	}
+	return out
+}
+
+func buildAgentTokens(cfg config.Config) map[string]string {
+	out := map[string]string{}
+	for _, a := range cfg.Agents {
+		if a.Token != "" {
+			out[a.Token] = a.ID
+		}
 	}
 	return out
 }

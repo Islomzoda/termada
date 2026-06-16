@@ -19,6 +19,7 @@ defaults:
   timeout_ms: 30000
   output_retention_bytes: 5000000
   max_foreground_jobs: 8
+  max_jobs_per_agent: 0          # per-agent concurrent-job cap (0 = unlimited)
   confirm_timeout_ms: 120000
 
 vault:
@@ -28,6 +29,10 @@ vault:
 agents:
   - id: claude-code
     policy: prod-safe
+    # Optional: bind this id to a secret token so `owner` can't be spoofed.
+    # The shim presents it via `serve --stdio --token <t>` (or $TERMADA_AGENT_TOKEN);
+    # the daemon resolves the token to this id and ignores any asserted owner.
+    token: ${CLAUDE_AGENT_TOKEN}
   - id: cursor
     policy: read-only
 

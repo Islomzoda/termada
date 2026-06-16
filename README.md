@@ -31,6 +31,8 @@ a live dashboard with a kill-switch and approval queue.
 - Policy engine: argv-level allow/deny/confirm; dangerous commands park in an approval queue (deny-by-default timeout; agents can't self-approve).
 - age-encrypted vault (CGO-free); secrets never returned to agents; unlocked into the daemon via `termada unlock`.
 - Fleet: `fleet_run` across servers by name/tag with structured per-server results; SSH with vault creds + TOFU host keys.
+- Persistent **remote SSH sessions** wrapped in `tmux`: a dropped link is transparently re-attached, so cwd/env/running command survive a reconnect.
+- **Per-agent quotas + non-spoofable identity:** cap concurrent jobs per agent (`defaults.max_jobs_per_agent`), and bind an agent id to a secret token (`agents: [{ id, token }]`) presented via `serve --stdio --token <t>` so `owner` can't be spoofed.
 - File tools, recipes, and desktop/Telegram notifications.
 
 **Phase 3 & 4 (now done):** crash-recovery (jobs persist; running jobs recover as

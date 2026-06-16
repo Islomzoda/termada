@@ -33,7 +33,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.7.0"
+const version = "0.7.1"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -94,10 +94,11 @@ func cmdServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	stdio := fs.Bool("stdio", false, "run the MCP stdio shim (what an MCP client launches)")
 	agent := fs.String("agent", "default", "agent id used for attribution")
+	token := fs.String("token", os.Getenv("TERMADA_AGENT_TOKEN"), "per-agent identity token (or $TERMADA_AGENT_TOKEN); makes agent_id non-spoofable when configured")
 	cfgPath := fs.String("config", config.DefaultPath(), "config file path")
 	_ = fs.Parse(args)
 	if *stdio {
-		runShim(*agent)
+		runShim(*agent, *token)
 		return
 	}
 	runDaemon(*cfgPath)
@@ -121,9 +122,10 @@ func runDaemon(cfgPath string) {
 	}
 }
 
-func runShim(agent string) {
+func runShim(agent, token string) {
 	logger := log.New(os.Stderr, "termada-shim ", log.LstdFlags|log.Lmsgprefix)
 	client := controlplane.NewUnixClient(daemon.SocketPath())
+	client.SetToken(token)
 	var backend mcp.Backend
 	var cleanup func()
 

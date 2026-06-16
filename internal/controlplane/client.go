@@ -19,9 +19,13 @@ import (
 // implements mcp.Backend so the stdio shim can proxy to the daemon, and adds
 // human-facing calls used by the CLI/TUI.
 type Client struct {
-	http *http.Client
-	base string
+	http  *http.Client
+	base  string
+	token string // optional per-agent identity token (X-Termada-Agent-Token)
 }
+
+// SetToken sets the per-agent identity token sent with every request.
+func (c *Client) SetToken(t string) { c.token = t }
 
 // NewUnixClient returns a client bound to the daemon's Unix socket.
 func NewUnixClient(socketPath string) *Client {
@@ -36,7 +40,10 @@ func NewUnixClient(socketPath string) *Client {
 
 func (c *Client) post(path string, req, out any) error {
 	body, _ := json.Marshal(req)
-	resp, err := c.http.Post(c.base+path, "application/json", bytes.NewReader(body))
+	r, _ := http.NewRequest(http.MethodPost, c.base+path, bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	c.auth(r)
+	resp, err := c.http.Do(r)
 	if err != nil {
 		return errs.New(errs.ServerUnreachable, "daemon unreachable: %v", err)
 	}
@@ -45,12 +52,20 @@ func (c *Client) post(path string, req, out any) error {
 }
 
 func (c *Client) get(path string, out any) error {
-	resp, err := c.http.Get(c.base + path)
+	r, _ := http.NewRequest(http.MethodGet, c.base+path, nil)
+	c.auth(r)
+	resp, err := c.http.Do(r)
 	if err != nil {
 		return errs.New(errs.ServerUnreachable, "daemon unreachable: %v", err)
 	}
 	defer resp.Body.Close()
 	return decodeResp(resp, out)
+}
+
+func (c *Client) auth(r *http.Request) {
+	if c.token != "" {
+		r.Header.Set("X-Termada-Agent-Token", c.token)
+	}
 }
 
 func decodeResp(resp *http.Response, out any) error {

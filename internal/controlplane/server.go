@@ -344,6 +344,13 @@ func writeErr(w http.ResponseWriter, err error) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": e})
 }
 
+// ownerFor resolves the acting agent: a configured agent token (header) wins
+// over the self-asserted owner, making identity non-spoofable when tokens are
+// configured (MA-2). Falls back to the asserted owner in local/dev mode.
+func (s *Server) ownerFor(r *http.Request, asserted string) string {
+	return s.mgr.ResolveAgent(r.Header.Get("X-Termada-Agent-Token"), asserted)
+}
+
 func decode(r *http.Request, v any) error {
 	if r.Body == nil {
 		return nil
@@ -380,7 +387,7 @@ type execReq struct {
 func (s *Server) hSessionCreate(w http.ResponseWriter, r *http.Request) {
 	var req execReq
 	_ = decode(r, &req)
-	sess, err := s.mgr.CreateSession(req.Owner, req.Target, req.Mode)
+	sess, err := s.mgr.CreateSession(s.ownerFor(r, req.Owner), req.Target, req.Mode)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -405,7 +412,7 @@ func (s *Server) hSessionClose(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hExecRun(w http.ResponseWriter, r *http.Request) {
 	var req execReq
 	_ = decode(r, &req)
-	res, err := s.mgr.Run(req.Owner, req.Session, req.Command, req.Mode, req.TimeoutMS)
+	res, err := s.mgr.Run(s.ownerFor(r, req.Owner), req.Session, req.Command, req.Mode, req.TimeoutMS)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -416,7 +423,7 @@ func (s *Server) hExecRun(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hExecStart(w http.ResponseWriter, r *http.Request) {
 	var req execReq
 	_ = decode(r, &req)
-	job, err := s.mgr.Start(req.Owner, req.Session, req.Command, req.Mode)
+	job, err := s.mgr.Start(s.ownerFor(r, req.Owner), req.Session, req.Command, req.Mode)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -664,7 +671,7 @@ func (s *Server) hAgentConnect(w http.ResponseWriter, r *http.Request) {
 		Agent string `json:"agent"`
 	}
 	_ = decode(r, &req)
-	s.mgr.RecordConnect(req.Agent)
+	s.mgr.RecordConnect(s.ownerFor(r, req.Agent))
 	writeJSON(w, map[string]any{"ok": true})
 }
 

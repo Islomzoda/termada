@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## [0.7.1] — 2026-06-16
+
+Completes the multi-agent hardening items from the 0.7.0 road-to-1.0 pass.
+
+### Added
+- **Per-agent concurrency quotas** (MA-3): `defaults.max_jobs_per_agent` caps the
+  number of concurrent jobs a single agent may hold; the next job is refused with
+  `parallelism_exceeded` instead of letting one agent starve the others. Counted
+  across all of the agent's sessions; `0` means unlimited.
+- **Non-spoofable agent identity** (MA-2): an agent may be bound to a secret token
+  via `agents: [{ id, token }]`. The stdio shim presents it with `serve --stdio
+  --token <t>` (or `$TERMADA_AGENT_TOKEN`), sent as the `X-Termada-Agent-Token`
+  header; the daemon resolves the token to its configured agent id and ignores any
+  self-asserted `owner`. Without a configured token, the self-asserted id is used
+  (local/dev mode), exactly as before.
+- **Remote-session reconnect** (RM-3): persistent SSH sessions are wrapped in a
+  named `tmux` session, so a dropped connection is transparently re-dialled and
+  re-attached — cwd/env/running command survive on the server. The in-flight job
+  is orphaned across the gap (its result can't be trusted) and the session keeps
+  serving new commands. Falls back to a plain shell on hosts without tmux (the
+  connection still re-establishes; prior state is not preserved). *Reconnect
+  recovery is unit-tested with a real shell under a simulated drop.*
+
 ## [0.7.0] — 2026-06-16
 
 The "road to 1.0" pass — closing the gaps from the self-review.

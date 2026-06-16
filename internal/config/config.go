@@ -56,6 +56,7 @@ type Defaults struct {
 	PTYCols              int  `yaml:"pty_cols"`
 	MaxForegroundJobs    int  `yaml:"max_foreground_jobs"`
 	MaxBackgroundJobs    int  `yaml:"max_background_jobs"`
+	MaxJobsPerAgent      int  `yaml:"max_jobs_per_agent"`
 	SilenceKillMS        int  `yaml:"silence_kill_ms"`
 	InputTimeoutMS       int  `yaml:"input_timeout_ms"`
 	ConfirmTimeoutMS     int  `yaml:"confirm_timeout_ms"`
@@ -71,6 +72,7 @@ type VaultConfig struct {
 type AgentConfig struct {
 	ID     string `yaml:"id"`
 	Policy string `yaml:"policy"`
+	Token  string `yaml:"token"` // optional: binds this agent id to a token (non-spoofable identity)
 }
 
 type ServerConfig struct {

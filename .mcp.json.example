@@ -2,7 +2,7 @@
   "mcpServers": {
     "termada": {
       "command": "termada",
-      "args": ["serve"]
+      "args": ["serve", "--stdio"]
     }
   }
 }

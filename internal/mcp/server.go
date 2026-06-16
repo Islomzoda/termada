@@ -12,15 +12,15 @@ import (
 	"log"
 	"sync"
 
-	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/errs"
 )
 
 const protocolVersion = "2024-11-05"
 
-// Server serves MCP requests backed by an engine.Manager.
+// Server serves MCP requests backed by a Backend (in-process engine or a daemon
+// proxy).
 type Server struct {
-	mgr     *engine.Manager
+	backend Backend
 	agentID string
 	version string
 	tools   map[string]toolDef
@@ -51,10 +51,10 @@ type rpcError struct {
 	Data    any    `json:"data,omitempty"`
 }
 
-// NewServer builds a server bound to the given manager and agent identity.
-func NewServer(mgr *engine.Manager, agentID, version string, logger *log.Logger) *Server {
+// NewServer builds a server bound to the given backend and agent identity.
+func NewServer(backend Backend, agentID, version string, logger *log.Logger) *Server {
 	s := &Server{
-		mgr:     mgr,
+		backend: backend,
 		agentID: agentID,
 		version: version,
 		logger:  logger,

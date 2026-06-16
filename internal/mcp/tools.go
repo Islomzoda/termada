@@ -50,7 +50,7 @@ var (
 )
 
 func (s *Server) registerTools() {
-	mgr := s.mgr
+	mgr := s.backend
 	agent := s.agentID
 
 	s.add(toolDef{
@@ -85,12 +85,15 @@ func (s *Server) registerTools() {
 			if e != nil {
 				return nil, e
 			}
-			job, err := mgr.Start(agent, argString(a, "session"), argv, argString(a, "mode"))
+			snap, err := mgr.Start(agent, argString(a, "session"), argv, argString(a, "mode"))
 			if err != nil {
 				return nil, asErr(err)
 			}
-			snap := job.Snapshot()
-			return map[string]any{"job_id": snap.JobID, "status": snap.Status, "session_id": snap.SessionID}, nil
+			out := map[string]any{"job_id": snap.JobID, "status": snap.Status, "session_id": snap.SessionID}
+			if snap.ConfirmationID != "" {
+				out["confirmation_id"] = snap.ConfirmationID
+			}
+			return out, nil
 		},
 	})
 
@@ -178,7 +181,7 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return nil, asErr(err)
 			}
-			return map[string]any{"session_id": sess.ID, "target": sess.Target, "mode": sess.Mode, "owner": sess.Owner}, nil
+			return map[string]any{"session_id": sess.SessionID, "target": sess.Target, "mode": sess.Mode, "owner": sess.Owner}, nil
 		},
 	})
 

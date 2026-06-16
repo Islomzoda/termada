@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## [0.2.0] — 2026-06-16
+
+Phase 2 + the phase-1 daemon pillar. termada is now a long-lived daemon with a
+live web dashboard, human-in-the-loop approvals, an encrypted vault and a
+tamper-evident audit log.
+
+### Added
+- **Daemon + control-plane** (spec R4): `termada serve` runs a long-lived process
+  exposing an HTTP/JSON control-plane over a Unix socket (local trust) and the
+  dashboard over loopback TCP. `termada serve --stdio` is now a thin shim that
+  proxies MCP to the daemon (auto-spawning it; falling back to in-process if
+  unavailable), enabling multi-agent attribution and a shared dashboard.
+- **Live web dashboard** (§8.1): real-time sessions, jobs, activity feed (SSE),
+  pending approvals with Approve/Deny, and a Stop-All kill-switch. Token auth with
+  anti-DNS-rebinding (loopback Host/Origin) checks (§M12).
+- **Policy engine** (§18): argv-level allow/deny/confirm classification with
+  hot-reloadable named policies, per-agent policy mapping.
+- **Confirmation queue** (§18a): dangerous commands park in `awaiting_confirmation`
+  with a `confirmation_id`, resolved by a human via dashboard/CLI; deny-by-default
+  timeout. The agent channel cannot self-approve.
+- **Encrypted vault** (§17): age-based, CGO-free credential store with a CLI
+  (`termada vault init|set|list|rm`). Secrets never returned to agents (§3a).
+- **Tamper-evident audit log** (§8.5/SEC-3): hash-chained, fsynced, secret-redacted;
+  `termada audit verify` detects any alteration.
+- **Event bus** (§8.7) feeding dashboard (best-effort) and audit (durable).
+- **CLI**: `status`, `jobs`, `sessions`, `logs`, `kill`, `stop`, `pending`,
+  `approve`, `deny`, `audit [verify]`, `top` (live TUI), `vault`, `setup`.
+- **Config** (§24): YAML config with defaults, policies, agents, redaction.
+
+### Changed
+- MCP clients now launch `termada serve --stdio` (the shim).
+
 ## [0.1.0] — 2026-06-16
 
 First usable release: a local command-execution engine for AI agents, exposed

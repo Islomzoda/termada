@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Termada — live</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--border:#30363d;--fg:#e6edf3;--muted:#8b949e;
+        --green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff;--accent:#a371f7}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+  header{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--border);
+         position:sticky;top:0;background:var(--bg);z-index:10}
+  header h1{font-size:16px;margin:0;letter-spacing:.5px}
+  header .dot{width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block;margin-right:6px}
+  header .dot.live{background:var(--green)}
+  .spacer{flex:1}
+  button{font:inherit;background:var(--panel);color:var(--fg);border:1px solid var(--border);
+         border-radius:6px;padding:6px 12px;cursor:pointer}
+  button:hover{border-color:var(--muted)}
+  button.danger{background:#3d1418;border-color:var(--red);color:#ffb4ab}
+  button.approve{background:#0f2f17;border-color:var(--green);color:#7ee787}
+  button.deny{background:#3d1418;border-color:var(--red);color:#ffb4ab}
+  main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:20px;max-width:1300px;margin:0 auto}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px;min-height:60px}
+  .panel h2{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:0 0 10px}
+  .full{grid-column:1/3}
+  .row{display:flex;gap:10px;align-items:center;padding:7px 0;border-top:1px solid var(--border)}
+  .row:first-of-type{border-top:none}
+  .mono{font-family:inherit}
+  .tag{font-size:11px;padding:1px 7px;border-radius:10px;border:1px solid var(--border);color:var(--muted)}
+  .st-running{color:var(--blue)} .st-exited{color:var(--green)} .st-killed,.st-failed,.st-timed_out{color:var(--red)}
+  .st-awaiting_input,.st-awaiting_confirmation{color:var(--yellow)} .st-backgrounded{color:var(--accent)}
+  .cmd{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg)}
+  .muted{color:var(--muted)}
+  .empty{color:var(--muted);font-style:italic;padding:6px 0}
+  #feed{max-height:280px;overflow:auto}
+  #feed .row{font-size:12.5px}
+  .time{color:var(--muted);font-size:11px;min-width:64px}
+  .pill{font-size:11px;color:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <h1>▦ TERMADA</h1>
+  <span class="muted"><span class="dot" id="livedot"></span><span id="conn">connecting…</span></span>
+  <span class="spacer"></span>
+  <span class="muted" id="ver"></span>
+  <button class="danger" onclick="stopAll()">⏹ Stop All</button>
+</header>
+<main>
+  <div class="panel full" id="approvals-panel" style="display:none">
+    <h2>⚠ Pending approvals</h2>
+    <div id="approvals"></div>
+  </div>
+  <div class="panel">
+    <h2>Sessions</h2>
+    <div id="sessions"><div class="empty">none</div></div>
+  </div>
+  <div class="panel">
+    <h2>Active jobs</h2>
+    <div id="jobs"><div class="empty">none</div></div>
+  </div>
+  <div class="panel full">
+    <h2>Activity</h2>
+    <div id="feed"><div class="empty">waiting for events…</div></div>
+  </div>
+</main>
+<script>
+const token = new URLSearchParams(location.search).get('token') || '';
+const auth = token ? {'Authorization':'Bearer '+token} : {};
+const q = token ? ('?token='+encodeURIComponent(token)) : '';
+
+async function api(path, opts={}){
+  opts.headers = Object.assign({}, auth, opts.headers||{});
+  const r = await fetch(path, opts);
+  return r.json().catch(()=>({}));
+}
+function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function cmd(c){return Array.isArray(c)?c.join(' '):(c||'');}
+
+async function refresh(){
+  let s;
+  try{ s = await api('/api/status'); document.getElementById('conn').textContent='connected';
+       document.getElementById('livedot').classList.add('live'); }
+  catch(e){ document.getElementById('conn').textContent='offline'; return; }
+  document.getElementById('ver').textContent = 'v'+(s.version||'?');
+
+  const sess = s.sessions||[];
+  document.getElementById('sessions').innerHTML = sess.length ? sess.map(x=>
+    `<div class="row"><span class="mono">${esc(x.session_id)}</span>
+     <span class="tag">${esc(x.owner||'—')}</span>
+     <span class="spacer" style="flex:1"></span>
+     <span class="muted">${x.active_jobs?'1 running':'idle'}</span></div>`).join('') : '<div class="empty">none</div>';
+
+  const jobs = (s.jobs||[]).filter(j=>!['exited','killed','failed','timed_out','orphaned'].includes(j.status));
+  document.getElementById('jobs').innerHTML = jobs.length ? jobs.map(j=>
+    `<div class="row"><span class="cmd">${esc(cmd(j.command))}</span>
+     <span class="st-${esc(j.status)}">${esc(j.status)}</span>
+     <button onclick="killJob('${esc(j.job_id)}')">kill</button></div>`).join('') : '<div class="empty">none</div>';
+
+  const pend = s.pending||[];
+  document.getElementById('approvals-panel').style.display = pend.length ? 'block':'none';
+  document.getElementById('approvals').innerHTML = pend.map(p=>
+    `<div class="row"><span class="cmd">${esc(cmd(p.command))}</span>
+     <span class="tag">${esc(p.agent_id||'—')}</span>
+     <span class="muted">matched ${esc(p.matched)}</span>
+     <button class="approve" onclick="resolve('approve','${esc(p.confirmation_id)}')">approve</button>
+     <button class="deny" onclick="resolve('deny','${esc(p.confirmation_id)}')">deny</button></div>`).join('');
+}
+async function killJob(id){ await api('/api/exec/kill',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_id:id})}); refresh(); }
+async function resolve(kind,id){ await api('/api/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirmation_id:id,by:'dashboard'})}); refresh(); }
+async function stopAll(){ if(!confirm('Kill ALL active jobs?'))return; await api('/api/stop_all',{method:'POST'}); refresh(); }
+
+const feed = document.getElementById('feed'); let feedInit=false;
+function addEvent(e){
+  if(!feedInit){feed.innerHTML='';feedInit=true;}
+  const t = new Date(e.time||Date.now()).toLocaleTimeString();
+  const div=document.createElement('div'); div.className='row';
+  div.innerHTML=`<span class="time">${t}</span><span class="pill">${esc(e.type)}</span>
+    <span class="cmd">${esc(e.message||'')}</span><span class="muted">${esc(e.agent_id||'')}</span>`;
+  feed.prepend(div);
+  while(feed.children.length>120) feed.removeChild(feed.lastChild);
+  if(['job.started','job.finished','confirm.requested','confirm.resolved','session.created'].includes(e.type)) refresh();
+}
+try{
+  const es = new EventSource('/api/events'+q);
+  es.onmessage = ev => { try{ addEvent(JSON.parse(ev.data)); }catch(_){} };
+}catch(e){}
+
+refresh(); setInterval(refresh, 2000);
+</script>
+</body>
+</html>

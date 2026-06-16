@@ -90,22 +90,19 @@ func (s *Session) exec(command []string, mode string) (*Job, error) {
 	return s.runRaw(quoteArgv(command), command, mode)
 }
 
-// runRaw writes a raw command line plus the completion marker to the shell. It
-// returns immediately (async, spec EX-2); the reader finalizes the job when the
-// marker appears.
-func (s *Session) runRaw(line string, command []string, mode string) (*Job, error) {
+// startJob attaches an existing job to the session and writes its command plus
+// completion marker to the shell. It returns immediately (async, spec EX-2); the
+// reader finalizes the job when the marker appears. Used both for fresh jobs and
+// for jobs released from the confirmation queue.
+func (s *Session) startJob(job *Job, line string) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return nil, errs.New(errs.NotFound, "session closed")
+		return errs.New(errs.NotFound, "session closed")
 	}
 	if s.current != nil {
 		s.mu.Unlock()
-		return nil, errs.New(errs.SessionBusy, "session %s is running another command", s.ID)
-	}
-	job := newJob(s, command, mode)
-	if mode == "" {
-		job.Mode = ModeAuto
+		return errs.New(errs.SessionBusy, "session %s is running another command", s.ID)
 	}
 	s.current = job
 	s.mu.Unlock()
@@ -121,9 +118,22 @@ func (s *Session) runRaw(line string, command []string, mode string) (*Job, erro
 		s.current = nil
 		s.mu.Unlock()
 		job.finalize(-1, StatusFailed, "pty write: "+err.Error())
-		return job, errs.New(errs.Internal, "pty write: %v", err)
+		return errs.New(errs.Internal, "pty write: %v", err)
 	}
-	job.markStarted()
+	job.activate()
+	return nil
+}
+
+// runRaw creates a fresh job and starts it (used for init and internal raw
+// command lines).
+func (s *Session) runRaw(line string, command []string, mode string) (*Job, error) {
+	job := newJob(s, command, mode)
+	if mode == "" {
+		job.Mode = ModeAuto
+	}
+	if err := s.startJob(job, line); err != nil {
+		return job, err
+	}
 	return job, nil
 }
 

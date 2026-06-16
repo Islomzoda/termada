@@ -25,6 +25,7 @@ type Job struct {
 	exitCode      *int
 	signal        string
 	reason        string
+	confirmID     string
 	killRequested bool
 	createdAt     time.Time
 	startedAt     time.Time
@@ -58,9 +59,28 @@ func newJob(sess *Session, command []string, mode string) *Job {
 	}
 }
 
-func (j *Job) markStarted() {
+// newConfirmJob builds a job parked in awaiting_confirmation, not yet executed.
+func newConfirmJob(sess *Session, command []string, mode string) *Job {
+	j := newJob(sess, command, mode)
+	if mode == "" {
+		j.Mode = ModeAuto
+	}
+	j.status = StatusAwaitingConfirmation
+	return j
+}
+
+// activate transitions a job to running and stamps its start time. Used both
+// for normal starts and when a confirmation is approved.
+func (j *Job) activate() {
 	j.mu.Lock()
+	j.status = StatusRunning
 	j.startedAt = time.Now()
+	j.mu.Unlock()
+}
+
+func (j *Job) setConfirmID(id string) {
+	j.mu.Lock()
+	j.confirmID = id
 	j.mu.Unlock()
 }
 
@@ -127,16 +147,17 @@ func (j *Job) Done() <-chan struct{} { return j.done }
 
 // Info is the JSON-facing snapshot of a job.
 type Info struct {
-	JobID         string   `json:"job_id"`
-	SessionID     string   `json:"session_id"`
-	Command       []string `json:"command"`
-	Status        Status   `json:"status"`
-	ExitCode      *int     `json:"exit_code,omitempty"`
-	Signal        string   `json:"signal,omitempty"`
-	Reason        string   `json:"reason,omitempty"`
-	AwaitingInput bool     `json:"awaiting_input"`
-	Prompt        string   `json:"prompt,omitempty"`
-	DurationMS    int64    `json:"duration_ms"`
+	JobID          string   `json:"job_id"`
+	SessionID      string   `json:"session_id"`
+	Command        []string `json:"command"`
+	Status         Status   `json:"status"`
+	ExitCode       *int     `json:"exit_code,omitempty"`
+	Signal         string   `json:"signal,omitempty"`
+	Reason         string   `json:"reason,omitempty"`
+	ConfirmationID string   `json:"confirmation_id,omitempty"`
+	AwaitingInput  bool     `json:"awaiting_input"`
+	Prompt         string   `json:"prompt,omitempty"`
+	DurationMS     int64    `json:"duration_ms"`
 }
 
 func (j *Job) info() Info {
@@ -155,13 +176,14 @@ func (j *Job) infoLocked() Info {
 		end = time.Now()
 	}
 	in := Info{
-		JobID:     j.ID,
-		SessionID: j.SessionID,
-		Command:   j.Command,
-		Status:    j.status,
-		ExitCode:  j.exitCode,
-		Signal:    j.signal,
-		Reason:    j.reason,
+		JobID:          j.ID,
+		SessionID:      j.SessionID,
+		Command:        j.Command,
+		Status:         j.status,
+		ExitCode:       j.exitCode,
+		Signal:         j.signal,
+		Reason:         j.reason,
+		ConfirmationID: j.confirmID,
 	}
 	if !j.startedAt.IsZero() {
 		in.DurationMS = end.Sub(j.startedAt).Milliseconds()

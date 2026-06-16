@@ -1,11 +1,15 @@
 package engine
 
 import (
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/termada/termada/internal/bus"
 	"github.com/termada/termada/internal/errs"
+	"github.com/termada/termada/internal/ids"
 	"github.com/termada/termada/internal/output"
+	"github.com/termada/termada/internal/policy"
 )
 
 // Config configures the engine (a subset of spec §24 defaults).
@@ -13,6 +17,7 @@ type Config struct {
 	OutputRetentionBytes int
 	MaxForegroundJobs    int
 	DefaultTimeoutMS     int
+	ConfirmTimeoutMS     int
 	RedactionPatterns    []string
 }
 
@@ -22,6 +27,7 @@ func DefaultConfig() Config {
 		OutputRetentionBytes: 5_000_000,
 		MaxForegroundJobs:    8,
 		DefaultTimeoutMS:     30_000,
+		ConfirmTimeoutMS:     120_000,
 	}
 }
 
@@ -30,21 +36,71 @@ type Manager struct {
 	cfg      Config
 	redactor *output.Redactor
 
+	bus           *bus.Bus
+	pol           *policy.Engine
+	agentPolicies map[string]string
+
 	mu       sync.Mutex
 	sessions map[string]*Session
 	jobs     map[string]*Job
-	defaults map[string]string // owner -> default session id
+	defaults map[string]string          // owner -> default session id
+	pending  map[string]*pendingConfirm // confirmation_id -> pending exec
 }
 
 // NewManager builds a manager.
 func NewManager(cfg Config) *Manager {
 	return &Manager{
-		cfg:      cfg,
-		redactor: output.NewRedactor(cfg.RedactionPatterns),
-		sessions: map[string]*Session{},
-		jobs:     map[string]*Job{},
-		defaults: map[string]string{},
+		cfg:           cfg,
+		redactor:      output.NewRedactor(cfg.RedactionPatterns),
+		agentPolicies: map[string]string{},
+		sessions:      map[string]*Session{},
+		jobs:          map[string]*Job{},
+		defaults:      map[string]string{},
+		pending:       map[string]*pendingConfirm{},
 	}
+}
+
+// Bus returns the event bus, or nil if none was set.
+func (m *Manager) Bus() *bus.Bus { return m.bus }
+
+// Redactor exposes the shared redactor (used by audit and other surfaces).
+func (m *Manager) Redactor() *output.Redactor { return m.redactor }
+
+// SetBus attaches an event bus for observability.
+func (m *Manager) SetBus(b *bus.Bus) { m.bus = b }
+
+// SetPolicy attaches the policy engine and the per-agent policy mapping.
+func (m *Manager) SetPolicy(p *policy.Engine, agentPolicies map[string]string) {
+	m.pol = p
+	if agentPolicies != nil {
+		m.agentPolicies = agentPolicies
+	}
+}
+
+// Policy returns the policy engine (may be nil).
+func (m *Manager) Policy() *policy.Engine { return m.pol }
+
+// AgentPolicy returns the policy name for an agent.
+func (m *Manager) AgentPolicy(agent string) string { return m.agentPolicies[agent] }
+
+func (m *Manager) publish(e bus.Event) {
+	if m.bus != nil {
+		m.bus.Publish(e)
+	}
+}
+
+// pendingConfirm is a command awaiting human approval (spec §18a).
+type pendingConfirm struct {
+	ID       string
+	Job      *Job
+	Owner    string
+	Sess     *Session
+	Argv     []string
+	Mode     string
+	Reason   string
+	Matched  string
+	Created  time.Time
+	resolved bool
 }
 
 // SessionInfo is the JSON-facing snapshot of a session.
@@ -74,6 +130,8 @@ func (m *Manager) CreateSession(owner, target, mode string) (*Session, error) {
 	m.mu.Lock()
 	m.sessions[sess.ID] = sess
 	m.mu.Unlock()
+	m.publish(bus.Event{Type: bus.EvSessionCreated, AgentID: owner, SessionID: sess.ID,
+		Data: map[string]any{"target": target, "mode": mode}})
 	return sess, nil
 }
 
@@ -117,11 +175,27 @@ func (m *Manager) activeForeground() int {
 }
 
 // Start runs a command asynchronously and returns the job immediately (EX-2).
+// The command is first classified by policy: denied commands error, commands
+// requiring confirmation are parked in awaiting_confirmation (spec §18/§18a).
 func (m *Manager) Start(owner, sessionID string, command []string, mode string) (*Job, error) {
 	sess, err := m.resolveSession(owner, sessionID)
 	if err != nil {
 		return nil, err
 	}
+
+	if m.pol != nil {
+		dec := m.pol.Evaluate(m.agentPolicies[owner], command)
+		switch dec.Decision {
+		case policy.Deny:
+			m.publish(bus.Event{Type: bus.EvPolicyDenied, AgentID: owner, SessionID: sess.ID,
+				Message: strings.Join(command, " "),
+				Data:    map[string]any{"reason": dec.Reason, "matched": dec.Matched}})
+			return nil, errs.New(errs.DeniedByPolicy, "command denied by policy (%s)", dec.Reason)
+		case policy.Confirm:
+			return m.enqueueConfirm(owner, sess, command, mode, dec), nil
+		}
+	}
+
 	m.mu.Lock()
 	if m.cfg.MaxForegroundJobs > 0 && m.activeForeground() >= m.cfg.MaxForegroundJobs {
 		m.mu.Unlock()
@@ -131,11 +205,132 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 
 	job, err := sess.exec(command, mode)
 	if job != nil {
-		m.mu.Lock()
-		m.jobs[job.ID] = job
-		m.mu.Unlock()
+		m.register(job)
+		if err == nil {
+			m.publishStarted(job)
+			m.watch(job)
+		}
 	}
 	return job, err
+}
+
+func (m *Manager) register(job *Job) {
+	m.mu.Lock()
+	m.jobs[job.ID] = job
+	m.mu.Unlock()
+}
+
+func (m *Manager) publishStarted(job *Job) {
+	m.publish(bus.Event{Type: bus.EvJobStarted, AgentID: job.sess.Owner, SessionID: job.SessionID,
+		JobID: job.ID, Message: strings.Join(job.Command, " ")})
+}
+
+// watch publishes a job.finished event when the job reaches a terminal state.
+func (m *Manager) watch(job *Job) {
+	go func() {
+		<-job.Done()
+		info := job.info()
+		m.publish(bus.Event{Type: bus.EvJobFinished, AgentID: job.sess.Owner, SessionID: job.SessionID,
+			JobID: job.ID, Message: string(info.Status),
+			Data: map[string]any{"status": info.Status, "exit_code": info.ExitCode, "reason": info.Reason}})
+	}()
+}
+
+// enqueueConfirm parks a command awaiting human approval and returns the job in
+// awaiting_confirmation. A timer denies it by default after the configured
+// timeout (spec §18a: deny-by-default).
+func (m *Manager) enqueueConfirm(owner string, sess *Session, command []string, mode string, dec policy.Result) *Job {
+	job := newConfirmJob(sess, command, mode)
+	cid := ids.New("cnf")
+	job.setConfirmID(cid)
+	m.register(job)
+	pc := &pendingConfirm{ID: cid, Job: job, Owner: owner, Sess: sess, Argv: command, Mode: mode,
+		Reason: dec.Reason, Matched: dec.Matched, Created: time.Now()}
+	m.mu.Lock()
+	m.pending[cid] = pc
+	m.mu.Unlock()
+	m.publish(bus.Event{Type: bus.EvConfirmRequested, AgentID: owner, SessionID: sess.ID, JobID: job.ID,
+		Message: strings.Join(command, " "),
+		Data:    map[string]any{"confirmation_id": cid, "matched": dec.Matched}})
+
+	timeout := time.Duration(m.cfg.ConfirmTimeoutMS) * time.Millisecond
+	if timeout > 0 {
+		go func() {
+			time.Sleep(timeout)
+			_ = m.resolveConfirm(cid, false, "timed out", "system")
+		}()
+	}
+	return job
+}
+
+func (m *Manager) resolveConfirm(cid string, approved bool, reason, by string) error {
+	m.mu.Lock()
+	pc := m.pending[cid]
+	if pc == nil || pc.resolved {
+		m.mu.Unlock()
+		return errs.New(errs.NotFound, "confirmation %s not found or already resolved", cid)
+	}
+	pc.resolved = true
+	delete(m.pending, cid)
+	m.mu.Unlock()
+
+	if approved {
+		if err := pc.Sess.startJob(pc.Job, quoteArgv(pc.Argv)); err != nil {
+			pc.Job.finalize(-1, StatusFailed, "exec after approve: "+err.Error())
+			m.publish(bus.Event{Type: bus.EvConfirmResolved, JobID: pc.Job.ID,
+				Data: map[string]any{"confirmation_id": cid, "approved": false, "by": by, "reason": err.Error()}})
+			return err
+		}
+		m.publishStarted(pc.Job)
+		m.watch(pc.Job)
+		m.publish(bus.Event{Type: bus.EvConfirmResolved, JobID: pc.Job.ID, AgentID: pc.Owner,
+			Data: map[string]any{"confirmation_id": cid, "approved": true, "by": by}})
+		return nil
+	}
+	pc.Job.finalize(-1, StatusFailed, "confirmation "+reason+" (by "+by+")")
+	m.publish(bus.Event{Type: bus.EvConfirmResolved, JobID: pc.Job.ID, AgentID: pc.Owner,
+		Data: map[string]any{"confirmation_id": cid, "approved": false, "by": by, "reason": reason}})
+	return nil
+}
+
+// Approve releases a confirmation-gated command for execution.
+func (m *Manager) Approve(confirmID, by string) error {
+	return m.resolveConfirm(confirmID, true, "approved", by)
+}
+
+// Deny rejects a confirmation-gated command.
+func (m *Manager) Deny(confirmID, by string) error {
+	return m.resolveConfirm(confirmID, false, "denied", by)
+}
+
+// PendingInfo describes a command awaiting confirmation.
+type PendingInfo struct {
+	ConfirmationID string   `json:"confirmation_id"`
+	JobID          string   `json:"job_id"`
+	AgentID        string   `json:"agent_id"`
+	SessionID      string   `json:"session_id"`
+	Command        []string `json:"command"`
+	Matched        string   `json:"matched"`
+	WaitingMS      int64    `json:"waiting_ms"`
+}
+
+// ListPending returns all commands awaiting confirmation.
+func (m *Manager) ListPending() []PendingInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []PendingInfo{}
+	for _, pc := range m.pending {
+		out = append(out, PendingInfo{
+			ConfirmationID: pc.ID,
+			JobID:          pc.Job.ID,
+			AgentID:        pc.Owner,
+			SessionID:      pc.Sess.ID,
+			Command:        pc.Argv,
+			Matched:        pc.Matched,
+			WaitingMS:      time.Since(pc.Created).Milliseconds(),
+		})
+	}
+	return out
 }
 
 // RunResult is the result of a blocking exec_run.

@@ -41,6 +41,13 @@
   .legend{margin:6px 4px 2px;font-size:11px} .legend summary{cursor:pointer;color:var(--muted);user-select:none}
   .legend summary:hover{color:var(--fg)} .leg{display:flex;gap:7px;align-items:center;margin:5px 2px;color:var(--muted)}
   .leg .badge{flex-shrink:0}
+  #gate{display:none;position:fixed;inset:0;z-index:1000;background:rgba(10,12,16,.93);align-items:center;justify-content:center}
+  .gate-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:26px 28px;max-width:460px;width:90%;text-align:center;box-shadow:0 12px 48px rgba(0,0,0,.5)}
+  .gate-h{font-size:18px;font-weight:600;margin-bottom:10px}
+  .gate-card p{color:var(--muted);font-size:12.5px;line-height:1.5;margin:8px 0}
+  .gate-card code{background:var(--panel2);padding:1px 5px;border-radius:4px;color:var(--fg)}
+  .gate-card input{width:100%;margin:14px 0 10px;padding:9px 11px;font-family:ui-monospace,Menlo,monospace}
+  .gate-card button{width:100%;padding:9px;font-size:13px}
   .approve-card{background:#2a210c;border:1px solid var(--yellow);border-radius:8px;padding:8px;margin:4px}
   .approve-card .cmd{color:#ffd;word-break:break-all;margin-bottom:6px}
   .approve-card .row{display:flex;gap:6px}
@@ -84,6 +91,16 @@
 </style>
 </head>
 <body>
+<div id="gate">
+  <div class="gate-card">
+    <div class="gate-h">🔒 Termada dashboard</div>
+    <p>This dashboard is local-only and needs the <b>access token</b> printed when the daemon started.</p>
+    <p class="muted">Easiest: run <code>termada dashboard</code> — it prints (and can open) the full link. Or copy the <code>?token=…</code> URL from the <code>termada serve</code> output and paste the token below.</p>
+    <input id="gate-token" placeholder="paste token here" autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter')submitGate()">
+    <button class="on" onclick="submitGate()">Unlock</button>
+    <p class="muted">Stored in this browser — you won't be asked again on this machine.</p>
+  </div>
+</div>
 <header>
   <h1>▦ TERMADA</h1>
   <span class="stat"><span class="dot" id="dot"></span><span id="conn">connecting…</span></span>
@@ -135,14 +152,35 @@
   </main>
 </div>
 <script>
-const token = new URLSearchParams(location.search).get('token') || '';
-const auth = token ? {'Authorization':'Bearer '+token} : {};
-const q = token ? ('token='+encodeURIComponent(token)) : '';
+// Token: taken from ?token= on first visit, then remembered in THIS browser so a
+// bare http://127.0.0.1:7717 keeps working (and the token is stripped from the
+// address bar so it doesn't linger in history). If there's no token anywhere we
+// show a clear gate instead of a silently-empty dashboard.
+let token = new URLSearchParams(location.search).get('token') || '';
+if(token){
+  try{ localStorage.setItem('termada_token', token); }catch(_){}
+  try{ history.replaceState(null,'',location.pathname); }catch(_){}
+}else{
+  try{ token = localStorage.getItem('termada_token') || ''; }catch(_){}
+}
+let q = token ? ('token='+encodeURIComponent(token)) : '';
+function authHeaders(){ return token ? {'Authorization':'Bearer '+token} : {}; }
 const FitAddon = window.FitAddon ? window.FitAddon.FitAddon : null;
 
 async function api(path, opts={}){
-  opts.headers = Object.assign({'Content-Type':'application/json'}, auth, opts.headers||{});
-  const r = await fetch(path, opts); return r.json().catch(()=>({}));
+  opts.headers = Object.assign({'Content-Type':'application/json'}, authHeaders(), opts.headers||{});
+  const r = await fetch(path, opts);
+  if(r.status===401){ showGate(); throw new Error('unauthorized'); }
+  return r.json().catch(()=>({}));
+}
+function showGate(){ const g=document.getElementById('gate'); if(g) g.style.display='flex'; }
+function submitGate(){
+  const t=(document.getElementById('gate-token').value||'').trim();
+  if(!t){ return; }
+  token=t; q='token='+encodeURIComponent(t);
+  try{ localStorage.setItem('termada_token', t); }catch(_){}
+  const g=document.getElementById('gate'); if(g) g.style.display='none';
+  refresh();
 }
 function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function cmd(c){return Array.isArray(c)?c.join(' '):(c||'');}
@@ -259,7 +297,10 @@ let lastJobs={};
 async function refresh(){
   let s;
   try{ s=await api('/api/status'); document.getElementById('conn').textContent='connected'; document.getElementById('dot').classList.add('live'); }
-  catch(e){ document.getElementById('conn').textContent='offline'; document.getElementById('dot').classList.remove('live'); return; }
+  catch(e){
+    if(!token){ showGate(); document.getElementById('conn').textContent='locked'; }
+    else { document.getElementById('conn').textContent='offline'; }
+    document.getElementById('dot').classList.remove('live'); return; }
   document.getElementById('ver').textContent='v'+(s.version||'?');
 
   const jobs=s.jobs||[]; lastJobs={}; jobs.forEach(j=>lastJobs[j.job_id]=j);
@@ -334,7 +375,8 @@ try{
 }catch(e){}
 
 window.addEventListener('resize',()=>{ if(active&&terms[active]&&terms[active].fit){try{terms[active].fit.fit();}catch(_){}}});
-refresh(); setInterval(refresh, 1500);
+if(!token){ showGate(); } else { refresh(); }
+setInterval(()=>{ if(token) refresh(); }, 1500);
 </script>
 </body>
 </html>

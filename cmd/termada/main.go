@@ -13,10 +13,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -71,6 +73,8 @@ func main() {
 		cmdUnlock()
 	case "servers":
 		cmdServers()
+	case "dashboard", "ui", "open":
+		cmdDashboard(os.Args[2:])
 	case "snapshot":
 		cmdSnapshot(os.Args[2:])
 	case "setup":
@@ -415,6 +419,54 @@ func cmdServers() {
 	}
 	for _, s := range servers {
 		fmt.Printf("%-16s %s@%s  %v\n", s.Name, s.User, s.Host, s.Tags)
+	}
+}
+
+// cmdDashboard prints the tokenized dashboard URL (and optionally opens it), so a
+// user who lost the link from the `serve` output has a one-command way back in.
+func cmdDashboard(args []string) {
+	open := false
+	for _, a := range args {
+		if a == "--open" || a == "-o" || a == "open" {
+			open = true
+		}
+	}
+	cfg, _ := config.Load(config.DefaultPath())
+	bind := cfg.HTTP.Bind
+	if bind == "" {
+		bind = "127.0.0.1:7717"
+	}
+	host, port, err := net.SplitHostPort(bind)
+	if err != nil {
+		host, port = "127.0.0.1", "7717"
+	}
+	// A wildcard bind isn't a browseable host; point the browser at loopback.
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	tok, err := os.ReadFile(daemon.TokenPath())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "no dashboard token at %s — is the daemon running?\nstart it with:  termada serve\n", daemon.TokenPath())
+		os.Exit(1)
+	}
+	url := fmt.Sprintf("http://%s:%s/?token=%s", host, port, strings.TrimSpace(string(tok)))
+	fmt.Println(url)
+	if open {
+		if err := openURL(url); err != nil {
+			fmt.Fprintln(os.Stderr, "could not open a browser:", err)
+		}
+	}
+}
+
+// openURL launches the default browser at url (best-effort, per-OS).
+func openURL(url string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", url).Start()
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	default:
+		return exec.Command("xdg-open", url).Start()
 	}
 }
 

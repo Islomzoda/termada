@@ -45,24 +45,46 @@ Genuinely remaining: a real Windows ConPTY runtime (cross-compiles today, but th
 PTY/signals are stubs), and code-signing/notarization (needs Apple Developer ID /
 Windows cert).
 
+## Install
+
+**One line, no Go needed** — downloads the prebuilt binary for your OS/arch (with
+SHA-256 verification) to `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Islomzoda/termada/main/install.sh | sh
+```
+
+Pin a version with `TERMADA_VERSION=v0.7.0`, or change the location with
+`TERMADA_BIN_DIR=~/bin`. Other ways:
+
+```bash
+# Docker (no install) — build the image locally (a published ghcr.io image lands with the next release):
+docker build -t termada . && docker run --rm -p 7717:7717 termada serve
+
+# From source (needs Go 1.26+) — clone, then:
+TERMADA_FROM_SOURCE=1 ./install.sh        # or:  go build -o ~/.local/bin/termada ./cmd/termada
+```
+
+> If `~/.local/bin` isn't on your `PATH`, the installer tells you the one line to add.
+
 ## Quick start
 
 ```bash
-./install.sh          # builds & installs ~/.local/bin/termada (needs Go 1.26+)
-termada serve         # start the daemon (prints the dashboard URL + token)
+termada serve         # start the daemon + dashboard (prints the URL)
+termada dashboard     # open the dashboard (http://127.0.0.1:7717 — no token on your own machine)
 ```
 
-Register the MCP shim with your client (Claude Code):
+Let Claude Code use it (one of):
 
 ```bash
-claude mcp add termada -- ~/.local/bin/termada serve --stdio
+claude mcp add termada -- termada serve --stdio          # CLI
+# or a project .mcp.json (see .mcp.json.example):
+# { "mcpServers": { "termada": { "command": "termada", "args": ["serve","--stdio"] } } }
 ```
 
-or a project `.mcp.json` (see `.mcp.json.example`):
-
-```json
-{ "mcpServers": { "termada": { "command": "/abs/path/termada", "args": ["serve","--stdio"] } } }
-```
+Then just ask the agent to run terminal work — it flows through termada, and you
+watch/control it live on the dashboard. One daemon is shared across every agent
+session and shows them all on one dashboard.
 
 ### Or install as a Claude Code plugin
 
@@ -80,14 +102,8 @@ steps above or Homebrew):
 For listing on MCP registries (official registry, Smithery, etc.) see
 [docs/PUBLISHING.md](docs/PUBLISHING.md).
 
-## Docker
-
-```bash
-docker build -t termada .
-docker run --rm -p 7717:7717 termada serve   # dashboard on http://127.0.0.1:7717
-```
-
-Releases also ship `.deb`/`.rpm` packages and a Homebrew formula via goreleaser.
+Releases also ship `.deb`/`.rpm` packages (and a Homebrew formula, once the tap is
+set up — see [docs/PUBLISHING.md](docs/PUBLISHING.md)).
 
 ## Docs
 

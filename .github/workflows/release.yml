@@ -20,7 +20,10 @@ jobs:
         with:
           go-version: '1.26'
       - name: Run tests before releasing
-        run: go test ./...
+        # -p 1: serialize packages so PTY-spawning tests in different packages
+        # don't contend for CPU on the 2-core runner (that contention flaked the
+        # release gate; reproduced + confirmed fixed locally with -p 1).
+        run: go test -p 1 ./...
       - name: Log in to GHCR (for the Docker image)
         uses: docker/login-action@v3
         with:

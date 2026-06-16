@@ -5,6 +5,7 @@ package controlplane
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -77,6 +78,7 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/api/servers/remove", s.hServerRemove)
 	mux.HandleFunc("/api/servers/test", s.hServerTest)
 	mux.HandleFunc("/api/agent/connect", s.hAgentConnect)
+	mux.HandleFunc("/metrics", s.hMetrics)
 	return mux
 }
 
@@ -629,6 +631,32 @@ func (s *Server) hDeny(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// hMetrics exposes Prometheus metrics (spec §8.6).
+func (s *Server) hMetrics(w http.ResponseWriter, r *http.Request) {
+	jobs := s.mgr.ListJobs("all")
+	active := 0
+	for _, j := range jobs {
+		if !j.Status.Terminal() {
+			active++
+		}
+	}
+	agents := s.mgr.Agents()
+	conns := 0
+	for _, a := range agents {
+		conns += a.Connections
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	out := func(name, help, typ string, v int) {
+		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, v)
+	}
+	out("termada_jobs_total", "Jobs known to the registry.", "gauge", len(jobs))
+	out("termada_jobs_active", "Jobs currently running/awaiting.", "gauge", active)
+	out("termada_sessions", "Open sessions.", "gauge", len(s.mgr.ListSessions()))
+	out("termada_pending_approvals", "Commands awaiting human approval.", "gauge", len(s.mgr.ListPending()))
+	out("termada_agents", "Distinct agents seen.", "gauge", len(agents))
+	out("termada_agent_connections_total", "Total agent connections.", "counter", conns)
 }
 
 func (s *Server) hAgentConnect(w http.ResponseWriter, r *http.Request) {

@@ -235,21 +235,27 @@ func (j *Job) detectPromptLocked() (string, bool) {
 	if j.lastOutput.IsZero() || time.Since(j.lastOutput) < 150*time.Millisecond {
 		return "", false
 	}
-	total := j.clean.Total()
-	from := total - 256
-	if from < 0 {
-		from = 0
-	}
-	chunk, _, _ := j.clean.ReadFrom(from)
-	tail := strings.TrimRight(string(chunk), "\n")
-	if i := strings.LastIndexByte(tail, '\n'); i >= 0 {
-		tail = tail[i+1:]
+	// Prompts usually have no trailing newline, so they sit in the cleaner's
+	// in-progress line. Prefer that; fall back to the last committed line.
+	tail := j.cleaner.Pending()
+	if strings.TrimSpace(tail) == "" {
+		total := j.clean.Total()
+		from := total - 256
+		if from < 0 {
+			from = 0
+		}
+		chunk, _, _ := j.clean.ReadFrom(from)
+		s := strings.TrimRight(string(chunk), "\n")
+		if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+			s = s[i+1:]
+		}
+		tail = s
 	}
 	if tail == "" || len(tail) > 200 {
 		return "", false
 	}
 	if promptRe.MatchString(tail) {
-		return tail, true
+		return strings.TrimRight(tail, " "), true
 	}
 	return "", false
 }

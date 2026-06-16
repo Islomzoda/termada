@@ -54,6 +54,13 @@ func (c *Cleaner) Clean(p []byte) []byte {
 	return out.Bytes()
 }
 
+// Pending returns the current in-progress (not yet newline-terminated) line.
+// Prompts like "Password: " or "Continue? " live here until a newline arrives,
+// so prompt detection must look at this, not only the committed buffer.
+func (c *Cleaner) Pending() string {
+	return string(c.lineCarry)
+}
+
 // Flush returns any buffered, not-yet-newline-terminated content. Call it when
 // the job has finished and the stream is at EOF.
 func (c *Cleaner) Flush() []byte {

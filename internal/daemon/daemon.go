@@ -156,6 +156,20 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}()
 
+	// Garbage-collect old terminal jobs from the registry (spec EX-9).
+	go func() {
+		t := time.NewTicker(60 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				d.mgr.GCOnce(3_600_000, 500) // drop terminal jobs >1h old; keep last 500
+			}
+		}
+	}()
+
 	cp := controlplane.New(d.mgr, d.bus, d.audit, d.fleet, d.vault, d.plugins, d.version)
 	root := http.NewServeMux()
 	root.Handle("/api/", cp.Mux())
@@ -279,7 +293,7 @@ func tokenAuth(token string, h http.Handler) http.Handler {
 		// they hold no secrets and the page reads the token from its own URL for
 		// API calls. (Sub-resources can't carry the token, so gating them would
 		// break the page.) Anti-rebinding Host/Origin checks above still apply.
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/metrics" {
 			got := bearer(r)
 			if got == "" {
 				got = r.URL.Query().Get("token")

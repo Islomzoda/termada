@@ -238,6 +238,7 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 		if err == nil {
 			m.publishStarted(job)
 			m.watch(job)
+			m.autoAnswerWatch(job, owner)
 			m.touchAgent(owner, func(a *AgentStat) { a.Jobs++; a.LastCommand = cmdString(command) })
 		}
 	}
@@ -254,6 +255,46 @@ func (m *Manager) register(job *Job) {
 func (m *Manager) publishStarted(job *Job) {
 	m.publish(bus.Event{Type: bus.EvJobStarted, AgentID: job.sess.Owner, SessionID: job.SessionID,
 		JobID: job.ID, Message: strings.Join(job.Command, " ")})
+}
+
+// autoAnswerWatch applies a policy's auto_answer rules to a job that is waiting
+// for input (spec IN-2): only when the job is confirmed awaiting_input and the
+// prompt tail matches a rule, each rule fires at most once.
+func (m *Manager) autoAnswerWatch(job *Job, owner string) {
+	if m.pol == nil {
+		return
+	}
+	rules := m.pol.AutoAnswers(m.agentPolicies[owner])
+	if len(rules) == 0 {
+		return
+	}
+	go func() {
+		answered := map[string]bool{}
+		t := time.NewTicker(300 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-job.Done():
+				return
+			case <-t.C:
+				info := job.info()
+				if info.Status != StatusAwaitingInput || info.Prompt == "" {
+					continue
+				}
+				for _, rule := range rules {
+					if rule.Match == "" || answered[rule.Match] {
+						continue
+					}
+					if strings.Contains(info.Prompt, rule.Match) {
+						answered[rule.Match] = true
+						_ = job.sess.writeInput([]byte(rule.Send + "\n"))
+						m.publish(bus.Event{Type: "auto_answer", AgentID: owner, JobID: job.ID,
+							Message: rule.Send, Data: map[string]any{"matched": rule.Match}})
+					}
+				}
+			}
+		}
+	}()
 }
 
 // watch publishes a job.finished event when the job reaches a terminal state.
@@ -316,6 +357,7 @@ func (m *Manager) resolveConfirm(cid string, approved bool, reason, by string) e
 		}
 		m.publishStarted(pc.Job)
 		m.watch(pc.Job)
+		m.autoAnswerWatch(pc.Job, pc.Owner)
 		m.publish(bus.Event{Type: bus.EvConfirmResolved, JobID: pc.Job.ID, AgentID: pc.Owner,
 			Data: map[string]any{"confirmation_id": cid, "approved": true, "by": by}})
 		return nil

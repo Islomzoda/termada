@@ -192,15 +192,16 @@ func (s *Session) consume(p []byte) {
 		open := markerOpen(job.marker)
 		idx := bytes.Index(s.scan, open)
 		if idx < 0 {
-			// No marker yet. Flush everything except a safety tail that might hold
-			// a partial marker, so streaming stays responsive without risking
-			// emitting half a marker as output.
-			keep := len(open) + 24
-			if len(s.scan) > keep {
-				out := s.scan[:len(s.scan)-keep]
+			// No marker yet. Flush everything except a trailing fragment that could
+			// be a forming marker (markers begin with the RS byte, which normal
+			// output essentially never contains). This surfaces short prompts that
+			// have no newline immediately, instead of waiting for more bytes.
+			flushTo := partialMarkerStart(s.scan, open)
+			if flushTo > 0 {
+				out := s.scan[:flushTo]
 				job.appendOutput(out)
 				s.sessionAppend(out)
-				s.scan = append([]byte(nil), s.scan[len(s.scan)-keep:]...)
+				s.scan = append([]byte(nil), s.scan[flushTo:]...)
 			}
 			return
 		}
@@ -237,6 +238,22 @@ func (s *Session) sessionAppend(p []byte) {
 
 func markerOpen(marker string) []byte {
 	return append([]byte{markerDelim}, []byte("TERMADA:"+marker+":")...)
+}
+
+// partialMarkerStart returns the index up to which scan can be safely flushed as
+// output: if a trailing fragment looks like the start of a forming marker (a
+// prefix of the open sequence, or the open sequence followed by partial digits),
+// hold back from there; otherwise the whole buffer is safe to flush.
+func partialMarkerStart(scan, open []byte) int {
+	k := bytes.LastIndexByte(scan, markerDelim)
+	if k < 0 {
+		return len(scan)
+	}
+	tail := scan[k:]
+	if bytes.HasPrefix(open, tail) || bytes.HasPrefix(tail, open) {
+		return k // a possible forming marker — hold it back
+	}
+	return len(scan)
 }
 
 // parseMarker parses "<RS>TERMADA:<marker>:<digits><RS>" at the start of s. It

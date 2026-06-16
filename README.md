@@ -10,7 +10,7 @@ that keep `cwd`/env, async jobs with streamed output, PTY input for interactive
 prompts, structured results — while a human watches and controls everything from
 a live dashboard with a kill-switch and approval queue.
 
-> Status: **0.5.0 — phases 1–4.** See [docs/tz/Termada-TZ.md](docs/tz/Termada-TZ.md)
+> Status: **0.7.2 — phases 1–4 complete + multi-agent hardening & agent-UX pass.** See [docs/tz/Termada-TZ.md](docs/tz/Termada-TZ.md)
 > for the full spec / roadmap (§30) and [CHANGELOG.md](CHANGELOG.md). License: Apache-2.0.
 
 ## What works
@@ -63,6 +63,22 @@ or a project `.mcp.json` (see `.mcp.json.example`):
 ```json
 { "mcpServers": { "termada": { "command": "/abs/path/termada", "args": ["serve","--stdio"] } } }
 ```
+
+### Or install as a Claude Code plugin
+
+This repo is also a Claude Code plugin marketplace — it bundles the MCP server
+config and the usage skill (you still need the `termada` binary on PATH, via the
+steps above or Homebrew):
+
+```text
+/plugin marketplace add Islomzoda/termada
+/plugin install termada@termada
+```
+
+<!-- mcp-name: io.github.Islomzoda/termada -->
+
+For listing on MCP registries (official registry, Smithery, etc.) see
+[docs/PUBLISHING.md](docs/PUBLISHING.md).
 
 ## Docker
 

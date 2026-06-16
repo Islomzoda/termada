@@ -1,0 +1,14 @@
+{
+  "name": "termada",
+  "owner": {
+    "name": "Islomzoda",
+    "url": "https://github.com/Islomzoda"
+  },
+  "plugins": [
+    {
+      "name": "termada",
+      "source": "./",
+      "description": "Reliable, transparent terminal runtime for AI agents: persistent local/SSH shell sessions, async jobs with streamed output, interactive-prompt handling, and a live human dashboard with policy/approval/audit."
+    }
+  ]
+}

@@ -38,6 +38,29 @@ archives:
       - LICENSE
       - CHANGELOG.md
 
+nfpms:
+  - id: termada
+    package_name: termada
+    vendor: termada
+    homepage: https://github.com/Islomzoda/termada
+    maintainer: termada
+    description: The reliable, transparent terminal runtime for AI agents.
+    license: Apache-2.0
+    formats: [deb, rpm]
+    bindir: /usr/bin
+    dependencies: [bash]
+
+brews:
+  - name: termada
+    repository:
+      owner: Islomzoda
+      name: homebrew-tap
+    homepage: https://github.com/Islomzoda/termada
+    description: The reliable, transparent terminal runtime for AI agents.
+    license: Apache-2.0
+    dependencies:
+      - name: bash
+
 checksum:
   name_template: "checksums.txt"
   algorithm: sha256

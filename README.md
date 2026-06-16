@@ -62,6 +62,21 @@ or a project `.mcp.json` (see `.mcp.json.example`):
 { "mcpServers": { "termada": { "command": "/abs/path/termada", "args": ["serve","--stdio"] } } }
 ```
 
+## Docker
+
+```bash
+docker build -t termada .
+docker run --rm -p 7717:7717 termada serve   # dashboard on http://127.0.0.1:7717
+```
+
+Releases also ship `.deb`/`.rpm` packages and a Homebrew formula via goreleaser.
+
+## Docs
+
+- [docs/SECURITY.md](docs/SECURITY.md) — threat model: what's protected and what isn't.
+- [docs/PLUGINS.md](docs/PLUGINS.md) — writing out-of-process tool plugins.
+- [docs/tz/Termada-TZ.md](docs/tz/Termada-TZ.md) — full product spec / roadmap.
+
 ## Commands
 
 ```

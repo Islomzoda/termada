@@ -71,6 +71,11 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/api/plugin/call", s.hPluginCall)
 	mux.HandleFunc("/api/exec/hold", s.hExecHold)
 	mux.HandleFunc("/api/exec/stream", s.hExecStream)
+	mux.HandleFunc("/api/session/stream", s.hSessionStream)
+	mux.HandleFunc("/api/session/write", s.hSessionWrite)
+	mux.HandleFunc("/api/servers/add", s.hServerAdd)
+	mux.HandleFunc("/api/servers/remove", s.hServerRemove)
+	mux.HandleFunc("/api/servers/test", s.hServerTest)
 	return mux
 }
 
@@ -133,6 +138,95 @@ func (s *Server) hServers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"servers": s.fleet.ServerList()})
 }
 
+// hServerAdd adds a server from the dashboard (human-only — never an MCP tool,
+// per SEC-7). The credential is stored in the vault; only the reference is kept
+// in the server inventory. Requires the vault unlocked.
+func (s *Server) hServerAdd(w http.ResponseWriter, r *http.Request) {
+	if s.fleet == nil {
+		writeErr(w, errs.New(errs.NotSupported, "fleet not available"))
+		return
+	}
+	var req struct {
+		Name   string   `json:"name"`
+		Host   string   `json:"host"`
+		Port   int      `json:"port"`
+		User   string   `json:"user"`
+		Auth   string   `json:"auth"`   // optional: reference an existing vault entry
+		Secret string   `json:"secret"` // optional: SSH key or password to store now
+		Tags   []string `json:"tags"`
+	}
+	_ = decode(r, &req)
+	if req.Name == "" || req.Host == "" || req.User == "" {
+		writeErr(w, errs.New(errs.InvalidArgument, "name, host and user are required"))
+		return
+	}
+	auth := req.Auth
+	if req.Secret != "" {
+		if s.vault == nil || s.vault.Locked() {
+			writeErr(w, errs.New(errs.VaultLocked, "unlock the vault first to store the credential"))
+			return
+		}
+		if err := s.vault.Set(req.Name, req.Secret); err != nil {
+			writeErr(w, errs.New(errs.Internal, "store credential: %v", err))
+			return
+		}
+		s.mgr.Redactor().AddLiteral(req.Secret)
+		auth = req.Name
+	}
+	if auth == "" {
+		writeErr(w, errs.New(errs.InvalidArgument, "provide a credential (secret) or an existing vault entry (auth)"))
+		return
+	}
+	if err := s.fleet.AddServer(fleet.Server{Name: req.Name, Host: req.Host, Port: req.Port, User: req.User, Auth: auth, Tags: req.Tags}); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) hServerRemove(w http.ResponseWriter, r *http.Request) {
+	if s.fleet == nil {
+		writeErr(w, errs.New(errs.NotSupported, "fleet not available"))
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	_ = decode(r, &req)
+	if err := s.fleet.RemoveServer(req.Name); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if s.vault != nil && !s.vault.Locked() {
+		_ = s.vault.Delete(req.Name)
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// hServerTest checks connectivity by running `true` over SSH and reporting the
+// per-server status (ok / unreachable / timeout / denied / conn_lost).
+func (s *Server) hServerTest(w http.ResponseWriter, r *http.Request) {
+	if s.fleet == nil {
+		writeErr(w, errs.New(errs.NotSupported, "fleet not available"))
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	_ = decode(r, &req)
+	res, err := s.fleet.Run([]string{"true"}, []string{req.Name}, 1)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	status, detail := "unknown", ""
+	if len(res.Results) > 0 {
+		status = res.Results[0].Status
+		detail = res.Results[0].Error
+	}
+	writeJSON(w, map[string]any{"status": status, "error": detail})
+}
+
 func (s *Server) hFleetRun(w http.ResponseWriter, r *http.Request) {
 	if s.fleet == nil {
 		writeErr(w, errs.New(errs.NotSupported, "no servers configured"))
@@ -163,8 +257,17 @@ func (s *Server) hVaultUnlock(w http.ResponseWriter, r *http.Request) {
 		Passphrase string `json:"passphrase"`
 	}
 	_ = decode(r, &req)
-	if err := s.vault.Unlock(req.Passphrase); err != nil {
-		writeErr(w, errs.New(errs.VaultLocked, "%v", err))
+	// First use: if no vault file exists yet, create it with this passphrase;
+	// otherwise unlock the existing one. Lets a non-technical user set up
+	// credentials entirely from the dashboard.
+	var verr error
+	if !s.vault.Exists() {
+		verr = s.vault.Init(req.Passphrase)
+	} else {
+		verr = s.vault.Unlock(req.Passphrase)
+	}
+	if verr != nil {
+		writeErr(w, errs.New(errs.VaultLocked, "%v", verr))
 		return
 	}
 	// Register secrets with the redactor so they can never echo back to agents.
@@ -343,6 +446,64 @@ func (s *Server) hExecWrite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+// hSessionStream streams a session's continuous terminal output (the whole
+// shell, across jobs) as SSE — the live "session terminal" in the dashboard.
+func (s *Server) hSessionStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	sessionID := r.URL.Query().Get("session_id")
+	cursor := r.URL.Query().Get("cursor")
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	send := func(v any) {
+		b, _ := json.Marshal(v)
+		_, _ = w.Write([]byte("data: "))
+		_, _ = w.Write(b)
+		_, _ = w.Write([]byte("\n\n"))
+		flusher.Flush()
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		default:
+		}
+		res, err := s.mgr.SessionTail(sessionID, cursor)
+		if err != nil {
+			send(map[string]any{"error": err.Error()})
+			return
+		}
+		if res.Chunk != "" {
+			send(map[string]any{"chunk": res.Chunk})
+		}
+		cursor = res.NextCursor
+		if res.Closed {
+			send(map[string]any{"done": true})
+			return
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+}
+
+func (s *Server) hSessionWrite(w http.ResponseWriter, r *http.Request) {
+	var req execReq
+	_ = decode(r, &req)
+	appendNL := true
+	if req.AppendNewline != nil {
+		appendNL = *req.AppendNewline
+	}
+	if err := s.mgr.SessionWriteInput(req.SessionID, req.Input, appendNL, req.Human); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
 func (s *Server) hExecHold(w http.ResponseWriter, r *http.Request) {
 	var req execReq
 	_ = decode(r, &req)
@@ -470,11 +631,16 @@ func (s *Server) hDeny(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hStatus(w http.ResponseWriter, r *http.Request) {
+	servers := []fleet.ServerInfo{}
+	if s.fleet != nil {
+		servers = s.fleet.ServerList()
+	}
 	writeJSON(w, map[string]any{
 		"version":  s.version,
 		"sessions": s.mgr.ListSessions(),
 		"jobs":     s.mgr.ListJobs("active"),
 		"pending":  s.mgr.ListPending(),
+		"servers":  servers,
 	})
 }
 

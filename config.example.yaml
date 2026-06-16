@@ -5,7 +5,7 @@ dashboard:
   enabled: true
   open_browser: false
 http:
-  bind: 127.0.0.1:7000
+  bind: 127.0.0.1:7717
 
 notifications:
   desktop: true

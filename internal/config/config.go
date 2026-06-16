@@ -104,7 +104,7 @@ type RecipeConfig struct {
 func Default() Config {
 	return Config{
 		AgentTransport: "stdio",
-		HTTP:           HTTPConfig{Bind: "127.0.0.1:7000"},
+		HTTP:           HTTPConfig{Bind: "127.0.0.1:7717"}, // not 7000: macOS AirPlay Receiver squats on :7000
 		Dashboard:      DashboardConfig{Enabled: true, OpenBrowser: false, Socket: "tcp"},
 		Notifications:  NotificationsConfig{Desktop: true},
 		Defaults: Defaults{

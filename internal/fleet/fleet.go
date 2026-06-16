@@ -4,6 +4,9 @@
 package fleet
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 
@@ -11,22 +14,25 @@ import (
 )
 
 // Server is a configured remote host. Auth references a vault entry, never a
-// secret value.
+// secret value. Managed servers were added at runtime (via the dashboard) and
+// are persisted/removable; non-managed servers come from config.yaml.
 type Server struct {
-	Name string
-	Host string
-	Port int
-	User string
-	Auth string
-	Tags []string
+	Name    string   `json:"name"`
+	Host    string   `json:"host"`
+	Port    int      `json:"port,omitempty"`
+	User    string   `json:"user"`
+	Auth    string   `json:"auth"`
+	Tags    []string `json:"tags,omitempty"`
+	Managed bool     `json:"-"`
 }
 
 // ServerInfo is the secret-free view returned to agents (spec server_list).
 type ServerInfo struct {
-	Name string   `json:"name"`
-	Host string   `json:"host"`
-	User string   `json:"user"`
-	Tags []string `json:"tags,omitempty"`
+	Name    string   `json:"name"`
+	Host    string   `json:"host"`
+	User    string   `json:"user"`
+	Tags    []string `json:"tags,omitempty"`
+	Managed bool     `json:"managed"`
 }
 
 // Result is one server's outcome.
@@ -58,6 +64,7 @@ type Manager struct {
 	servers     []Server
 	runner      Runner
 	parallelism int
+	storePath   string // where dashboard-added (managed) servers persist
 }
 
 // New builds a fleet manager.
@@ -81,9 +88,97 @@ func (m *Manager) ServerList() []ServerInfo {
 	defer m.mu.RUnlock()
 	out := make([]ServerInfo, 0, len(m.servers))
 	for _, s := range m.servers {
-		out = append(out, ServerInfo{Name: s.Name, Host: s.Host, User: s.User, Tags: s.Tags})
+		out = append(out, ServerInfo{Name: s.Name, Host: s.Host, User: s.User, Tags: s.Tags, Managed: s.Managed})
 	}
 	return out
+}
+
+// LoadStore loads previously dashboard-added servers from path and merges them
+// into the inventory.
+func (m *Manager) LoadStore(path string) {
+	m.mu.Lock()
+	m.storePath = path
+	m.mu.Unlock()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var managed []Server
+	if json.Unmarshal(data, &managed) != nil {
+		return
+	}
+	m.mu.Lock()
+	for i := range managed {
+		managed[i].Managed = true
+		m.servers = append(m.servers, managed[i])
+	}
+	m.mu.Unlock()
+}
+
+// AddServer adds a runtime (managed) server and persists it. Errors if the name
+// is already taken.
+func (m *Manager) AddServer(s Server) error {
+	s.Managed = true
+	m.mu.Lock()
+	for _, x := range m.servers {
+		if x.Name == s.Name {
+			m.mu.Unlock()
+			return errs.New(errs.InvalidArgument, "server %q already exists", s.Name)
+		}
+	}
+	m.servers = append(m.servers, s)
+	err := m.saveLocked()
+	m.mu.Unlock()
+	return err
+}
+
+// RemoveServer removes a managed server (config-defined servers cannot be
+// removed via the API).
+func (m *Manager) RemoveServer(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var kept []Server
+	found := false
+	for _, s := range m.servers {
+		if s.Name == name {
+			if !s.Managed {
+				return errs.New(errs.DeniedByPolicy, "server %q is defined in config.yaml; edit the file to remove it", name)
+			}
+			found = true
+			continue
+		}
+		kept = append(kept, s)
+	}
+	if !found {
+		return errs.New(errs.NotFound, "server %q not found or not managed", name)
+	}
+	m.servers = kept
+	return m.saveLocked()
+}
+
+// saveLocked persists the managed servers. Caller holds m.mu.
+func (m *Manager) saveLocked() error {
+	if m.storePath == "" {
+		return nil
+	}
+	var managed []Server
+	for _, s := range m.servers {
+		if s.Managed {
+			managed = append(managed, s)
+		}
+	}
+	data, err := json.MarshalIndent(managed, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(m.storePath), 0o700); err != nil {
+		return err
+	}
+	tmp := m.storePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, m.storePath)
 }
 
 // selectServers resolves a selector (server names and/or tags) to servers. An

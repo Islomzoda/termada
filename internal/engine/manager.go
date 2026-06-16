@@ -600,6 +600,65 @@ func (m *Manager) Shutdown() {
 	}
 }
 
+func (m *Manager) getSession(id string) (*Session, error) {
+	m.mu.Lock()
+	s := m.sessions[id]
+	m.mu.Unlock()
+	if s == nil {
+		return nil, errs.New(errs.NotFound, "session %s not found", id)
+	}
+	return s, nil
+}
+
+// SessionStreamResult is incremental session-terminal output.
+type SessionStreamResult struct {
+	Chunk      string `json:"chunk"`
+	NextCursor string `json:"next_cursor"`
+	Gap        bool   `json:"gap,omitempty"`
+	Closed     bool   `json:"closed"`
+}
+
+// SessionTail returns the session's continuous terminal output from the cursor
+// onward (the whole shell, across all jobs) — what the dashboard streams as one
+// live terminal for the session.
+func (m *Manager) SessionTail(sessionID, cursor string) (*SessionStreamResult, error) {
+	s, err := m.getSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	off, err := output.DecodeCursor(cursor)
+	if err != nil {
+		return nil, err
+	}
+	chunk, next, gap := s.clean.ReadFrom(off)
+	return &SessionStreamResult{
+		Chunk:      string(chunk),
+		NextCursor: output.EncodeCursor(next),
+		Gap:        gap,
+		Closed:     s.isClosed(),
+	}, nil
+}
+
+// SessionWriteInput sends operator input directly to a session's shell PTY.
+// If the current foreground job's input is held, agent input (human=false) is
+// rejected; operator input (human=true) always goes through.
+func (m *Manager) SessionWriteInput(sessionID, input string, appendNewline, human bool) error {
+	s, err := m.getSession(sessionID)
+	if err != nil {
+		return err
+	}
+	if cur := s.currentJob(); cur != nil {
+		if hi, _ := cur.holds(); hi && !human {
+			return errs.New(errs.DeniedByPolicy, "input is held by a human operator")
+		}
+	}
+	data := []byte(input)
+	if appendNewline {
+		data = append(data, '\n')
+	}
+	return s.writeInput(data)
+}
+
 func (m *Manager) getJob(id string) (*Job, error) {
 	m.mu.Lock()
 	job := m.jobs[id]

@@ -95,6 +95,7 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	v := vault.New(config.ExpandPath(cfg.Vault.File))
 	runner := sshx.NewRunner(v, filepath.Join(RuntimeDir(), "known_hosts"), 20*time.Second)
 	fl := fleet.New(buildServers(cfg), runner, 5)
+	fl.LoadStore(filepath.Join(RuntimeDir(), "servers.json"))
 
 	plugins := plugin.New(filepath.Join(RuntimeDir(), "plugins"))
 	if err := plugins.Load(); err != nil {
@@ -255,13 +256,20 @@ func tokenAuth(token string, h http.Handler) http.Handler {
 			http.Error(w, "forbidden origin", http.StatusForbidden)
 			return
 		}
-		got := bearer(r)
-		if got == "" {
-			got = r.URL.Query().Get("token")
-		}
-		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
+		// The token gates the API (the privileged surface). Static dashboard
+		// assets (the SPA, vendored xterm, css) are served freely on loopback —
+		// they hold no secrets and the page reads the token from its own URL for
+		// API calls. (Sub-resources can't carry the token, so gating them would
+		// break the page.) Anti-rebinding Host/Origin checks above still apply.
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			got := bearer(r)
+			if got == "" {
+				got = r.URL.Query().Get("token")
+			}
+			if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
 		}
 		h.ServeHTTP(w, r)
 	})

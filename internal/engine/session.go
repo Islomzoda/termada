@@ -36,10 +36,17 @@ type Session struct {
 	redactor *output.Redactor
 	shell    *ptyShell
 
+	// session-wide live terminal buffer: every byte the shell emits (across all
+	// jobs) is appended here so the dashboard can show one continuous terminal
+	// for the session, like a real shell.
+	clean   *output.Buffer
+	cleaner *output.Cleaner
+
 	mu      sync.Mutex
 	current *Job
 	scan    []byte
 	closed  bool
+	ready   bool // init finished; session-terminal buffer starts capturing
 }
 
 // newSession spawns the shell, starts the reader, and runs the init sequence
@@ -59,6 +66,8 @@ func newSession(owner, target, mode string, cfg SessionConfig, redactor *output.
 		cfg:       cfg,
 		redactor:  redactor,
 		shell:     shell,
+		clean:     output.NewBuffer(cfg.OutputRetentionBytes),
+		cleaner:   &output.Cleaner{},
 	}
 	go s.readLoop()
 
@@ -77,6 +86,9 @@ func newSession(owner, target, mode string, cfg SessionConfig, redactor *output.
 		shell.close()
 		return nil, errs.New(errs.Internal, "session init timed out")
 	}
+	s.mu.Lock()
+	s.ready = true
+	s.mu.Unlock()
 	return s, nil
 }
 
@@ -185,7 +197,9 @@ func (s *Session) consume(p []byte) {
 			// emitting half a marker as output.
 			keep := len(open) + 24
 			if len(s.scan) > keep {
-				job.appendOutput(s.scan[:len(s.scan)-keep])
+				out := s.scan[:len(s.scan)-keep]
+				job.appendOutput(out)
+				s.sessionAppend(out)
 				s.scan = append([]byte(nil), s.scan[len(s.scan)-keep:]...)
 			}
 			return
@@ -195,15 +209,29 @@ func (s *Session) consume(p []byte) {
 			// Opening found but exit code/closing delimiter not yet complete.
 			if idx > 0 {
 				job.appendOutput(s.scan[:idx])
+				s.sessionAppend(s.scan[:idx])
 				s.scan = append([]byte(nil), s.scan[idx:]...)
 			}
 			return
 		}
 		job.appendOutput(s.scan[:idx])
+		s.sessionAppend(s.scan[:idx])
 		job.finalize(code, "", "")
 		s.scan = append([]byte(nil), rest...)
 		s.current = nil
 		// Loop again in case more data trails the marker.
+	}
+}
+
+// sessionAppend feeds job output into the session-wide live terminal buffer
+// (cleaned + redacted). Called by the reader goroutine only.
+func (s *Session) sessionAppend(p []byte) {
+	if len(p) == 0 || !s.ready {
+		return
+	}
+	cleaned := s.cleaner.Clean(p)
+	if len(cleaned) > 0 {
+		_, _ = s.clean.Write([]byte(s.redactor.Redact(string(cleaned))))
 	}
 }
 
@@ -252,6 +280,12 @@ func (s *Session) currentJob() *Job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.current
+}
+
+func (s *Session) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 func (s *Session) close() {

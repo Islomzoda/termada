@@ -33,7 +33,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.5.0"
+const version = "0.5.1"
 
 func main() {
 	if len(os.Args) < 2 {

@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## [0.5.1] — 2026-06-16
+
+Dashboard fixes (found by driving it in a real browser) and UI server management.
+
+### Fixed
+- **Terminals never rendered in the browser**: the page loads with `?token=`, but
+  the browser fetches sub-resources (vendored `xterm.js`) relative — without the
+  token — so they 401'd and `Terminal` was undefined, breaking every terminal on
+  click. The token now gates only `/api/*`; static dashboard assets are served
+  freely on loopback (anti-rebinding Host/Origin checks still apply).
+- **Default dashboard port 7000 collided with macOS AirPlay Receiver** (which
+  listens on `*:7000` over IPv6), so browsers resolving `localhost`→`::1` hit
+  AirPlay and showed an error page. Default moved to `127.0.0.1:7717`.
+
+### Added
+- **Session terminals**: clicking a session opens one continuous live terminal
+  for the whole shell (output across all its jobs), with operator input.
+- **Server management from the dashboard** (human-only, never an MCP tool —
+  SEC-7): add a server (name/host/user/tags + SSH key or password), with the
+  credential stored in the vault and the server persisted (`servers.json`,
+  hot-reloaded, no restart); a live connectivity **test** (ok / unreachable /
+  denied …) with a status dot; and remove. The vault is created on first use from
+  the dashboard, so no terminal step is required.
+- Operator takeover backend: per-job `hold_input`/`hold_output`, human-aware
+  `Write`/`Poll`, SSE output streams for jobs and sessions.
+
 ## [0.5.0] — 2026-06-16
 
 Real-time terminal cockpit — the human-observability pillar done properly

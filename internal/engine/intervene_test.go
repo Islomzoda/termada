@@ -32,6 +32,29 @@ func TestHoldInputBlocksAgentAllowsHuman(t *testing.T) {
 	}
 }
 
+func TestSessionTerminalCapturesAcrossJobs(t *testing.T) {
+	m := newTestManager(t)
+	sess, err := m.CreateSession("agent", "local", "shell")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for _, word := range []string{"alpha", "beta"} {
+		j, err := m.Start("agent", sess.ID, []string{"echo", word}, "")
+		if err != nil {
+			t.Fatalf("start %s: %v", word, err)
+		}
+		waitDone(t, j, 5*time.Second)
+	}
+	res, err := m.SessionTail(sess.ID, "")
+	if err != nil {
+		t.Fatalf("session tail: %v", err)
+	}
+	// One continuous terminal for the session contains BOTH commands' output.
+	if !strings.Contains(res.Chunk, "alpha") || !strings.Contains(res.Chunk, "beta") {
+		t.Fatalf("session terminal = %q, want both alpha and beta", res.Chunk)
+	}
+}
+
 func TestHoldOutputPausesAgentOnly(t *testing.T) {
 	m := newTestManager(t)
 	job, err := m.Start("agent", "", []string{"sh", "-c", "echo first; sleep 0.3; echo second"}, "")

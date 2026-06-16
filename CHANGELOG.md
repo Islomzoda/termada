@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## [0.7.2] — 2026-06-16
+
+Agent-experience pass — make the MCP surface light on tokens and self-explaining
+for agents, and the dashboard clearer for humans.
+
+### Changed
+- **Lean agent responses.** `exec_run`/`exec_poll`/`exec_list`/`file_read` now emit
+  only fields that carry signal — zero/false/redundant values are dropped (no more
+  echoing back the command, or `hold_input/hold_output/awaiting_input:false/…` on
+  every call). A finished `exec_run` returns `{status, exit_code, stdout,
+  session_id}` instead of a 12-field blob; a job handle (`job_id`/`next_cursor`)
+  appears only while there's something left to poll. The rich structs still flow
+  to the dashboard/control-plane unchanged.
+- **`exec_list` is now newest-first, capped, and deterministic** (was unbounded in
+  randomized map order): default 20, `limit` up to 200, `filter` active|recent|all,
+  plus an `omitted` count when older jobs are hidden. The newest-first ordering
+  also fixes the dashboard's job list order.
+- **Self-explaining tool descriptions.** Spell out the argv-is-not-a-shell-line
+  boundary (`$VAR`/`|`/`&&`/globs are literal → use `["bash","-lc","…"]`), that
+  omitting `session` uses a persistent per-agent default session, and that
+  `file_*` operate on the daemon host (not session-scoped). `capabilities` returns
+  a one-shot `quickstart` cheatsheet.
+
+### Added
+- **Actionable error hints.** Structured errors now carry a `hint` — a one-line
+  recovery step (e.g. `session_busy` → run in another session or kill the current
+  job; `cursor_expired` → re-poll from an empty cursor) so agents recover in one
+  shot instead of guessing.
+- **Dashboard status legend** — a plain-language "what do the statuses mean?"
+  explainer (orphaned/backgrounded/awaiting_input/…) for non-technical operators.
+- First tests for the MCP tool layer (lean shapes, hints, newest-first, quickstart).
+
 ## [0.7.1] — 2026-06-16
 
 Completes the multi-agent hardening items from the 0.7.0 road-to-1.0 pass.

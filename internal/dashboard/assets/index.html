@@ -38,6 +38,9 @@
   .st-awaiting_input,.st-awaiting_confirmation{color:var(--yellow);border-color:var(--yellow)}
   .st-backgrounded{color:var(--accent);border-color:var(--accent)}
   .empty{color:var(--muted);font-style:italic;padding:4px 8px}
+  .legend{margin:6px 4px 2px;font-size:11px} .legend summary{cursor:pointer;color:var(--muted);user-select:none}
+  .legend summary:hover{color:var(--fg)} .leg{display:flex;gap:7px;align-items:center;margin:5px 2px;color:var(--muted)}
+  .leg .badge{flex-shrink:0}
   .approve-card{background:#2a210c;border:1px solid var(--yellow);border-radius:8px;padding:8px;margin:4px}
   .approve-card .cmd{color:#ffd;word-break:break-all;margin-bottom:6px}
   .approve-card .row{display:flex;gap:6px}
@@ -96,6 +99,15 @@
     <div id="approvals"></div>
     <h2>Sessions (click → live terminal)</h2><div id="sessions"><div class="empty">none</div></div>
     <h2>Jobs (click → terminal)</h2><div id="jobs"><div class="empty">none</div></div>
+    <details class="legend"><summary>What do the statuses mean?</summary>
+      <div class="leg"><span class="badge st-running">running</span> executing right now</div>
+      <div class="leg"><span class="badge st-exited">exited</span> finished (exit code 0 = success)</div>
+      <div class="leg"><span class="badge st-backgrounded">backgrounded</span> still running; control handed back to the agent (long job)</div>
+      <div class="leg"><span class="badge st-awaiting_input">awaiting_input</span> blocked, waiting for typed input</div>
+      <div class="leg"><span class="badge st-awaiting_confirmation">awaiting_confirmation</span> a risky command needs your approval ↑</div>
+      <div class="leg"><span class="badge st-killed">killed / failed / timed_out</span> stopped before finishing</div>
+      <div class="leg"><span class="badge st-orphaned">orphaned</span> daemon restarted — process &amp; output were lost</div>
+    </details>
     <h2>Servers <button class="mini" onclick="toggleServerForm()">+ add</button></h2>
     <div id="server-form">
       <input id="sf-name" placeholder="name  (e.g. prod)">

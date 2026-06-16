@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -665,25 +666,29 @@ func (m *Manager) Kill(jobID string) error {
 func (m *Manager) ListJobs(filter string) []Info {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := []Info{}
-	keep := func(info Info) {
-		switch filter {
-		case "active":
-			if info.Status.Terminal() {
-				return
-			}
-		case "recent":
-			if !info.Status.Terminal() {
-				return
-			}
+	type row struct {
+		at   time.Time
+		info Info
+	}
+	rows := []row{}
+	keep := func(at time.Time, info Info) {
+		if filter == "active" && info.Status.Terminal() {
+			return
 		}
-		out = append(out, info)
+		rows = append(rows, row{at, info})
 	}
 	for _, j := range m.jobs {
-		keep(j.info())
+		keep(j.createdAt, j.info()) // createdAt is immutable after newJob
 	}
 	for _, in := range m.recovered {
-		keep(in)
+		keep(time.Time{}, in) // recovered jobs have no live timestamp — sort oldest
+	}
+	// Newest first, so a default (capped) listing shows what just happened —
+	// deterministic order instead of Go's randomized map iteration.
+	sort.Slice(rows, func(i, j int) bool { return rows[i].at.After(rows[j].at) })
+	out := make([]Info, len(rows))
+	for i, r := range rows {
+		out[i] = r.info
 	}
 	return out
 }

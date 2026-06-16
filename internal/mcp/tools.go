@@ -40,13 +40,14 @@ func obj(props map[string]any, required ...string) map[string]any {
 }
 
 var (
-	strSchema   = map[string]any{"type": "string"}
-	boolSchema  = map[string]any{"type": "boolean"}
-	intSchema   = map[string]any{"type": "integer"}
-	argvSchema  = map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "command as an argv array, e.g. [\"echo\",\"hi\"]"}
-	modeSchema  = map[string]any{"type": "string", "enum": []string{"auto", "foreground", "background"}}
-	sigSchema   = map[string]any{"type": "string", "enum": []string{"SIGTERM", "SIGKILL", "SIGINT", "SIGHUP"}}
-	emptySchema = map[string]any{"type": "object", "properties": map[string]any{}}
+	strSchema     = map[string]any{"type": "string"}
+	boolSchema    = map[string]any{"type": "boolean"}
+	intSchema     = map[string]any{"type": "integer"}
+	sessionSchema = map[string]any{"type": "string", "description": "session id from session_create. Omit to use your per-agent default session (cwd/env still persist across your calls)."}
+	argvSchema    = map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "command as an argv array, e.g. [\"git\",\"status\"]. Each element is a literal arg — NOT a shell line (no $VAR, |, &&, globs). For shell features use [\"bash\",\"-lc\",\"<line>\"]."}
+	modeSchema    = map[string]any{"type": "string", "enum": []string{"auto", "foreground", "background"}}
+	sigSchema     = map[string]any{"type": "string", "enum": []string{"SIGTERM", "SIGKILL", "SIGINT", "SIGHUP"}}
+	emptySchema   = map[string]any{"type": "object", "properties": map[string]any{}}
 )
 
 func (s *Server) registerTools() {
@@ -55,10 +56,10 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "exec_run",
-		Description: "Run a command and wait up to timeout_ms for it to finish, returning structured output. Long-running commands return with status running/backgrounded.",
+		Description: "Run a command and wait for it, returning {status, exit_code, stdout} (empty/false fields are omitted to stay light). cwd and env PERSIST across calls in the same session — omit `session` to use your own per-agent default session (state still persists). NOTE: `command` is an argv array, not a shell line; $VARS, |, &&, >, globs and `cd x && y` are literal — for shell features use [\"bash\",\"-lc\",\"<line>\"]. A command still going past timeout_ms returns status=running/backgrounded with a job_id — stream it with exec_poll.",
 		InputSchema: obj(map[string]any{
 			"command":    argvSchema,
-			"session":    strSchema,
+			"session":    sessionSchema,
 			"mode":       modeSchema,
 			"timeout_ms": intSchema,
 		}, "command"),
@@ -68,16 +69,19 @@ func (s *Server) registerTools() {
 				return nil, e
 			}
 			res, err := mgr.Run(s.agentID, argString(a, "session"), argv, argString(a, "mode"), argInt(a, "timeout_ms"))
-			return res, asErr(err)
+			if err != nil {
+				return nil, asErr(err)
+			}
+			return leanRun(res), nil
 		},
 	})
 
 	s.add(toolDef{
 		Name:        "exec_start",
-		Description: "Start a command asynchronously and return immediately with a job_id. Poll with exec_poll.",
+		Description: "Start a command asynchronously; returns {job_id, status} immediately. Stream output with exec_poll(job_id, cursor). Same argv/session rules as exec_run. (exec_run with mode=\"background\" does the same thing — use whichever reads clearer.)",
 		InputSchema: obj(map[string]any{
 			"command": argvSchema,
-			"session": strSchema,
+			"session": sessionSchema,
 			"mode":    modeSchema,
 		}, "command"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
@@ -99,20 +103,23 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "exec_poll",
-		Description: "Fetch incremental output from a job since the cursor, plus current status.",
+		Description: "Fetch new output for a job since `cursor` (omit cursor to read from the start), plus status. Pass the returned next_cursor on your next poll. status=awaiting_input means the command is blocked on stdin — answer it with exec_write. When status is terminal (exited/killed/…), there is no next_cursor and nothing more to poll.",
 		InputSchema: obj(map[string]any{
 			"job_id": strSchema,
-			"cursor": strSchema,
+			"cursor": map[string]any{"type": "string", "description": "the next_cursor from your previous poll; omit to read from the start of retained output"},
 		}, "job_id"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
 			res, err := mgr.Poll(argString(a, "job_id"), argString(a, "cursor"))
-			return res, asErr(err)
+			if err != nil {
+				return nil, asErr(err)
+			}
+			return leanPoll(res), nil
 		},
 	})
 
 	s.add(toolDef{
 		Name:        "exec_write",
-		Description: "Send input to a running job's PTY (e.g. to answer a prompt). Set secret=true for passwords so the value is redacted and never logged.",
+		Description: "Answer a job blocked on stdin (use when a poll shows status=awaiting_input): sends `input` to the job's PTY. append_newline defaults true (presses Enter). Set secret=true for passwords so the value is redacted and never logged.",
 		InputSchema: obj(map[string]any{
 			"job_id":         strSchema,
 			"input":          strSchema,
@@ -158,20 +165,47 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "exec_list",
-		Description: "List jobs filtered by active|recent|all (default all).",
-		InputSchema: obj(map[string]any{"filter": map[string]any{"type": "string", "enum": []string{"active", "recent", "all"}}}),
+		Description: "List your jobs, newest first. filter: active (only unfinished) | recent (default, the latest jobs) | all. Pass `limit` to widen the window (default 20). When older jobs are hidden, the response includes an `omitted` count.",
+		InputSchema: obj(map[string]any{
+			"filter": map[string]any{"type": "string", "enum": []string{"active", "recent", "all"}},
+			"limit":  map[string]any{"type": "integer", "description": "max jobs to return, newest first (default 20, max 200)"},
+		}),
 		Handler: func(a map[string]any) (any, *errs.Error) {
 			filter := argString(a, "filter")
 			if filter == "" {
-				filter = "all"
+				filter = "recent"
 			}
-			return map[string]any{"jobs": mgr.ListJobs(filter)}, nil
+			limit := argInt(a, "limit")
+			if limit <= 0 {
+				if filter == "all" {
+					limit = 100
+				} else {
+					limit = 20
+				}
+			}
+			if limit > 200 {
+				limit = 200
+			}
+			all := mgr.ListJobs(filter) // already newest-first
+			total := len(all)
+			if len(all) > limit {
+				all = all[:limit]
+			}
+			jobs := make([]map[string]any, len(all))
+			for i, in := range all {
+				jobs[i] = leanInfo(in)
+			}
+			out := map[string]any{"jobs": jobs}
+			if total > len(jobs) {
+				out["omitted"] = total - len(jobs)
+			}
+			return out, nil
 		},
 	})
 
 	s.add(toolDef{
 		Name:        "session_create",
-		Description: "Create a persistent-shell session that preserves cwd/env between commands. target=local, or a configured server name for a persistent remote SSH session.",
+		Description: "Create a named persistent-shell session that preserves cwd/env between commands. Optional — if you just want persistence you can skip this and let exec_run use your per-agent default session. Create one explicitly when you want a SECOND independent shell (e.g. a separate cwd/venv) or a remote one: target=local (default) or a configured server name for a persistent remote SSH session.",
 		InputSchema: obj(map[string]any{
 			"target": map[string]any{"type": "string", "description": "\"local\" (default) or a configured server name for a remote SSH session"},
 			"mode":   map[string]any{"type": "string", "enum": []string{"shell"}},
@@ -221,20 +255,23 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "file_read",
-		Description: "Read a local file (secrets are best-effort redacted). Returns content, truncated and size.",
+		Description: "Read a file on the daemon host (secrets best-effort redacted). Returns {content, size}. NOT session-scoped — a session's cwd does not apply, so pass an absolute path. Large files are capped (set max_bytes); a `truncated:true` flag appears only when content was cut.",
 		InputSchema: obj(map[string]any{
-			"path":      strSchema,
+			"path":      map[string]any{"type": "string", "description": "absolute path on the daemon host (not relative to any session's cwd)"},
 			"max_bytes": intSchema,
 		}, "path"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
 			res, err := mgr.FileRead(argString(a, "path"), argInt(a, "max_bytes"))
-			return res, asErr(err)
+			if err != nil {
+				return nil, asErr(err)
+			}
+			return leanFileRead(res), nil
 		},
 	})
 
 	s.add(toolDef{
 		Name:        "file_write",
-		Description: "Write content to a local file. mode 'append' appends, otherwise truncates.",
+		Description: "Write content to a file on the daemon host. mode 'append' appends, otherwise truncates. NOT session-scoped — pass an absolute path (a session's cwd does not apply).",
 		InputSchema: obj(map[string]any{
 			"path":    strSchema,
 			"content": strSchema,
@@ -327,6 +364,7 @@ func (s *Server) registerTools() {
 				"api_version": "0.x",
 				"tools":       s.order,
 				"modes":       []string{engine.ModeAuto, engine.ModeForeground, engine.ModeBackground},
+				"quickstart":  "commands are argv arrays, not shell lines ($VAR/pipes/&&/globs are literal — use [\"bash\",\"-lc\",\"...\"] for shell features). cwd & env persist across calls in a session; omit `session` to use your per-agent default session. exec_run waits and returns stdout; exec_start returns a job_id you stream with exec_poll(job_id, next_cursor). When status=awaiting_input, reply with exec_write. Responses omit empty/false fields to stay light; errors carry a `hint`.",
 				"notes":       "phase 1: local persistent-shell engine; SSH/fleet/vault are phase 2",
 			}, nil
 		},

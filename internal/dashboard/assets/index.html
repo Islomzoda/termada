@@ -63,7 +63,8 @@
   .termctl{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--border)}
   .termctl .grip{flex:1;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .termel{flex:1;min-height:0;padding:6px 8px}
-  .nudge{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);text-align:center;padding:30px}
+  .nudge{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);padding:30px}
+  .nudge>div{max-width:520px;text-align:center;line-height:1.65;font-size:13px}
   .feed{font-size:11.5px}
   .feed .e{display:flex;gap:6px;padding:3px 4px;border-top:1px solid var(--border)}
   .feed .t{color:var(--muted);min-width:58px}
@@ -145,9 +146,9 @@
   <main>
     <div class="tabs" id="tabs"></div>
     <div class="termwrap" id="termwrap">
-      <div class="nudge" id="nudge">Click a <b>session</b> to open its live terminal — the full shell, everything it
+      <div class="nudge" id="nudge"><div>Click a <b>session</b> to open its live terminal — the full shell, everything it
         runs, in real time. You can type straight into it.<br><br>
-        Or click a <b>job</b> to watch one command and take over its input/output.</div>
+        Or click a <b>job</b> to watch one command and take over its input/output.</div></div>
     </div>
   </main>
 </div>

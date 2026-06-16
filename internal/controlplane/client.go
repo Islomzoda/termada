@@ -12,6 +12,7 @@ import (
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/errs"
 	"github.com/termada/termada/internal/fleet"
+	"github.com/termada/termada/internal/plugin"
 )
 
 // Client talks to a running daemon's control-plane over a Unix socket. It
@@ -199,6 +200,20 @@ func (c *Client) FleetRun(command []string, selector []string, parallelism int) 
 	return &out, nil
 }
 
+func (c *Client) PluginTools() []plugin.ToolSpec {
+	var out struct {
+		Tools []plugin.ToolSpec `json:"tools"`
+	}
+	_ = c.get("/api/plugin/tools", &out)
+	return out.Tools
+}
+
+func (c *Client) PluginCall(name string, args map[string]any) (any, error) {
+	var out any
+	err := c.post("/api/plugin/call", map[string]any{"name": name, "args": args}, &out)
+	return out, err
+}
+
 // Unlock sends the vault passphrase to the daemon.
 func (c *Client) Unlock(passphrase string) (int, error) {
 	var out struct {
@@ -248,6 +263,26 @@ func (c *Client) StopAll() (int, error) {
 	}
 	err := c.post("/api/stop_all", struct{}{}, &out)
 	return out.Killed, err
+}
+
+func (c *Client) SnapshotCreate(path string) (*engine.SnapshotInfo, error) {
+	var out engine.SnapshotInfo
+	if err := c.post("/api/snapshot/create", execReq{Path: path}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) SnapshotRestore(id string) error {
+	return c.post("/api/snapshot/restore", execReq{Name: id}, nil)
+}
+
+func (c *Client) SnapshotList() ([]engine.SnapshotInfo, error) {
+	var out struct {
+		Snapshots []engine.SnapshotInfo `json:"snapshots"`
+	}
+	err := c.get("/api/snapshot/list", &out)
+	return out.Snapshots, err
 }
 
 func (c *Client) AuditTail(n int) ([]map[string]any, error) {

@@ -10,7 +10,7 @@ that keep `cwd`/env, async jobs with streamed output, PTY input for interactive
 prompts, structured results — while a human watches and controls everything from
 a live dashboard with a kill-switch and approval queue.
 
-> Status: **0.3.0 — phases 1 & 2.** See [docs/tz/Termada-TZ.md](docs/tz/Termada-TZ.md)
+> Status: **0.4.0 — phases 1–4.** See [docs/tz/Termada-TZ.md](docs/tz/Termada-TZ.md)
 > for the full spec / roadmap (§30) and [CHANGELOG.md](CHANGELOG.md). License: Apache-2.0.
 
 ## What works
@@ -33,9 +33,15 @@ a live dashboard with a kill-switch and approval queue.
 - Fleet: `fleet_run` across servers by name/tag with structured per-server results; SSH with vault creds + TOFU host keys.
 - File tools, recipes, and desktop/Telegram notifications.
 
-Genuinely not done yet: on-disk registry crash-recovery (phase 3), Windows ConPTY,
-plugins, snapshots/undo, code-signing/auto-update (phase 4). The SSH execution
-path needs a reachable server to exercise live.
+**Phase 3 & 4 (now done):** crash-recovery (jobs persist; running jobs recover as
+`orphaned`), local-FS snapshots/undo, out-of-process plugins (`<plugin>.<tool>`
+over MCP), `termada update` (download → verify SHA-256 → atomic replace) +
+goreleaser/CI, and Windows cross-compilation. SSH is exercised against an
+in-process test server.
+
+Genuinely remaining: a real Windows ConPTY runtime (cross-compiles today, but the
+PTY/signals are stubs), and code-signing/notarization (needs Apple Developer ID /
+Windows cert).
 
 ## Quick start
 
@@ -68,7 +74,13 @@ termada pending | approve | deny   human-in-the-loop approvals
 termada audit [verify]             audit feed / verify the tamper chain
 termada servers | unlock           remote inventory / unlock the vault
 termada vault init|set|list|rm     manage credentials
+termada snapshot create|list|restore   local-FS safety net (undo)
+termada update                     self-update from GitHub releases
 ```
+
+Plugins: drop an executable in `~/.config/termada/plugins/` that answers
+`describe` and `call <tool>` over JSON; its tools appear to agents as
+`<plugin>.<tool>` (run with a minimal env — no vault/token access).
 
 ## MCP tools (18)
 

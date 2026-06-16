@@ -40,6 +40,10 @@ type Manager struct {
 	pol           *policy.Engine
 	agentPolicies map[string]string
 
+	persistPath string
+	snapshotDir string
+	recovered   []Info // jobs recovered from a previous run (orphaned/terminal)
+
 	mu       sync.Mutex
 	sessions map[string]*Session
 	jobs     map[string]*Job
@@ -220,6 +224,7 @@ func (m *Manager) register(job *Job) {
 	m.mu.Lock()
 	m.jobs[job.ID] = job
 	m.mu.Unlock()
+	m.persist()
 }
 
 func (m *Manager) publishStarted(job *Job) {
@@ -235,6 +240,7 @@ func (m *Manager) watch(job *Job) {
 		m.publish(bus.Event{Type: bus.EvJobFinished, AgentID: job.sess.Owner, SessionID: job.SessionID,
 			JobID: job.ID, Message: string(info.Status),
 			Data: map[string]any{"status": info.Status, "exit_code": info.ExitCode, "reason": info.Reason}})
+		m.persist()
 	}()
 }
 
@@ -484,19 +490,24 @@ func (m *Manager) ListJobs(filter string) []Info {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := []Info{}
-	for _, j := range m.jobs {
-		info := j.info()
+	keep := func(info Info) {
 		switch filter {
 		case "active":
 			if info.Status.Terminal() {
-				continue
+				return
 			}
 		case "recent":
 			if !info.Status.Terminal() {
-				continue
+				return
 			}
 		}
 		out = append(out, info)
+	}
+	for _, j := range m.jobs {
+		keep(j.info())
+	}
+	for _, in := range m.recovered {
+		keep(in)
 	}
 	return out
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/errs"
 	"github.com/termada/termada/internal/fleet"
+	"github.com/termada/termada/internal/plugin"
 	"github.com/termada/termada/internal/vault"
 )
 
@@ -25,12 +26,13 @@ type Server struct {
 	audit   *audit.Logger
 	fleet   *fleet.Manager
 	vault   *vault.Vault
+	plugins *plugin.Manager
 	version string
 }
 
 // New builds a control-plane server.
-func New(mgr *engine.Manager, b *bus.Bus, a *audit.Logger, fl *fleet.Manager, v *vault.Vault, version string) *Server {
-	return &Server{mgr: mgr, bus: b, audit: a, fleet: fl, vault: v, version: version}
+func New(mgr *engine.Manager, b *bus.Bus, a *audit.Logger, fl *fleet.Manager, v *vault.Vault, pl *plugin.Manager, version string) *Server {
+	return &Server{mgr: mgr, bus: b, audit: a, fleet: fl, vault: v, plugins: pl, version: version}
 }
 
 // Mux returns the HTTP handler for the API and (later) the dashboard.
@@ -62,7 +64,63 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/api/fleet/run", s.hFleetRun)
 	mux.HandleFunc("/api/vault/unlock", s.hVaultUnlock)
 	mux.HandleFunc("/api/vault/status", s.hVaultStatus)
+	mux.HandleFunc("/api/snapshot/create", s.hSnapshotCreate)
+	mux.HandleFunc("/api/snapshot/restore", s.hSnapshotRestore)
+	mux.HandleFunc("/api/snapshot/list", s.hSnapshotList)
+	mux.HandleFunc("/api/plugin/tools", s.hPluginTools)
+	mux.HandleFunc("/api/plugin/call", s.hPluginCall)
 	return mux
+}
+
+func (s *Server) hPluginTools(w http.ResponseWriter, r *http.Request) {
+	if s.plugins == nil {
+		writeJSON(w, map[string]any{"tools": []any{}})
+		return
+	}
+	writeJSON(w, map[string]any{"tools": s.plugins.Tools()})
+}
+
+func (s *Server) hPluginCall(w http.ResponseWriter, r *http.Request) {
+	if s.plugins == nil {
+		writeErr(w, errs.New(errs.NotFound, "no plugins loaded"))
+		return
+	}
+	var req struct {
+		Name string         `json:"name"`
+		Args map[string]any `json:"args"`
+	}
+	_ = decode(r, &req)
+	res, err := s.plugins.Call(req.Name, req.Args)
+	if err != nil {
+		writeErr(w, errs.New(errs.Internal, "%v", err))
+		return
+	}
+	writeJSON(w, res)
+}
+
+func (s *Server) hSnapshotCreate(w http.ResponseWriter, r *http.Request) {
+	var req execReq
+	_ = decode(r, &req)
+	res, err := s.mgr.SnapshotCreate(req.Path)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, res)
+}
+
+func (s *Server) hSnapshotRestore(w http.ResponseWriter, r *http.Request) {
+	var req execReq
+	_ = decode(r, &req)
+	if err := s.mgr.SnapshotRestore(req.Name); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) hSnapshotList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"snapshots": s.mgr.SnapshotList()})
 }
 
 func (s *Server) hServers(w http.ResponseWriter, r *http.Request) {

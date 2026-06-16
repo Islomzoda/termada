@@ -27,6 +27,7 @@ import (
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/fleet"
 	"github.com/termada/termada/internal/notify"
+	"github.com/termada/termada/internal/plugin"
 	"github.com/termada/termada/internal/policy"
 	"github.com/termada/termada/internal/sshx"
 	"github.com/termada/termada/internal/vault"
@@ -57,6 +58,7 @@ type Daemon struct {
 	audit   *audit.Logger
 	vault   *vault.Vault
 	fleet   *fleet.Manager
+	plugins *plugin.Manager
 	token   string
 }
 
@@ -82,6 +84,10 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	mgr.SetBus(b)
 	mgr.SetPolicy(policy.NewEngine(buildPolicies(cfg)), buildAgentPolicies(cfg))
 	mgr.SetRecipes(buildRecipes(cfg))
+	if err := mgr.EnablePersistence(filepath.Join(RuntimeDir(), "registry.json")); err != nil {
+		logger.Printf("warning: registry recovery failed: %v", err)
+	}
+	mgr.SetSnapshotDir(filepath.Join(RuntimeDir(), "snapshots"))
 
 	// audit uses the same redactor as the engine so secrets are masked in the log.
 	aud.SetRedactor(mgr.Redactor())
@@ -90,13 +96,18 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	runner := sshx.NewRunner(v, filepath.Join(RuntimeDir(), "known_hosts"), 20*time.Second)
 	fl := fleet.New(buildServers(cfg), runner, 5)
 
+	plugins := plugin.New(filepath.Join(RuntimeDir(), "plugins"))
+	if err := plugins.Load(); err != nil {
+		logger.Printf("warning: plugin load: %v", err)
+	}
+
 	token, err := loadOrCreateToken()
 	if err != nil {
 		return nil, err
 	}
 
 	return &Daemon{cfg: cfg, version: version, logger: logger, mgr: mgr, bus: b, audit: aud,
-		vault: v, fleet: fl, token: token}, nil
+		vault: v, fleet: fl, plugins: plugins, token: token}, nil
 }
 
 // Run starts the listeners and blocks until ctx is cancelled.
@@ -126,7 +137,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go notifier.Subscribe(nch)
 	defer cancelNotify()
 
-	cp := controlplane.New(d.mgr, d.bus, d.audit, d.fleet, d.vault, d.version)
+	cp := controlplane.New(d.mgr, d.bus, d.audit, d.fleet, d.vault, d.plugins, d.version)
 	root := http.NewServeMux()
 	root.Handle("/api/", cp.Mux())
 	root.Handle("/", dashboard.Handler())

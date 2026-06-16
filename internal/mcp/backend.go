@@ -4,6 +4,7 @@ import (
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/errs"
 	"github.com/termada/termada/internal/fleet"
+	"github.com/termada/termada/internal/plugin"
 )
 
 // Backend is the set of operations the MCP tools need. It is satisfied both by
@@ -28,6 +29,8 @@ type Backend interface {
 	RecipeRun(owner, session, name string) (*engine.RecipeRunResult, error)
 	ServerList() []fleet.ServerInfo
 	FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error)
+	PluginTools() []plugin.ToolSpec
+	PluginCall(name string, args map[string]any) (any, error)
 }
 
 // LocalBackend adapts an in-process *engine.Manager to the Backend interface.
@@ -96,4 +99,12 @@ func (b *LocalBackend) ServerList() []fleet.ServerInfo { return nil }
 
 func (b *LocalBackend) FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error) {
 	return nil, errs.New(errs.NotSupported, "fleet requires a running daemon (run: termada serve)")
+}
+
+// Plugins are daemon-only (loaded from the plugins dir); the in-process fallback
+// has none.
+func (b *LocalBackend) PluginTools() []plugin.ToolSpec { return nil }
+
+func (b *LocalBackend) PluginCall(name string, args map[string]any) (any, error) {
+	return nil, errs.New(errs.NotSupported, "plugins require a running daemon")
 }

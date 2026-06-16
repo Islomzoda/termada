@@ -27,12 +27,13 @@ import (
 	"github.com/termada/termada/internal/daemon"
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/mcp"
+	"github.com/termada/termada/internal/selfupdate"
 	"github.com/termada/termada/internal/tui"
 	"github.com/termada/termada/internal/vault"
 	"golang.org/x/term"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -70,8 +71,12 @@ func main() {
 		cmdUnlock()
 	case "servers":
 		cmdServers()
+	case "snapshot":
+		cmdSnapshot(os.Args[2:])
 	case "setup":
 		cmdSetup()
+	case "update":
+		cmdUpdate()
 	case "version", "--version", "-v":
 		fmt.Println("termada", version)
 	case "help", "--help", "-h":
@@ -152,7 +157,7 @@ func spawnDaemon(logger *log.Logger) bool {
 	logf, _ := os.OpenFile(filepath.Join(daemon.RuntimeDir(), "daemon.log"),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	cmd := exec.Command(exe, "serve")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.SysProcAttr = detachAttr()
 	cmd.Stdin = nil
 	cmd.Stdout = logf
 	cmd.Stderr = logf
@@ -409,6 +414,64 @@ func cmdServers() {
 	for _, s := range servers {
 		fmt.Printf("%-16s %s@%s  %v\n", s.Name, s.User, s.Host, s.Tags)
 	}
+}
+
+func cmdSnapshot(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: termada snapshot <create <path>|list|restore <id>>")
+		os.Exit(2)
+	}
+	c := mustClient()
+	switch args[0] {
+	case "create":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: termada snapshot create <path>")
+			os.Exit(2)
+		}
+		abs, _ := filepath.Abs(args[1])
+		snap, err := c.SnapshotCreate(abs)
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("snapshot %s  (%d bytes)  %s\n", snap.ID, snap.Bytes, snap.Source)
+	case "list":
+		snaps, err := c.SnapshotList()
+		if err != nil {
+			fatal(err)
+		}
+		for _, s := range snaps {
+			fmt.Printf("%s  %d bytes  %s\n", s.ID, s.Bytes, s.Source)
+		}
+	case "restore":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: termada snapshot restore <id>")
+			os.Exit(2)
+		}
+		if err := c.SnapshotRestore(args[1]); err != nil {
+			fatal(err)
+		}
+		fmt.Println("restored", args[1])
+	default:
+		fmt.Fprintln(os.Stderr, "unknown snapshot subcommand:", args[0])
+		os.Exit(2)
+	}
+}
+
+func cmdUpdate() {
+	exe, err := os.Executable()
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Fprintln(os.Stderr, "checking github.com/Islomzoda/termada for updates…")
+	tag, err := selfupdate.Run("Islomzoda/termada", version, exe)
+	if err != nil {
+		fatal(err)
+	}
+	if strings.TrimPrefix(tag, "v") == version {
+		fmt.Printf("already up to date (v%s)\n", version)
+		return
+	}
+	fmt.Printf("updated to %s — restart termada to apply\n", tag)
 }
 
 func cmdSetup() {

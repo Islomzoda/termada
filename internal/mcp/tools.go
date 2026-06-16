@@ -297,6 +297,26 @@ func (s *Server) registerTools() {
 		},
 	})
 
+	// Dynamic plugin tools (spec §29): each plugin-provided tool is registered as
+	// "<plugin>.<tool>" and dispatched to the out-of-process plugin via the
+	// backend, passing through the same policy/audit as built-in tools.
+	for _, pt := range mgr.PluginTools() {
+		name := pt.Name
+		schema := pt.InputSchema
+		if schema == nil {
+			schema = emptySchema
+		}
+		s.add(toolDef{
+			Name:        name,
+			Description: "[plugin] " + pt.Description,
+			InputSchema: schema,
+			Handler: func(a map[string]any) (any, *errs.Error) {
+				res, err := mgr.PluginCall(name, a)
+				return res, asErr(err)
+			},
+		})
+	}
+
 	s.add(toolDef{
 		Name:        "capabilities",
 		Description: "Report this agent's identity, the API version, available tools and execution modes.",

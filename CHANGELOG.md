@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## [0.4.0] — 2026-06-16
+
+The previously-deferred phase 3 & 4 work — recovery, snapshots, plugins,
+self-update, Windows cross-compilation.
+
+### Added
+- **Crash recovery** (§21/RE-1/RE-2): the job registry is persisted as an
+  atomically-written WAL; on restart, jobs that were running are honestly
+  recovered as `orphaned` (a local PTY process can't survive a parent crash —
+  fork R1), while gracefully-finished jobs keep their terminal status.
+- **Snapshots / undo** (§19, narrow per R8): `termada snapshot create|list|restore`
+  takes a bounded copy of a local file/dir and restores it over the original via
+  an atomic swap. Explicitly scoped to local FS — no general undo for
+  database/network/remote effects.
+- **Self-update** (DI-3): `termada update` checks GitHub releases, downloads the
+  platform asset, verifies its SHA-256 against the published checksums, and
+  atomically replaces the binary. goreleaser config + a tag-triggered release
+  workflow produce the cross-platform archives (signing gated on later keys).
+- **Plugins** (§29): out-of-process plugin executables are discovered from the
+  plugins dir, queried for their tools, and surfaced to agents over MCP as
+  `<plugin>.<tool>`. Plugins run with a minimal environment — no vault, audit key
+  or dashboard token (capability boundary, §3a).
+- **Windows cross-compilation**: the tree now builds for windows/amd64 (and
+  linux/darwin × amd64/arm64). The ConPTY PTY backend and Windows signals are
+  honest "not supported yet" stubs (fork R6) until that platform work lands.
+
+### Tested
+- SSH is now exercised end-to-end against an in-process SSH server (auth
+  success/denial, exec, exit codes, TOFU host keys, via fleet) — no longer
+  compile-only.
+
 ## [0.3.0] — 2026-06-16
 
 Remote access, files, recipes and notifications — the rest of phase 2.

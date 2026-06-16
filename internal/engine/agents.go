@@ -63,7 +63,12 @@ func (m *Manager) Agents() []AgentStat {
 	m.mu.Lock()
 	out := make([]AgentStat, 0, len(m.agents))
 	for _, a := range m.agents {
-		out = append(out, *a)
+		c := *a
+		// Deep-copy History: a plain struct copy shares the slice backing array,
+		// which recordCommand mutates under the lock — the caller reads the
+		// snapshot lock-free (JSON-encodes it), so a shared array is a data race.
+		c.History = append([]string(nil), a.History...)
+		out = append(out, c)
 	}
 	m.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].LastSeenUnix > out[j].LastSeenUnix })

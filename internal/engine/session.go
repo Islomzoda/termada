@@ -88,7 +88,9 @@ func newSessionConn(owner, target, mode string, shell ShellConn, cfg SessionConf
 	}
 	select {
 	case <-job.Done():
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
+		// Generous: under heavy CI load (many PTYs spawning in parallel, -race
+		// slowdown) a shell's first marker round-trip can take several seconds.
 		shell.Close()
 		return nil, errs.New(errs.Internal, "session init timed out")
 	}

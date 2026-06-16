@@ -14,12 +14,30 @@ import (
 
 var tmuxSeq int64
 
-// sshConn bundles one live SSH connection's transport parts.
+// sshConn bundles one live SSH connection's transport parts. The guard makes
+// closing the connection wait for any in-flight Write/Signal to drain, so a
+// Reconnect (reader goroutine) can't tear down the ssh channel while a handler
+// goroutine is still writing to it — the x/crypto/ssh write path is not safe
+// against a concurrent close (use-after-close + a -race-flagged channel race).
 type sshConn struct {
 	client *ssh.Client
 	sess   *ssh.Session
 	stdin  io.WriteCloser
 	stdout io.Reader
+
+	mu     sync.RWMutex // R during write, W during close
+	closed bool
+}
+
+// write sends to the connection's stdin, blocking a concurrent close until it
+// returns; once closed it fails fast instead of touching a torn-down channel.
+func (c *sshConn) write(p []byte) (int, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.closed {
+		return 0, io.ErrClosedPipe
+	}
+	return c.stdin.Write(p)
 }
 
 // sshShell is a persistent interactive shell over an SSH PTY. It satisfies
@@ -53,7 +71,7 @@ func (s *sshShell) Write(p []byte) (int, error) {
 	if c == nil {
 		return 0, io.ErrClosedPipe
 	}
-	return c.stdin.Write(p)
+	return c.write(p)
 }
 
 func (s *sshShell) Close() error {
@@ -74,7 +92,7 @@ func (s *sshShell) Signal(name string) error {
 		if c == nil {
 			return io.ErrClosedPipe
 		}
-		_, err := c.stdin.Write([]byte{0x03})
+		_, err := c.write([]byte{0x03})
 		return err
 	default:
 		return fmt.Errorf("signal %s is not supported over SSH", name)
@@ -103,6 +121,14 @@ func closeConn(c *sshConn) error {
 	if c == nil {
 		return nil
 	}
+	// Take the write lock so we wait for any in-flight write() to finish and
+	// block new ones (they'll see closed==true and bail) before tearing down.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
 	if c.sess != nil {
 		_ = c.sess.Close()
 	}

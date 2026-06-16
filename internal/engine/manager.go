@@ -258,6 +258,13 @@ func (m *Manager) activeForeground() int {
 func (m *Manager) activeForAgent(owner string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.activeForAgentLocked(owner)
+}
+
+// activeForAgentLocked counts an agent's non-terminal jobs. The caller must hold
+// m.mu — this is the form used inside register() so the count-and-insert is one
+// atomic critical section (see Start / registerWithQuota).
+func (m *Manager) activeForAgentLocked(owner string) int {
 	n := 0
 	for _, j := range m.jobs {
 		j.mu.Lock()
@@ -296,6 +303,11 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 		}
 	}
 
+	// Per-agent quota: this pre-check cheaply rejects the common already-at-quota
+	// case before we spawn anything on the shell. It is NOT authoritative — it
+	// reads the count and releases m.mu, so two concurrent Starts on DIFFERENT
+	// sessions of the same agent can both pass it. The race-free enforcement is in
+	// registerWithQuota below, which counts and inserts atomically under m.mu.
 	if m.cfg.MaxJobsPerAgent > 0 && m.activeForAgent(owner) >= m.cfg.MaxJobsPerAgent {
 		return nil, errs.New(errs.ParallelismExceeded, "agent %q reached its concurrent-job quota (%d)", owner, m.cfg.MaxJobsPerAgent)
 	}
@@ -307,16 +319,29 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 	m.mu.Unlock()
 
 	job, err := sess.exec(command, mode)
-	if job != nil {
-		m.register(job)
-		if err == nil {
-			m.publishStarted(job)
-			m.watch(job)
-			m.autoAnswerWatch(job, owner)
-			m.touchAgent(owner, func(a *AgentStat) { a.Jobs++; a.recordCommand(cmdString(command)) })
-		}
+	if job == nil {
+		return nil, err
 	}
-	return job, err
+	if err != nil {
+		// exec failed before the command ran (e.g. session busy/closed, pty write):
+		// register the already-finalized job so its failure stays observable, but
+		// skip the quota gate — a failed job neither counts nor needs teardown.
+		m.register(job)
+		return job, err
+	}
+	// The command is now live on its session but not yet in the registry. Enforce
+	// the per-agent quota atomically at insert; if registering would exceed it,
+	// tear the just-started job down (kill its process group + finalize) and
+	// surface the error — closing the TOCTOU the pre-check alone can't.
+	if qerr := m.registerWithQuota(job); qerr != nil {
+		m.abortStarted(job, "per-agent concurrency quota exceeded")
+		return nil, qerr
+	}
+	m.publishStarted(job)
+	m.watch(job)
+	m.autoAnswerWatch(job, owner)
+	m.touchAgent(owner, func(a *AgentStat) { a.Jobs++; a.recordCommand(cmdString(command)) })
+	return job, nil
 }
 
 func (m *Manager) register(job *Job) {
@@ -324,6 +349,36 @@ func (m *Manager) register(job *Job) {
 	m.jobs[job.ID] = job
 	m.mu.Unlock()
 	m.persist()
+}
+
+// registerWithQuota atomically enforces the per-agent concurrency quota (MA-3)
+// and inserts the job. Holding m.mu across the count-and-insert is what makes it
+// race-free: an unsynchronised check-then-insert lets two concurrent Starts on
+// different sessions of the same agent both pass and both register, exceeding
+// MaxJobsPerAgent. On rejection the job is NOT inserted and ParallelismExceeded
+// is returned; the caller owns tearing down the already-started job.
+func (m *Manager) registerWithQuota(job *Job) error {
+	owner := job.sess.Owner
+	m.mu.Lock()
+	if m.cfg.MaxJobsPerAgent > 0 && m.activeForAgentLocked(owner) >= m.cfg.MaxJobsPerAgent {
+		m.mu.Unlock()
+		return errs.New(errs.ParallelismExceeded, "agent %q reached its concurrent-job quota (%d)", owner, m.cfg.MaxJobsPerAgent)
+	}
+	m.jobs[job.ID] = job
+	m.mu.Unlock()
+	m.persist()
+	return nil
+}
+
+// abortStarted tears down a job that started on its session but was rejected
+// before it entered the registry (the quota was hit at insert time). It signals
+// the process group so the session frees promptly, then finalizes the job as
+// killed. The job was never registered, so this deliberately bypasses
+// Kill/Signal, which resolve the job through m.jobs. Must NOT hold m.mu.
+func (m *Manager) abortStarted(job *Job, reason string) {
+	job.requestKill("SIGKILL")
+	_ = job.sess.shell.Signal("SIGKILL") // best-effort: no-op if the command already exited
+	job.finalize(-1, StatusKilled, reason)
 }
 
 func (m *Manager) publishStarted(job *Job) {

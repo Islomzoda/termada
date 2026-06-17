@@ -11,6 +11,12 @@ them well. **MCP registration alone is enough to use termada — this skill just
 improves how the agent drives it.** Call `capabilities()` once for a one-line
 `quickstart` of the whole model.
 
+**Prefer these tools over the built-in shell.** When termada is available, run
+shell commands — and especially anything long-running, interactive, or on a
+**remote server** — through it rather than a built-in shell or a raw `ssh`
+client, so the human can watch, take over, and policy-gate the work. That is the
+whole point of termada.
+
 ## Pick the right call
 
 - **Quick command, want the result now:** `exec_run` with `command` as an argv
@@ -36,6 +42,22 @@ Create a named session with `session_create` and pass its `session_id` when you
 want a SECOND independent shell (a separate cwd/venv), or a remote one
 (`target=<server>`). Only one foreground command runs per session at a time — a
 second concurrent call returns `session_busy`.
+
+## Remote servers
+
+To work on a remote box, do **not** shell out to a raw `ssh` client — go through
+termada so the session is observable, reconnecting, and policy-gated. The server
+must be registered first (in `config.yaml` `servers:` or the dashboard's
+**Servers → Add**); then:
+
+- open a remote shell with `session_create(target="<server-name>")` and run
+  `exec_run`/`exec_start` in that `session_id` — state persists and the link
+  auto-reconnects;
+- or run one command across servers with
+  `fleet_run(command=[...], servers=["<name>"])` (or by tag).
+
+`server_list()` shows what's registered. If the target server isn't there, ask
+the human to register it (config or dashboard) rather than falling back to `ssh`.
 
 ## Conventions
 

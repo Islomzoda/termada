@@ -128,6 +128,53 @@ Then just ask the agent to do terminal work — it flows through Termada while y
 watch and control it live. One daemon is shared across every agent session and
 shows them all on the same dashboard.
 
+### Reach remote servers through Termada
+
+For the agent to operate a remote box **through Termada** (observable, reconnecting,
+policy-gated) instead of shelling out to raw `ssh`, register the server once — then
+it's reachable **by name**, no IP and no raw ssh client.
+
+Add it to `config.yaml` (see [`config.example.yaml`](config.example.yaml)) and
+restart the daemon:
+
+```yaml
+servers:
+  - name: ispos
+    host: 82.21.7.186
+    user: deploy
+    # auth is OPTIONAL: a vault entry name for a Termada-stored credential.
+    # Omit it to use your own ssh-agent / ~/.ssh key — if you can `ssh deploy@host`, so can Termada.
+    # auth: ispos-ssh-key
+    tags: [prod]
+```
+
+…or add it live from the dashboard (**Servers → Add**). Confirm it's registered:
+
+```bash
+termada servers          # lists registered servers by name
+```
+
+Now the agent reaches it by name:
+
+- **a remote shell session** — `session_create(target="ispos")`, then run `exec_run` / `exec_start` in that session (state persists, the link auto-reconnects);
+- **one command across servers** — `fleet_run(command=[...], servers=["ispos"])` (or by tag).
+
+### Make the agent actually use Termada
+
+Agents like Claude Code and Cursor ship with a built-in shell and will reach for it
+(and for raw `ssh`) by default. Two things steer them to Termada:
+
+1. **Install the usage skill** — the plugin below, or [`skills/termada`](skills/termada/SKILL.md). It teaches the agent how to drive the tools (and to route remote work through registered servers instead of `ssh`).
+2. **Add a project rule** so the agent *prefers* Termada. Put this in `CLAUDE.md`
+   (Claude Code), `.cursor/rules` (Cursor), or your agent's system prompt:
+
+   > Use the Termada MCP tools for **all** shell and remote work — `exec_run` /
+   > `exec_start` for commands, `session_create(target="<server>")` and `fleet_run`
+   > for remote servers. Do **not** use the built-in shell or a raw `ssh` client:
+   > everything must go through Termada so it is observable, reconnecting, and
+   > policy-gated. If a server isn't in `server_list()`, ask me to register it
+   > rather than falling back to `ssh`.
+
 <details><summary>Install as a Claude Code plugin</summary>
 
 This repo is also a Claude Code plugin marketplace — it bundles the MCP server

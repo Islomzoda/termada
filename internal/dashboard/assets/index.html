@@ -48,6 +48,14 @@
   .gate-card code{background:var(--panel2);padding:1px 5px;border-radius:4px;color:var(--fg)}
   .gate-card input{width:100%;margin:14px 0 10px;padding:9px 11px;font-family:ui-monospace,Menlo,monospace}
   .gate-card button{width:100%;padding:9px;font-size:13px}
+  #history{display:none;position:fixed;inset:0;z-index:1000;background:rgba(10,12,16,.93);align-items:center;justify-content:center}
+  .hist-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;width:min(920px,94%);max-height:86vh;display:flex;flex-direction:column;padding:14px 16px}
+  .hist-top{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .hist-top input{flex:0 0 230px;padding:5px 8px;font-size:12px}
+  .hist-list{overflow:auto;flex:1;font-size:12px;border-top:1px solid var(--border)}
+  .hist-foot{font-size:10.5px;margin-top:8px}
+  .arow{display:grid;grid-template-columns:72px 120px 160px 1fr;gap:8px;padding:4px;border-bottom:1px solid var(--border);align-items:baseline}
+  .arow .at{color:var(--muted)} .arow .aa{color:var(--blue)} .arow .ay{color:var(--muted)} .arow .am{white-space:pre-wrap;word-break:break-word}
   .approve-card{background:#2a210c;border:1px solid var(--yellow);border-radius:8px;padding:8px;margin:4px}
   .approve-card .cmd{color:#ffd;word-break:break-all;margin-bottom:6px}
   .approve-card .row{display:flex;gap:6px}
@@ -111,8 +119,20 @@
   <span class="stat">pending <b id="s-pend">0</b></span>
   <span class="spacer"></span>
   <span class="stat" id="ver"></span>
+  <button onclick="openHistory()">📜 History</button>
   <button class="danger" onclick="stopAll()">⏹ Stop All</button>
 </header>
+<div id="history">
+  <div class="hist-card">
+    <div class="hist-top"><b>History — what agents did</b>
+      <span class="muted" id="hist-meta"></span>
+      <span style="flex:1"></span>
+      <input id="hist-filter" placeholder="filter (agent, command, type)…" oninput="renderAudit()">
+      <button onclick="closeHistory()">✕</button></div>
+    <div id="hist-list" class="hist-list"><div class="empty">loading…</div></div>
+    <div class="muted hist-foot">Tamper-evident, hash-chained audit log. Verify with <code>termada audit verify</code>.</div>
+  </div>
+</div>
 <div class="layout">
   <aside>
     <div id="approvals"></div>
@@ -380,6 +400,33 @@ async function refresh(){
 }
 async function resolve(kind,id){ await api('/api/'+kind,{method:'POST',body:JSON.stringify({confirmation_id:id,by:'dashboard'})}); refresh(); }
 async function stopAll(){ if(!confirm('Kill ALL active jobs?'))return; await api('/api/stop_all',{method:'POST'}); refresh(); }
+
+// ---- history / replay (persistent hash-chained audit) --------------------
+let auditRecs=[];
+async function openHistory(){
+  document.getElementById('history').style.display='flex';
+  document.getElementById('hist-list').innerHTML='<div class="empty">loading…</div>';
+  let r={}; try{ r=await api('/api/audit?n=500'); }catch(e){}
+  auditRecs = (r&&r.records) || (Array.isArray(r)?r:[]) || [];
+  renderAudit();
+}
+function closeHistory(){ document.getElementById('history').style.display='none'; }
+function renderAudit(){
+  const q=(document.getElementById('hist-filter').value||'').toLowerCase();
+  let recs=auditRecs.slice();
+  if(q) recs=recs.filter(r=>JSON.stringify(r).toLowerCase().includes(q));
+  recs.reverse(); // newest first
+  document.getElementById('hist-meta').textContent=recs.length+(q?(' / '+auditRecs.length):'')+' records';
+  const list=document.getElementById('hist-list');
+  list.innerHTML = recs.length ? recs.map(r=>{
+    const t=r.time?new Date(r.time).toLocaleTimeString():'';
+    let m=esc(r.message||'');
+    if(r.data&&r.data.matched) m+=' <span class="muted">['+esc(r.data.matched)+']</span>';
+    if(r.session_id) m+=' <span class="muted">·'+esc(short(r.session_id,12))+'</span>';
+    return `<div class="arow"><span class="at">${t}</span><span class="aa">${esc(r.agent_id||'—')}</span><span class="ay">${esc(r.type||'')}</span><span class="am">${m}</span></div>`;
+  }).join('') : '<div class="empty">no records yet</div>';
+}
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeHistory(); } });
 
 const feed=document.getElementById('feed');
 try{

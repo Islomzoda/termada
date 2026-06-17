@@ -89,7 +89,6 @@ type ServerConfig struct {
 	User string   `yaml:"user"`
 	Auth string   `yaml:"auth"` // vault entry reference
 	Tags []string `yaml:"tags"`
-	Tmux string   `yaml:"tmux"` // auto | require | off
 }
 
 type PolicyConfig struct {

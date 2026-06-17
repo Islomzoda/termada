@@ -3,16 +3,12 @@ package sshx
 import (
 	"fmt"
 	"io"
-	"os"
 	"sync"
-	"sync/atomic"
 
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/fleet"
 	"golang.org/x/crypto/ssh"
 )
-
-var tmuxSeq int64
 
 // sshConn bundles one live SSH connection's transport parts. The guard makes
 // closing the connection wait for any in-flight Write/Signal to drain, so a
@@ -42,9 +38,8 @@ func (c *sshConn) write(p []byte) (int, error) {
 
 // sshShell is a persistent interactive shell over an SSH PTY. It satisfies
 // engine.ShellConn, so a remote session runs the exact same marker-based exec
-// protocol as a local PTY session (spec §14, P-10). The remote shell is wrapped
-// in a named tmux session so the work (cwd/env/running command) survives a
-// dropped connection; Reconnect re-dials and re-attaches by name (spec RM-3).
+// protocol as a local PTY session (spec §14, P-10). On a dropped connection,
+// Reconnect re-dials a fresh shell so the session keeps serving commands (spec RM-3).
 type sshShell struct {
 	open func() (*sshConn, error) // (re)establish a connection + tmux re-attach
 
@@ -99,11 +94,9 @@ func (s *sshShell) Signal(name string) error {
 	}
 }
 
-// Reconnect re-dials the server and re-attaches the persistent tmux session,
-// swapping in the fresh transport. Because the remote shell (and any command it
-// was running) survived inside tmux, the session resumes where it left off. If
-// the remote has no tmux it falls back to a plain shell — the connection is
-// re-established but prior in-flight state is gone (the engine orphans it).
+// Reconnect re-dials the server and swaps in a fresh shell transport, so the
+// session keeps serving new commands after a dropped connection. The in-flight
+// command's remote state is not preserved (the engine orphans it).
 func (s *sshShell) Reconnect() error {
 	c, err := s.open()
 	if err != nil {
@@ -139,8 +132,11 @@ func closeConn(c *sshConn) error {
 }
 
 // OpenShell dials the server (vault creds, TOFU host key) and starts an
-// interactive login shell on a PTY, wrapped in a reconnect-safe tmux session,
-// returned as an engine.ShellConn for a persistent remote session.
+// interactive login shell on a PTY, returned as an engine.ShellConn for a
+// persistent remote session running the same marker-based exec protocol as a
+// local PTY. (A plain shell, not tmux: tmux's screen rendering corrupts the
+// completion markers, so a Reconnect re-dials a fresh shell — in-flight remote
+// state is not preserved across a drop; the engine orphans the running job.)
 func (r *Runner) OpenShell(server fleet.Server, cols, rows int) (engine.ShellConn, error) {
 	if cols <= 0 {
 		cols = 200
@@ -148,11 +144,6 @@ func (r *Runner) OpenShell(server fleet.Server, cols, rows int) (engine.ShellCon
 	if rows <= 0 {
 		rows = 50
 	}
-	// Stable tmux session name for this shell's whole lifetime, so a Reconnect
-	// re-attaches the same remote session (state preserved). Unique per process
-	// + per OpenShell call so concurrent remote sessions never collide.
-	name := fmt.Sprintf("termada-%d-%d", os.Getpid(), atomic.AddInt64(&tmuxSeq, 1))
-
 	open := func() (*sshConn, error) {
 		client, err := r.dial(server)
 		if err != nil {
@@ -182,16 +173,6 @@ func (r *Runner) OpenShell(server fleet.Server, cols, rows int) (engine.ShellCon
 			return nil, err
 		}
 		if err := sess.Shell(); err != nil {
-			_ = sess.Close()
-			_ = client.Close()
-			return nil, err
-		}
-		// Opportunistically replace the login shell with a tmux session so the
-		// remote work survives a dropped connection. If tmux is unavailable the
-		// `&&` short-circuits and the plain login shell remains — identical to a
-		// non-tmux server. `exec` keeps the marker protocol on the same channel.
-		wrap := fmt.Sprintf("command -v tmux >/dev/null 2>&1 && exec tmux new-session -A -s '%s'\n", name)
-		if _, err := stdin.Write([]byte(wrap)); err != nil {
 			_ = sess.Close()
 			_ = client.Close()
 			return nil, err

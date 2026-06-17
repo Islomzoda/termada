@@ -63,7 +63,6 @@ servers:
     # if you can already `ssh deploy@prod`, so can Termada.
     auth: prod-ssh-key
     tags: [web, prod]
-    tmux: auto
 
 recipes:
   deploy:

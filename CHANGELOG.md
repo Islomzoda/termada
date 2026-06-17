@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## [0.7.3] — 2026-06-17
+
+### Fixed
+- **Remote SSH sessions broke on any host with `tmux` installed.** The 0.7.1
+  reconnect feature `exec`'d the remote shell into a tmux session when tmux was
+  present, but tmux's screen rendering corrupts the `\036`-delimited completion
+  markers → `session init timed out`. (This is why CI failed only on
+  `ubuntu-latest`, which ships tmux, while macOS and local Debian passed.) Removed
+  the tmux wrapping: remote sessions are a plain SSH PTY shell; `Reconnect`
+  re-dials a fresh shell (the in-flight command is orphaned, not preserved). The
+  release test gate is strict again (no more `continue-on-error`).
+
+### Added
+- **Onboarding CLI:** `termada doctor` (one-command health check), `termada
+  service install|uninstall|status` (launchd/systemd auto-start), `termada
+  dashboard` (print/open the URL), `termada setup` now actually runs `claude mcp
+  add`, and `termada vault reset` for a forgotten passphrase.
+- **No-Go installer:** `curl … | sh` downloads the prebuilt binary (SHA-256
+  verified) — no Go required.
+- **Dashboard:** token-less local-trust access on your own machine, a 📜
+  History/replay timeline over the hash-chained audit (with filter), a read-only
+  Policies panel, and a status legend.
+- **SSH agent / on-disk-key auth:** a server you can already `ssh` into needs no
+  stored credential — no vault, no passphrase.
+
 ## [0.7.2] — 2026-06-16
 
 Agent-experience pass — make the MCP surface light on tokens and self-explaining

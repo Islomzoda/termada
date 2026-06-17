@@ -6,7 +6,7 @@
     "url": "https://github.com/Islomzoda/termada",
     "source": "github"
   },
-  "version": "0.7.4",
+  "version": "0.7.5",
   "packages": [
     {
       "registryType": "oci",

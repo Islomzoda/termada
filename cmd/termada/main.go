@@ -79,6 +79,10 @@ func main() {
 		cmdSnapshot(os.Args[2:])
 	case "setup":
 		cmdSetup()
+	case "doctor":
+		cmdDoctor()
+	case "service":
+		cmdService(os.Args[2:])
 	case "update":
 		cmdUpdate()
 	case "version", "--version", "-v":
@@ -443,6 +447,190 @@ func cmdServers() {
 	}
 }
 
+// cmdService installs/uninstalls termada as a per-user background service so the
+// daemon starts on login and stays running (launchd on macOS, systemd --user on
+// Linux) — no more "nothing works because the daemon isn't up".
+func cmdService(args []string) {
+	action := "install"
+	if len(args) > 0 {
+		action = args[0]
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		serviceDarwin(action)
+	case "linux":
+		serviceLinux(action)
+	default:
+		fmt.Fprintln(os.Stderr, "service is supported on macOS (launchd) and Linux (systemd --user)")
+		os.Exit(2)
+	}
+}
+
+func serviceDarwin(action string) {
+	label := "com.termada.daemon"
+	plist := filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", label+".plist")
+	logf := filepath.Join(daemon.RuntimeDir(), "daemon.log")
+	switch action {
+	case "install":
+		body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>%s</string>
+  <key>ProgramArguments</key><array><string>%s</string><string>serve</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>%s</string>
+  <key>StandardErrorPath</key><string>%s</string>
+</dict></plist>
+`, label, selfPath(), logf, logf)
+		_ = os.MkdirAll(filepath.Dir(plist), 0o755)
+		_ = os.MkdirAll(daemon.RuntimeDir(), 0o700)
+		if err := os.WriteFile(plist, []byte(body), 0o644); err != nil {
+			fatal(err)
+		}
+		_ = exec.Command("launchctl", "unload", plist).Run()
+		if err := exec.Command("launchctl", "load", "-w", plist).Run(); err != nil {
+			fatal(fmt.Errorf("launchctl load: %v (a daemon may already hold the port — `termada stop` first)", err))
+		}
+		fmt.Printf("✓ installed launchd agent %s\n  plist: %s\n  logs:  %s\ntermada now starts on login and restarts if it crashes.\n", label, plist, logf)
+	case "uninstall":
+		_ = exec.Command("launchctl", "unload", plist).Run()
+		_ = os.Remove(plist)
+		fmt.Println("✓ uninstalled launchd agent", label)
+	case "status":
+		out, err := exec.Command("launchctl", "list", label).CombinedOutput()
+		if err != nil {
+			fmt.Println("not loaded — install with: termada service install")
+			return
+		}
+		fmt.Print(string(out))
+	default:
+		fmt.Fprintln(os.Stderr, "usage: termada service <install|uninstall|status>")
+		os.Exit(2)
+	}
+}
+
+func serviceLinux(action string) {
+	unit := filepath.Join(os.Getenv("HOME"), ".config", "systemd", "user", "termada.service")
+	sc := func(a ...string) error { return exec.Command("systemctl", append([]string{"--user"}, a...)...).Run() }
+	switch action {
+	case "install":
+		body := fmt.Sprintf(`[Unit]
+Description=termada daemon (control-plane + dashboard)
+After=network.target
+
+[Service]
+ExecStart=%s serve
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+`, selfPath())
+		_ = os.MkdirAll(filepath.Dir(unit), 0o755)
+		if err := os.WriteFile(unit, []byte(body), 0o644); err != nil {
+			fatal(err)
+		}
+		_ = sc("daemon-reload")
+		if err := sc("enable", "--now", "termada.service"); err != nil {
+			fatal(fmt.Errorf("systemctl --user enable --now termada: %v (try `loginctl enable-linger %s` for boot-time start)", err, os.Getenv("USER")))
+		}
+		fmt.Printf("✓ installed systemd --user unit\n  unit: %s\ntermada now starts with your session and restarts on failure.\n  (for start at boot without login: loginctl enable-linger %s)\n", unit, os.Getenv("USER"))
+	case "uninstall":
+		_ = sc("disable", "--now", "termada.service")
+		_ = os.Remove(unit)
+		_ = sc("daemon-reload")
+		fmt.Println("✓ uninstalled systemd --user unit termada.service")
+	case "status":
+		_ = exec.Command("systemctl", "--user", "status", "termada.service").Run()
+	default:
+		fmt.Fprintln(os.Stderr, "usage: termada service <install|uninstall|status>")
+		os.Exit(2)
+	}
+}
+
+// cmdDoctor diagnoses a setup in one command: what's working, what isn't, and the
+// exact fix for each — so a newcomer never gets silently stuck.
+func cmdDoctor() {
+	ok := func(s string) { fmt.Printf("  \033[32m✓\033[0m %s\n", s) }
+	bad := func(s, hint string) { fmt.Printf("  \033[31m✗\033[0m %s\n      → %s\n", s, hint) }
+	warn := func(s, hint string) { fmt.Printf("  \033[33m!\033[0m %s\n      → %s\n", s, hint) }
+
+	fmt.Printf("termada doctor — v%s\n\n", version)
+
+	self := selfPath()
+	dir := filepath.Dir(self)
+	onPath := false
+	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
+		if p == dir {
+			onPath = true
+			break
+		}
+	}
+	if onPath {
+		ok("binary on PATH: " + self)
+	} else {
+		warn("binary not on PATH ("+self+")", "add: export PATH=\""+dir+":$PATH\"")
+	}
+
+	cfg, err := config.Load(config.DefaultPath())
+	if err != nil {
+		warn("config "+config.DefaultPath()+": "+err.Error(), "using defaults; check the YAML")
+	} else {
+		ok("config: " + config.DefaultPath())
+	}
+
+	if fi, e := os.Stat(daemon.RuntimeDir()); e == nil && fi.IsDir() {
+		ok("runtime dir: " + daemon.RuntimeDir())
+	} else {
+		warn("runtime dir missing: "+daemon.RuntimeDir(), "run: termada setup")
+	}
+
+	c := controlplane.NewUnixClient(daemon.SocketPath())
+	if e := c.Ping(); e != nil {
+		bad("daemon not running", "start it: termada serve   (or: termada service install)")
+	} else {
+		ok("daemon running (socket: " + daemon.SocketPath() + ")")
+		if s, e := c.Status(); e == nil {
+			ok(fmt.Sprintf("control-plane OK: v%s, %d session(s), %d active job(s), %d pending approval(s)",
+				s.Version, len(s.Sessions), len(s.Jobs), len(s.Pending)))
+		}
+	}
+
+	bind := cfg.HTTP.Bind
+	if bind == "" {
+		bind = "127.0.0.1:7717"
+	}
+	if conn, e := net.DialTimeout("tcp", bind, time.Second); e == nil {
+		_ = conn.Close()
+		ok("dashboard port " + bind + " reachable (termada dashboard to open)")
+	} else {
+		warn("dashboard port "+bind+" not listening", "the daemon binds it — start: termada serve")
+	}
+
+	if cfg.Vault.File == "" {
+		cfg.Vault.File = "~/.config/termada/vault.age"
+	}
+	if vault.New(config.ExpandPath(cfg.Vault.File)).Exists() {
+		ok("vault file present (unlock state lives in the daemon — see the dashboard)")
+	} else {
+		warn("no vault yet", "optional: only needed to STORE creds; ssh-agent/~/.ssh servers need none")
+	}
+
+	if os.Getenv("SSH_AUTH_SOCK") != "" {
+		ok("ssh-agent available — remote servers can use your keys (no vault needed)")
+	} else {
+		warn("no ssh-agent ($SSH_AUTH_SOCK unset)", "fine if you use ~/.ssh keys or store creds in the vault")
+	}
+
+	if _, e := exec.LookPath("claude"); e == nil {
+		ok("claude CLI found — register: claude mcp add termada -- termada serve --stdio")
+	} else {
+		warn("claude CLI not found", "install Claude Code, or add termada to your MCP client's config")
+	}
+	fmt.Println()
+}
+
 // cmdDashboard prints the tokenized dashboard URL (and optionally opens it), so a
 // user who lost the link from the `serve` output has a one-command way back in.
 func cmdDashboard(args []string) {
@@ -559,18 +747,32 @@ func cmdUpdate() {
 
 func cmdSetup() {
 	_ = os.MkdirAll(daemon.RuntimeDir(), 0o700)
-	fmt.Printf(`termada setup
+	self := selfPath()
+	fmt.Printf("termada setup\n  runtime: %s\n  config:  %s\n\n", daemon.RuntimeDir(), config.DefaultPath())
 
-Runtime dir: %s
-Config:      %s
+	// Actually register with Claude Code if its CLI is present (idempotent-ish).
+	if _, err := exec.LookPath("claude"); err == nil {
+		out, err := exec.Command("claude", "mcp", "add", "termada", "--", self, "serve", "--stdio").CombinedOutput()
+		s := strings.ToLower(string(out))
+		switch {
+		case err == nil:
+			fmt.Println("✓ registered the MCP server with Claude Code (termada)")
+		case strings.Contains(s, "already") || strings.Contains(s, "exists"):
+			fmt.Println("✓ already registered with Claude Code")
+		default:
+			fmt.Printf("! couldn't auto-register (%v) — run it yourself:\n    claude mcp add termada -- %s serve --stdio\n", err, self)
+		}
+	} else {
+		fmt.Printf("• register with your MCP client (Claude Code):\n    claude mcp add termada -- %s serve --stdio\n", self)
+	}
 
-1. (optional) create an encrypted vault for credentials:
-     termada vault init
-2. start the daemon (control-plane + dashboard):
-     termada serve
-3. register the MCP shim with your client:
-     claude mcp add termada -- %s serve --stdio
-`, daemon.RuntimeDir(), config.DefaultPath(), selfPath())
+	fmt.Printf(`
+Next:
+  termada service install   # run the daemon in the background (start on login)
+      …or: termada serve     # run it in the foreground
+  termada dashboard          # open the dashboard
+  termada doctor             # check everything is wired up
+`)
 }
 
 func unlock(v *vault.Vault) {
@@ -609,6 +811,12 @@ func fatal(err error) {
 func usage() {
 	fmt.Fprintf(os.Stderr, `termada %s — reliable, transparent terminal runtime for AI agents
 
+Getting started:
+  termada setup                 register with Claude Code + next steps
+  termada service install       run the daemon in the background (start on login)
+  termada dashboard [--open]    print/open the dashboard URL
+  termada doctor                check that everything is wired up
+
 Daemon & agent:
   termada serve                 run the daemon (control-plane + dashboard)
   termada serve --stdio         run the MCP stdio shim (launched by MCP clients)
@@ -627,8 +835,7 @@ Inspect & control:
   termada top                   live TUI
 
 Credentials:
-  termada vault init|set|list|rm
-  termada setup                 first-run guidance
+  termada vault init|set|list|rm|reset
 
 MCP client config:
   { "mcpServers": { "termada": { "command": "termada", "args": ["serve","--stdio"] } } }

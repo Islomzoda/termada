@@ -18,13 +18,15 @@ that keep `cwd`/env, async jobs with streamed output, PTY input for interactive
 prompts, and structured results — while you watch and control everything from a
 live dashboard with a kill-switch and an approval queue.
 
-<!-- Hero demo video goes here — drop docs/demo.gif and the README will show it above the dashboard shot. -->
+<p align="center">
+  <img alt="Termada — the live dashboard in action" src="docs/demo.gif" width="760">
+</p>
+
+<p align="center"><sub>The live dashboard: every session is a real terminal you can watch and take over — block or pause the agent, type in yourself — beside the agent panel, read-only policies, a tamper-evident History, and a Stop-All kill-switch. The same view, in full detail:</sub></p>
 
 <p align="center">
   <img alt="Termada dashboard — live sessions, operator take-over, approvals, audit" src="docs/dashboard.png" width="860">
 </p>
-
-<p align="center"><sub>The live dashboard: every session is a real terminal you can watch and take over — block or pause the agent, type in yourself — beside the agent panel, read-only policies, a tamper-evident History, and a Stop-All kill-switch.</sub></p>
 
 ---
 

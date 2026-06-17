@@ -17,6 +17,35 @@ shell commands — and especially anything long-running, interactive, or on a
 client, so the human can watch, take over, and policy-gate the work. That is the
 whole point of termada.
 
+## Setup — if the tools aren't there yet (one-time)
+
+Don't see termada's tools (`exec_run`, `session_create`, …)? It isn't connected
+yet. Setting it up takes ~2 minutes and is machine-wide (do it once, every
+project gets it). Repo & docs: <https://github.com/Islomzoda/termada>. Help the
+user through these steps — they work for any agent:
+
+1. **Install the binary** — skip if `termada --version` already works:
+   ```
+   curl -fsSL https://raw.githubusercontent.com/Islomzoda/termada/main/install.sh | sh
+   ```
+   (alternatives: `brew install Islomzoda/tap/termada`, or the Docker image
+   `ghcr.io/islomzoda/termada`).
+2. **Connect it over MCP** — add one MCP server, globally so every project sees
+   it. The server is just `command: "termada"`, `args: ["serve","--stdio"]`:
+   - **Claude Code:** `claude mcp add --scope user termada -- termada serve --stdio`
+     (or add a top-level `"mcpServers": { "termada": { … } }` entry to `~/.claude.json`).
+   - **Cursor / Windsurf / other MCP clients:** add the same `{command, args}`
+     under `mcpServers` in that client's settings (user / global scope, not per-project).
+3. **(optional) Install this skill globally** so the agent always has the guidance:
+   copy this `SKILL.md` to the agent's user skills dir — for Claude Code that's
+   `~/.claude/skills/termada/SKILL.md`.
+4. **Restart the agent** so it loads the new MCP server, then verify with
+   `termada doctor` (or call `capabilities()` once connected).
+
+After this there's no per-project setup and nothing to copy each time. The daemon
+starts automatically when the agent connects; `termada serve` + `termada dashboard`
+open the human dashboard.
+
 ## Pick the right call
 
 - **Quick command, want the result now:** `exec_run` with `command` as an argv

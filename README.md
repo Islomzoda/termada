@@ -12,9 +12,16 @@ a live dashboard with a kill-switch and approval queue.
 
 > Status: **0.7.2 — phases 1–4 complete + multi-agent hardening & agent-UX pass.** See [docs/tz/Termada-TZ.md](docs/tz/Termada-TZ.md)
 
-![termada — install, doctor, dashboard](docs/demo.gif)
+![termada dashboard — live sessions, operator take-over, approvals, audit](docs/dashboard.png)
 
-<sub>Demo regenerated with [`vhs docs/demo.tape`](docs/demo.tape).</sub>
+<sub>The live dashboard: every session is a real terminal you can watch and take over (block/pause the agent, type in yourself), alongside the agent panel, read-only policies, a tamper-evident History, and a Stop-All kill-switch.</sub>
+
+<details><summary>CLI flow (install → <code>doctor</code> → <code>dashboard</code>)</summary>
+
+![termada CLI](docs/demo.gif)
+
+<sub>Regenerate with [`vhs docs/demo.tape`](docs/demo.tape).</sub>
+</details>
 > for the full spec / roadmap (§30) and [CHANGELOG.md](CHANGELOG.md). License: Apache-2.0.
 
 ## What works

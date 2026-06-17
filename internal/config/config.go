@@ -24,6 +24,15 @@ type Config struct {
 	Policies       map[string]PolicyConfig `yaml:"policies"`
 	Redaction      []string                `yaml:"redaction"`
 	Recipes        map[string]RecipeConfig `yaml:"recipes"`
+	Security       SecurityConfig          `yaml:"security"`
+}
+
+// SecurityConfig holds host-level guard rails.
+type SecurityConfig struct {
+	// ProtectedPaths are extra paths that file_read/file_write must refuse, on top
+	// of the always-protected defaults (the daemon runtime dir with its tokens and
+	// vault, plus ~/.ssh, ~/.aws, ~/.gnupg). Supports ~ expansion. (spec C2/FS-3)
+	ProtectedPaths []string `yaml:"protected_paths"`
 }
 
 type HTTPConfig struct {

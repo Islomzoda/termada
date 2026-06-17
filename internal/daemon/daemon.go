@@ -45,21 +45,27 @@ func SocketPath() string { return filepath.Join(RuntimeDir(), "termada.sock") }
 // TokenPath is the dashboard token file.
 func TokenPath() string { return filepath.Join(RuntimeDir(), "token") }
 
+// CLITokenPath is the human-CLI auth token for the local control socket. It
+// gates the human approval routes (approve/deny/stop_all) on the UDS so an agent
+// shelling out to curl the socket cannot self-approve a parked command.
+func CLITokenPath() string { return filepath.Join(RuntimeDir(), "cli.token") }
+
 // AuditPath is the audit log file.
 func AuditPath() string { return filepath.Join(RuntimeDir(), "audit.log") }
 
 // Daemon bundles the running services.
 type Daemon struct {
-	cfg     config.Config
-	version string
-	logger  *log.Logger
-	mgr     *engine.Manager
-	bus     *bus.Bus
-	audit   *audit.Logger
-	vault   *vault.Vault
-	fleet   *fleet.Manager
-	plugins *plugin.Manager
-	token   string
+	cfg      config.Config
+	version  string
+	logger   *log.Logger
+	mgr      *engine.Manager
+	bus      *bus.Bus
+	audit    *audit.Logger
+	vault    *vault.Vault
+	fleet    *fleet.Manager
+	plugins  *plugin.Manager
+	token    string
+	cliToken string
 }
 
 // New builds a daemon from config.
@@ -89,6 +95,10 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	mgr.SetAgentTokens(buildAgentTokens(cfg))
 	mgr.SetRecipes(buildRecipes(cfg))
 	mgr.SetTimeoutClasses(cfg.TimeoutClasses)
+	// file_read/file_write refuse the daemon's own secrets (tokens, vault) and the
+	// usual host credential stores, so an agent can't exfiltrate them — including
+	// the cli.token that gates self-approval — through the file API (C2/FS-3).
+	mgr.SetProtectedPaths(buildProtectedPaths(cfg))
 	if err := mgr.EnablePersistence(filepath.Join(RuntimeDir(), "registry.json")); err != nil {
 		logger.Printf("warning: registry recovery failed: %v", err)
 	}
@@ -118,13 +128,17 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 		logger.Printf("warning: plugin load: %v", err)
 	}
 
-	token, err := loadOrCreateToken()
+	token, err := loadOrCreateTokenAt(TokenPath())
+	if err != nil {
+		return nil, err
+	}
+	cliToken, err := loadOrCreateTokenAt(CLITokenPath())
 	if err != nil {
 		return nil, err
 	}
 
 	return &Daemon{cfg: cfg, version: version, logger: logger, mgr: mgr, bus: b, audit: aud,
-		vault: v, fleet: fl, plugins: plugins, token: token}, nil
+		vault: v, fleet: fl, plugins: plugins, token: token, cliToken: cliToken}, nil
 }
 
 // Run starts the listeners and blocks until ctx is cancelled.
@@ -201,7 +215,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// genuinely human-only mutating routes are refused here and served only over
 	// the TCP dashboard — otherwise the SEC-7 "an agent cannot change its own
 	// policy or add servers" guarantee would be tool-surface-only, not enforced.
-	udsSrv := &http.Server{Handler: dashboardOnly(root)}
+	// The human approval routes (approve/deny/stop_all) must STAY reachable here
+	// because the CLI uses them over the socket, so they are gated by a CLI auth
+	// token instead — a tokenless curl from an agent is refused.
+	udsSrv := &http.Server{Handler: udsGuard(d.cliToken, root)}
 	go func() { _ = udsSrv.Serve(uds) }()
 	d.logger.Printf("control-plane on unix:%s", SocketPath())
 
@@ -255,17 +272,43 @@ var humanOnlyRoutes = map[string]bool{
 	"/api/servers/remove":  true,
 }
 
-// dashboardOnly wraps the UDS handler and refuses the human-only mutating routes.
-func dashboardOnly(h http.Handler) http.Handler {
+// cliAuthRoutes are the human approval/stop actions the CLI invokes over the UDS
+// (`termada approve|deny|stop`). They cannot be refused outright like the routes
+// above because the CLI genuinely needs them, but an agent shelling out to curl
+// the socket is otherwise indistinguishable from the CLI and could self-approve a
+// command it parked under a `confirm` policy. So we require the CLI auth token on
+// these routes: the CLI reads it from the 0600 cli.token file and sends it; a
+// tokenless agent curl is refused. The TCP dashboard reaches the same handlers
+// over its own token/local-trust path, which this guard does not touch.
+var cliAuthRoutes = map[string]bool{
+	"/api/approve":  true,
+	"/api/deny":     true,
+	"/api/stop_all": true,
+}
+
+// udsGuard wraps the UDS handler: it refuses the human-only mutating routes
+// outright and requires the CLI auth token on the human approval routes.
+func udsGuard(cliToken string, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if humanOnlyRoutes[r.URL.Path] {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"error":{"code":"denied_by_policy","message":"this action is available only from the dashboard, not over the local control socket"}}`))
+			denyUDS(w, "this action is available only from the dashboard, not over the local control socket")
 			return
+		}
+		if cliAuthRoutes[r.URL.Path] {
+			got := r.Header.Get("X-Termada-CLI-Token")
+			if cliToken == "" || subtle.ConstantTimeCompare([]byte(got), []byte(cliToken)) != 1 {
+				denyUDS(w, "this action requires the human CLI auth token; agents cannot approve, deny or stop over the local control socket")
+				return
+			}
 		}
 		h.ServeHTTP(w, r)
 	})
+}
+
+func denyUDS(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(`{"error":{"code":"denied_by_policy","message":"` + msg + `"}}`))
 }
 
 func buildPolicies(cfg config.Config) map[string]policy.Policy {
@@ -316,8 +359,29 @@ func buildRecipes(cfg config.Config) map[string]engine.Recipe {
 	return out
 }
 
-func loadOrCreateToken() (string, error) {
-	p := TokenPath()
+// buildProtectedPaths lists the paths file_read/file_write must refuse: the
+// daemon's own runtime dir (cli.token, dashboard token, vault, audit log,
+// registry, known_hosts, snapshots, plugins), the vault file if configured
+// elsewhere, the common host credential stores, and any operator additions.
+func buildProtectedPaths(cfg config.Config) []string {
+	paths := []string{RuntimeDir()}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths,
+			filepath.Join(home, ".ssh"),
+			filepath.Join(home, ".aws"),
+			filepath.Join(home, ".gnupg"),
+		)
+	}
+	if cfg.Vault.File != "" {
+		paths = append(paths, config.ExpandPath(cfg.Vault.File))
+	}
+	for _, p := range cfg.Security.ProtectedPaths {
+		paths = append(paths, config.ExpandPath(p))
+	}
+	return paths
+}
+
+func loadOrCreateTokenAt(p string) (string, error) {
 	if b, err := os.ReadFile(p); err == nil && len(b) >= 16 {
 		return strings.TrimSpace(string(b)), nil
 	}

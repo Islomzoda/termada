@@ -4,8 +4,6 @@
 //	termada serve --stdio    run the MCP stdio shim (what an MCP client launches)
 //	termada status|jobs|...  inspect and control a running daemon
 //	termada vault ...        manage the encrypted credential store
-//
-// See docs/tz/Termada-TZ.md for the full spec.
 package main
 
 import (
@@ -192,6 +190,12 @@ func waitDaemon(client *controlplane.Client) bool {
 
 func mustClient() *controlplane.Client {
 	c := controlplane.NewUnixClient(daemon.SocketPath())
+	// The human approval routes (approve/deny/stop) are gated on the socket by the
+	// CLI auth token so an agent curling the socket can't self-approve. As the
+	// human CLI we can read the 0600 token file the daemon wrote; present it.
+	if b, err := os.ReadFile(daemon.CLITokenPath()); err == nil {
+		c.SetCLIToken(strings.TrimSpace(string(b)))
+	}
 	if err := c.Ping(); err != nil {
 		fmt.Fprintln(os.Stderr, "no termada daemon running. Start one with: termada serve")
 		os.Exit(1)

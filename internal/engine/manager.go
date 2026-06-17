@@ -46,9 +46,10 @@ type Manager struct {
 	auditOK        func() bool       // audit health probe; dangerous ops fail closed if false
 	remoteDial     RemoteDialer      // opens a shell to a named remote server (wired by daemon)
 
-	persistPath string
-	snapshotDir string
-	recovered   []Info // jobs recovered from a previous run (orphaned/terminal)
+	persistPath    string
+	snapshotDir    string
+	protectedPaths []string // canonical paths file_read/file_write refuse (C2/FS-3)
+	recovered      []Info   // jobs recovered from a previous run (orphaned/terminal)
 
 	mu       sync.Mutex
 	sessions map[string]*Session

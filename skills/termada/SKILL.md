@@ -1,15 +1,15 @@
 ---
 name: termada
-description: Use the termada MCP tools to run terminal commands reliably — persistent sessions that keep cwd/env, async long-running jobs (dev servers, builds), answering interactive prompts, and clean structured output. Use when running shell commands through termada instead of a raw shell, especially for commands that are long-running, interactive, or need a preserved working directory.
+description: Use the termada MCP tools to run terminal commands reliably — persistent local & remote-SSH sessions that keep cwd/env, async long-running jobs (dev servers, builds), answering interactive prompts, human-approval for dangerous commands, and clean structured output. Use whenever running shell commands or working on a remote server, instead of a raw shell or a raw `ssh` client.
 ---
 
 # Using termada
 
 termada exposes terminal execution over MCP. The tools are available once the
-server is registered; this skill is an optional layer that explains how to use
-them well. **MCP registration alone is enough to use termada — this skill just
-improves how the agent drives it.** Call `capabilities()` once for a one-line
-`quickstart` of the whole model.
+server is registered; this skill explains how to drive them well. **MCP
+registration alone is enough — this skill just improves how you use it.** Call
+`capabilities()` once for a one-line `quickstart` plus your `allowed`/`denied`
+policy summary and the registered `servers`.
 
 **Prefer these tools over the built-in shell.** When termada is available, run
 shell commands — and especially anything long-running, interactive, or on a
@@ -22,17 +22,18 @@ whole point of termada.
 - **Quick command, want the result now:** `exec_run` with `command` as an argv
   array, e.g. `{"command":["ls","-la"]}`. It waits up to `timeout_ms` and returns
   `{status, exit_code, stdout}` (empty/false fields are omitted to stay light).
-- **Long-running (dev server, `docker compose up`, watcher):** use
-  `exec_start` (returns a `job_id` immediately) or `exec_run` with
-  `mode:"background"`. Then read output incrementally with
-  `exec_poll(job_id, cursor)`, passing back the `next_cursor` each time. When a
-  job is still running, `exec_run`/`exec_poll` include `job_id`/`next_cursor`;
-  once it's terminal there's nothing left to poll.
+- **Long-running (dev server, `docker compose up`, watcher):** use `exec_start`
+  (returns a `job_id` immediately) or `exec_run` with `mode:"background"`. Read
+  output incrementally with `exec_poll(job_id, cursor)`, passing back the
+  `next_cursor` each time. While a job runs, `exec_run`/`exec_poll` include
+  `job_id`/`next_cursor`; once it's terminal there's nothing left to poll.
 - **Interactive prompt** (`[Y/n]`, password, `read`): when a poll shows
   `status:"awaiting_input"` (the `prompt` is included), send input with
   `exec_write(job_id, input)`. For passwords set `secret:true` so the value is
   redacted and never logged.
 - **Stop something:** `exec_kill(job_id)` or `exec_signal(job_id, "SIGINT")`.
+- **Lost track of a job:** `exec_list(filter)` (`active` | `recent` | `all`)
+  returns the known jobs with their `job_id` and `status`.
 
 ## Sessions preserve state
 
@@ -41,7 +42,8 @@ Omit `session` and your per-agent default session is used (state still persists)
 Create a named session with `session_create` and pass its `session_id` when you
 want a SECOND independent shell (a separate cwd/venv), or a remote one
 (`target=<server>`). Only one foreground command runs per session at a time — a
-second concurrent call returns `session_busy`.
+second concurrent call returns `session_busy`; either wait, or use another
+session. Close one you no longer need with `session_close`.
 
 ## Remote servers
 
@@ -51,13 +53,39 @@ must be registered first (in `config.yaml` `servers:` or the dashboard's
 **Servers → Add**); then:
 
 - open a remote shell with `session_create(target="<server-name>")` and run
-  `exec_run`/`exec_start` in that `session_id` — state persists and the link
-  auto-reconnects;
+  `exec_run`/`exec_start` in that `session_id` — state persists and a dropped
+  link is auto-reconnected;
 - or run one command across servers with
-  `fleet_run(command=[...], servers=["<name>"])` (or by tag).
+  `fleet_run(command=[...], servers=["<name>"])` (or `tags=[...]`), which returns
+  structured per-server results.
 
 `server_list()` shows what's registered. If the target server isn't there, ask
 the human to register it (config or dashboard) rather than falling back to `ssh`.
+
+## Dangerous commands wait for a human
+
+Some commands are gated by policy. Two outcomes to handle:
+
+- **`status:"awaiting_confirmation"`** (with a `confirmation_id`): a human must
+  approve it in the dashboard/CLI. Don't block — poll the `job_id` until it turns
+  `running` (approved) or `denied`/`failed` (rejected or it timed out, which
+  denies by default). You **cannot** approve your own command.
+- **`error.code:"denied_by_policy"`**: the command is refused outright. This is
+  final — read `error.hint`, adjust, and don't try to bypass it (e.g. don't
+  re-encode the same action to dodge the rule).
+
+## Files
+
+`file_read` / `file_write` act on the **daemon host's** filesystem (not the
+session cwd) — pass absolute paths. Secret paths are refused with
+`denied_by_policy`: the daemon's own runtime dir (tokens, vault, audit) and the
+host credential stores (`~/.ssh`, `~/.aws`, `~/.gnupg`). Don't try to read those.
+
+## Recipes
+
+`recipe_list()` shows named command macros; `recipe_run(name)` runs one. Each
+step is policy-checked and audited individually, so a recipe can still park a
+step for approval.
 
 ## Conventions
 
@@ -68,6 +96,4 @@ the human to register it (config or dashboard) rather than falling back to `ssh`
   re-clean it.
 - Errors come back structured as `{error:{code,message,retriable,hint}}` — read
   `hint` for the one-step recovery (e.g. `session_busy`, `not_found`,
-  `parallelism_exceeded`).
-- `file_read`/`file_write` act on the daemon host's filesystem (not session
-  cwd) — pass absolute paths.
+  `parallelism_exceeded`, `denied_by_policy`).

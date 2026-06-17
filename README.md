@@ -139,13 +139,13 @@ restart the daemon:
 
 ```yaml
 servers:
-  - name: ispos
-    host: 82.21.7.186
+  - name: prod
+    host: prod.example.com        # hostname or IP of your server
     user: deploy
     # auth is OPTIONAL: a vault entry name for a Termada-stored credential.
     # Omit it to use your own ssh-agent / ~/.ssh key — if you can `ssh deploy@host`, so can Termada.
-    # auth: ispos-ssh-key
-    tags: [prod]
+    # auth: prod-ssh-key
+    tags: [web]
 ```
 
 …or add it live from the dashboard (**Servers → Add**). Confirm it's registered:
@@ -156,8 +156,8 @@ termada servers          # lists registered servers by name
 
 Now the agent reaches it by name:
 
-- **a remote shell session** — `session_create(target="ispos")`, then run `exec_run` / `exec_start` in that session (state persists, the link auto-reconnects);
-- **one command across servers** — `fleet_run(command=[...], servers=["ispos"])` (or by tag).
+- **a remote shell session** — `session_create(target="prod")`, then run `exec_run` / `exec_start` in that session (state persists, the link auto-reconnects);
+- **one command across servers** — `fleet_run(command=[...], servers=["prod"])` (or by tag).
 
 ### Make the agent actually use Termada
 

@@ -1,35 +1,27 @@
 # Reproducible terminal demo for the README GIF.
-# Render it with charmbracelet/vhs:  vhs docs/demo.tape  ->  docs/demo.gif
-# (vhs needs ffmpeg + ttyd; see https://github.com/charmbracelet/vhs)
+# Render with charmbracelet/vhs:  vhs docs/demo.tape  ->  docs/demo.gif
+#   (needs vhs + ffmpeg + ttyd; assumes `termada` is on PATH and a daemon can start)
+# Or headless via the official image:
+#   docker run --rm -v "$PWD/docs":/vhs ghcr.io/charmbracelet/vhs demo.tape
 
-Output docs/demo.gif
-Set FontSize 16
-Set Width 1180
-Set Height 680
-Set Padding 18
+Output demo.gif
+Set Shell "bash"
+Set FontSize 17
+Set Width 1200
+Set Height 720
+Set Padding 22
 Set Theme "Dracula"
 
-Type "# Install termada — one line, no Go needed"
-Enter
+Hide
+Type "termada serve >/tmp/t.log 2>&1 & sleep 1; clear" Enter
+Sleep 1.5s
+Show
+
+Type "termada version" Enter
 Sleep 800ms
-Type "curl -fsSL https://raw.githubusercontent.com/Islomzoda/termada/main/install.sh | sh"
-Enter
-Sleep 4s
-
-Type "# Start the daemon + dashboard"
-Enter
-Type "termada serve >/tmp/termada.log 2>&1 &"
-Enter
-Sleep 2s
-
-Type "# One-command health check"
-Enter
-Type "termada doctor"
-Enter
-Sleep 3s
-
-Type "# Get the dashboard link (no token on your own machine)"
-Enter
-Type "termada dashboard"
-Enter
-Sleep 3s
+Type "# one-command health check:" Enter
+Type "termada doctor" Enter
+Sleep 2.5s
+Type "# open the live dashboard (no token on your own machine):" Enter
+Type "termada dashboard" Enter
+Sleep 2.5s

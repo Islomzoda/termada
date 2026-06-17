@@ -12,7 +12,9 @@ a live dashboard with a kill-switch and approval queue.
 
 > Status: **0.7.2 — phases 1–4 complete + multi-agent hardening & agent-UX pass.** See [docs/tz/Termada-TZ.md](docs/tz/Termada-TZ.md)
 
-> 📽️ **Demo:** render a terminal walkthrough with [`vhs docs/demo.tape`](docs/demo.tape) → `docs/demo.gif` (then embed it here).
+![termada — install, doctor, dashboard](docs/demo.gif)
+
+<sub>Demo regenerated with [`vhs docs/demo.tape`](docs/demo.tape).</sub>
 > for the full spec / roadmap (§30) and [CHANGELOG.md](CHANGELOG.md). License: Apache-2.0.
 
 ## What works

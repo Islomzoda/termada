@@ -5,8 +5,13 @@
 package policy
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/termada/termada/internal/errs"
 )
 
 // Decision is the outcome of evaluating a command against a policy.
@@ -20,17 +25,17 @@ const (
 
 // Policy is a named set of rules.
 type Policy struct {
-	Allow      []string
-	Deny       []string
-	Confirm    []string
-	AutoAnswer []AutoAnswer
+	Allow      []string     `json:"allow,omitempty"`
+	Deny       []string     `json:"deny,omitempty"`
+	Confirm    []string     `json:"confirm,omitempty"`
+	AutoAnswer []AutoAnswer `json:"auto_answer,omitempty"`
 }
 
 // AutoAnswer is a prompt auto-reply, applied only to a confirmed awaiting_input
 // state and matched against the prompt tail (spec R7/IN-2).
 type AutoAnswer struct {
-	Match string
-	Send  string
+	Match string `json:"match"`
+	Send  string `json:"send"`
 }
 
 // Result is the evaluation outcome.
@@ -42,9 +47,16 @@ type Result struct {
 
 // Engine holds the named policies and evaluates commands. Safe for concurrent
 // use and supports hot-reload (SEC-4).
+//
+// Policies come from two places: config.yaml (the base set, read-only at
+// runtime) and the dashboard (managed policies, created/edited/removed live and
+// persisted to a JSON store). Managed names are tracked so config-defined
+// policies stay read-only — exactly like the fleet's managed servers.
 type Engine struct {
-	mu       sync.RWMutex
-	policies map[string]Policy
+	mu        sync.RWMutex
+	policies  map[string]Policy
+	managed   map[string]bool // names added/edited via the dashboard (persisted)
+	storePath string
 }
 
 // NewEngine builds an engine from named policies.
@@ -52,18 +64,134 @@ func NewEngine(policies map[string]Policy) *Engine {
 	if policies == nil {
 		policies = map[string]Policy{}
 	}
-	return &Engine{policies: policies}
+	return &Engine{policies: policies, managed: map[string]bool{}}
 }
 
-// Reload atomically replaces the policy set (hot-reload). Callers should
-// validate before calling.
+// Reload atomically replaces the config-defined policy set (hot-reload), keeping
+// dashboard-managed policies layered on top. Callers should validate first.
 func (e *Engine) Reload(policies map[string]Policy) {
 	if policies == nil {
 		policies = map[string]Policy{}
 	}
 	e.mu.Lock()
-	e.policies = policies
+	defer e.mu.Unlock()
+	merged := make(map[string]Policy, len(policies)+len(e.managed))
+	for k, v := range policies {
+		merged[k] = v
+	}
+	for name := range e.managed {
+		if p, ok := e.policies[name]; ok {
+			merged[name] = p
+		}
+	}
+	e.policies = merged
+}
+
+// LoadStore loads dashboard-managed policies from path and merges them over the
+// config-defined set (managed wins on a name clash). Sets the path for later
+// saves. A missing/garbage file is ignored.
+func (e *Engine) LoadStore(path string) {
+	e.mu.Lock()
+	e.storePath = path
 	e.mu.Unlock()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var managed map[string]Policy
+	if json.Unmarshal(data, &managed) != nil {
+		return
+	}
+	e.mu.Lock()
+	for name, p := range managed {
+		e.policies[name] = p
+		e.managed[name] = true
+	}
+	e.mu.Unlock()
+}
+
+// Set creates or updates a dashboard-managed policy and persists it. A name that
+// already exists as a config-defined policy is read-only (edit config.yaml).
+func (e *Engine) Set(name string, p Policy) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errs.New(errs.InvalidArgument, "policy name is required")
+	}
+	if !validPolicyName(name) {
+		return errs.New(errs.InvalidArgument, "policy name may contain only letters, digits, '-', '_' and '.'")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, exists := e.policies[name]; exists && !e.managed[name] {
+		return errs.New(errs.DeniedByPolicy, "policy %q is defined in config.yaml; edit the file to change it", name)
+	}
+	e.policies[name] = p
+	e.managed[name] = true
+	return e.saveLocked()
+}
+
+// Remove deletes a dashboard-managed policy. Config-defined policies cannot be
+// removed via the API.
+func (e *Engine) Remove(name string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, exists := e.policies[name]; !exists {
+		return errs.New(errs.NotFound, "no such policy: %s", name)
+	}
+	if !e.managed[name] {
+		return errs.New(errs.DeniedByPolicy, "policy %q is defined in config.yaml; edit the file to remove it", name)
+	}
+	delete(e.policies, name)
+	delete(e.managed, name)
+	return e.saveLocked()
+}
+
+// Managed returns the set of dashboard-managed (editable/removable) policy names.
+func (e *Engine) Managed() map[string]bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make(map[string]bool, len(e.managed))
+	for k := range e.managed {
+		out[k] = true
+	}
+	return out
+}
+
+// saveLocked persists the managed policies to storePath. Caller holds e.mu.
+func (e *Engine) saveLocked() error {
+	if e.storePath == "" {
+		return nil
+	}
+	managed := make(map[string]Policy, len(e.managed))
+	for name := range e.managed {
+		managed[name] = e.policies[name]
+	}
+	data, err := json.MarshalIndent(managed, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(e.storePath), 0o700); err != nil {
+		return err
+	}
+	tmp := e.storePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, e.storePath)
+}
+
+// validPolicyName keeps managed names to a safe identifier charset so they can't
+// inject markup/quotes into the dashboard.
+func validPolicyName(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Policies returns a shallow copy of the named policy set (read-only view, e.g.

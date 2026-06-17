@@ -17,6 +17,7 @@ import (
 	"github.com/termada/termada/internal/errs"
 	"github.com/termada/termada/internal/fleet"
 	"github.com/termada/termada/internal/plugin"
+	"github.com/termada/termada/internal/policy"
 	"github.com/termada/termada/internal/vault"
 )
 
@@ -57,6 +58,8 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/api/stop_all", s.hStopAll)
 	mux.HandleFunc("/api/audit", s.hAudit)
 	mux.HandleFunc("/api/policies", s.hPolicies)
+	mux.HandleFunc("/api/policies/set", s.hPolicySet)
+	mux.HandleFunc("/api/policies/remove", s.hPolicyRemove)
 	mux.HandleFunc("/api/events", s.hEvents)
 	mux.HandleFunc("/api/file/read", s.hFileRead)
 	mux.HandleFunc("/api/file/write", s.hFileWrite)
@@ -702,15 +705,88 @@ func (s *Server) hStopAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"killed": n})
 }
 
-// hPolicies returns the configured policies + agent→policy mapping (read-only,
-// for the dashboard). Editing is intentionally not exposed here — it writes
-// config and is a deliberate, out-of-band action.
+// hPolicies returns the configured policies + agent→policy mapping + the set of
+// dashboard-managed (editable) policy names. Policies defined in config.yaml are
+// returned but flagged as not managed, so the dashboard shows them read-only.
 func (s *Server) hPolicies(w http.ResponseWriter, r *http.Request) {
-	out := map[string]any{"agents": s.mgr.AgentPolicies(), "policies": map[string]any{}}
+	out := map[string]any{"agents": s.mgr.AgentPolicies(), "policies": map[string]any{}, "managed": map[string]bool{}}
 	if p := s.mgr.Policy(); p != nil {
 		out["policies"] = p.Policies()
+		out["managed"] = p.Managed()
 	}
 	writeJSON(w, out)
+}
+
+// hPolicySet creates or updates a dashboard-managed policy (human-only — like
+// server management, this is never exposed as an MCP tool, per SEC-7). A policy
+// defined in config.yaml is read-only here. The change takes effect immediately
+// and is persisted across restarts.
+func (s *Server) hPolicySet(w http.ResponseWriter, r *http.Request) {
+	p := s.mgr.Policy()
+	if p == nil {
+		writeErr(w, errs.New(errs.NotSupported, "policy engine not available"))
+		return
+	}
+	var req struct {
+		Name    string   `json:"name"`
+		Allow   []string `json:"allow"`
+		Deny    []string `json:"deny"`
+		Confirm []string `json:"confirm"`
+	}
+	_ = decode(r, &req)
+	// The dashboard form doesn't edit auto-answer rules, so a plain edit must
+	// preserve any the policy already carries rather than silently dropping them.
+	var auto []policy.AutoAnswer
+	if cur, ok := p.Policies()[req.Name]; ok {
+		auto = cur.AutoAnswer
+	}
+	if err := p.Set(req.Name, policy.Policy{
+		Allow:      cleanList(req.Allow),
+		Deny:       cleanList(req.Deny),
+		Confirm:    cleanList(req.Confirm),
+		AutoAnswer: auto,
+	}); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// hPolicyRemove deletes a dashboard-managed policy (human-only). It refuses to
+// delete a policy still assigned to an agent — otherwise that agent would
+// silently fall back to allow-all (Evaluate treats an unknown policy as Allow).
+func (s *Server) hPolicyRemove(w http.ResponseWriter, r *http.Request) {
+	p := s.mgr.Policy()
+	if p == nil {
+		writeErr(w, errs.New(errs.NotSupported, "policy engine not available"))
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	_ = decode(r, &req)
+	for agentID, polName := range s.mgr.AgentPolicies() {
+		if polName == req.Name {
+			writeErr(w, errs.New(errs.DeniedByPolicy, "policy %q is assigned to agent %q — reassign that agent in config.yaml before deleting it", req.Name, agentID))
+			return
+		}
+	}
+	if err := p.Remove(req.Name); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// cleanList trims whitespace and drops empty entries from a rule list.
+func cleanList(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (s *Server) hAudit(w http.ResponseWriter, r *http.Request) {

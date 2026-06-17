@@ -19,12 +19,18 @@ type AgentStat struct {
 	FirstSeenUnix int64    `json:"first_seen_unix"`
 	LastSeenUnix  int64    `json:"last_seen_unix"`
 	LastCommand   string   `json:"last_command,omitempty"`
-	History       []string `json:"history,omitempty"` // recent commands, newest last
+	// LastCommandUnix anchors LastCommand to when that command actually started,
+	// distinct from LastSeenUnix (which any activity — connect, session, deny —
+	// bumps), so the dashboard doesn't show a stale command as "just now".
+	LastCommandUnix int64    `json:"last_command_unix,omitempty"`
+	History         []string `json:"history,omitempty"` // recent commands, newest last
 }
 
-// recordCommand sets the last command and appends it to the capped history.
+// recordCommand sets the last command (with its timestamp) and appends it to the
+// capped history.
 func (a *AgentStat) recordCommand(cmd string) {
 	a.LastCommand = cmd
+	a.LastCommandUnix = time.Now().Unix()
 	a.History = append(a.History, cmd)
 	const max = 12
 	if len(a.History) > max {

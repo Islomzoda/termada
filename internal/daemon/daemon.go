@@ -83,7 +83,9 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	}
 	mgr := engine.NewManager(ec)
 	mgr.SetBus(b)
-	mgr.SetPolicy(policy.NewEngine(buildPolicies(cfg)), buildAgentPolicies(cfg))
+	pol := policy.NewEngine(buildPolicies(cfg))
+	pol.LoadStore(filepath.Join(RuntimeDir(), "policies.json"))
+	mgr.SetPolicy(pol, buildAgentPolicies(cfg))
 	mgr.SetAgentTokens(buildAgentTokens(cfg))
 	mgr.SetRecipes(buildRecipes(cfg))
 	mgr.SetTimeoutClasses(cfg.TimeoutClasses)
@@ -194,7 +196,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("listen unix: %w", err)
 	}
 	_ = os.Chmod(SocketPath(), 0o600)
-	udsSrv := &http.Server{Handler: root}
+	// The UDS carries BOTH the human CLI and the agent's MCP shim, and an agent
+	// can also reach the socket by shelling out (curl --unix-socket …). So the
+	// genuinely human-only mutating routes are refused here and served only over
+	// the TCP dashboard — otherwise the SEC-7 "an agent cannot change its own
+	// policy or add servers" guarantee would be tool-surface-only, not enforced.
+	udsSrv := &http.Server{Handler: dashboardOnly(root)}
 	go func() { _ = udsSrv.Serve(uds) }()
 	d.logger.Printf("control-plane on unix:%s", SocketPath())
 
@@ -234,6 +241,31 @@ func (d *Daemon) Run(ctx context.Context) error {
 	_ = d.audit.Close()
 	_ = os.Remove(SocketPath())
 	return nil
+}
+
+// humanOnlyRoutes mutate security-sensitive state and are reachable only from
+// the TCP dashboard (token / local-trust). The CLI does not use them (it has no
+// policy- or server-add commands), so refusing them on the UDS costs nothing and
+// closes the agent self-escalation path (an agent could otherwise curl the
+// socket to rewrite its own policy or add a server).
+var humanOnlyRoutes = map[string]bool{
+	"/api/policies/set":    true,
+	"/api/policies/remove": true,
+	"/api/servers/add":     true,
+	"/api/servers/remove":  true,
+}
+
+// dashboardOnly wraps the UDS handler and refuses the human-only mutating routes.
+func dashboardOnly(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if humanOnlyRoutes[r.URL.Path] {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":"denied_by_policy","message":"this action is available only from the dashboard, not over the local control socket"}}`))
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 func buildPolicies(cfg config.Config) map[string]policy.Policy {

@@ -67,3 +67,73 @@ func TestGlob(t *testing.T) {
 		}
 	}
 }
+
+func TestManagedPolicyStoreCRUD(t *testing.T) {
+	dir := t.TempDir()
+	store := dir + "/policies.json"
+
+	// Engine with one config-defined policy + a managed store.
+	e := NewEngine(map[string]Policy{"prod-safe": {Deny: []string{"rm -rf /"}}})
+	e.LoadStore(store)
+
+	// Add a managed policy.
+	if err := e.Set("restricted", Policy{Allow: []string{"ls", "git status"}, Deny: []string{"*"}}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if !e.Managed()["restricted"] {
+		t.Fatal("restricted should be managed")
+	}
+	if e.Managed()["prod-safe"] {
+		t.Fatal("config policy must not be reported as managed")
+	}
+	// It evaluates immediately.
+	if d := e.Evaluate("restricted", []string{"rm", "-rf", "x"}).Decision; d != Deny {
+		t.Fatalf("restricted rm => %s, want deny", d)
+	}
+
+	// Config-defined policies are read-only via the API.
+	if err := e.Set("prod-safe", Policy{Allow: []string{"*"}}); err == nil {
+		t.Fatal("editing a config policy should fail")
+	}
+	if err := e.Remove("prod-safe"); err == nil {
+		t.Fatal("removing a config policy should fail")
+	}
+	if err := e.Remove("nope"); err == nil {
+		t.Fatal("removing an unknown policy should fail")
+	}
+
+	// Name validation.
+	if err := e.Set("bad name!", Policy{}); err == nil {
+		t.Fatal("invalid name should fail")
+	}
+	if err := e.Set("", Policy{}); err == nil {
+		t.Fatal("empty name should fail")
+	}
+
+	// Persistence: a fresh engine loading the same store sees the managed policy.
+	e2 := NewEngine(map[string]Policy{"prod-safe": {Deny: []string{"rm -rf /"}}})
+	e2.LoadStore(store)
+	if !e2.Managed()["restricted"] {
+		t.Fatal("managed policy did not persist across reload")
+	}
+	if d := e2.Evaluate("restricted", []string{"ls"}).Decision; d != Allow {
+		t.Fatalf("reloaded restricted ls => %s, want allow", d)
+	}
+
+	// Update + delete.
+	if err := e2.Set("restricted", Policy{Deny: []string{"curl*"}}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if err := e2.Remove("restricted"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if e2.Managed()["restricted"] {
+		t.Fatal("restricted should be gone after remove")
+	}
+	// And the deletion persisted.
+	e3 := NewEngine(nil)
+	e3.LoadStore(store)
+	if e3.Managed()["restricted"] {
+		t.Fatal("deletion did not persist")
+	}
+}

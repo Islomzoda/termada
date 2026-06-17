@@ -12,6 +12,7 @@ import (
 	"github.com/termada/termada/internal/bus"
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/fleet"
+	"github.com/termada/termada/internal/policy"
 	"github.com/termada/termada/internal/vault"
 )
 
@@ -161,5 +162,55 @@ func TestAPISessionLifecycle(t *testing.T) {
 	}
 	if code, _ := do(t, mux, "POST", "/api/session/close", `{"session_id":"`+sid+`"}`); code != 200 {
 		t.Fatalf("close session failed")
+	}
+}
+
+func TestAPIPolicyCRUD(t *testing.T) {
+	mux, m := newTestServer(t)
+	// One config-defined policy "prod"; agentX is assigned the (to-be-created)
+	// managed policy "ci".
+	m.SetPolicy(policy.NewEngine(map[string]policy.Policy{
+		"prod": {Deny: []string{"rm -rf /"}},
+	}), map[string]string{"agentX": "ci"})
+
+	// Create a managed policy via the dashboard endpoint.
+	if code, out := do(t, mux, "POST", "/api/policies/set", `{"name":"ci","allow":["ls"],"deny":["sudo*"]}`); code != 200 {
+		t.Fatalf("set ci => %d %v", code, out)
+	}
+	// It reports as managed (editable); the config policy does not.
+	_, pol := do(t, mux, "GET", "/api/policies", "")
+	managed, _ := pol["managed"].(map[string]any)
+	if managed["ci"] != true || managed["prod"] == true {
+		t.Fatalf("managed flags wrong: %v", pol["managed"])
+	}
+
+	// A config-defined policy is read-only via the API.
+	if code, _ := do(t, mux, "POST", "/api/policies/set", `{"name":"prod","allow":["*"]}`); code == 200 {
+		t.Fatal("editing a config-defined policy should be refused")
+	}
+	// Removing a policy still assigned to an agent is refused (no silent allow-all).
+	if code, _ := do(t, mux, "POST", "/api/policies/remove", `{"name":"ci"}`); code == 200 {
+		t.Fatal("removing an assigned policy should be refused")
+	}
+	// Reassign the agent, then ci can be removed.
+	m.SetPolicy(m.Policy(), map[string]string{"agentX": "prod"})
+	if code, out := do(t, mux, "POST", "/api/policies/remove", `{"name":"ci"}`); code != 200 {
+		t.Fatalf("removing an unassigned managed policy => %d %v", code, out)
+	}
+
+	// Editing a managed policy through the dashboard preserves its auto_answer
+	// rules (the form can't express them, so they must not be silently dropped).
+	if err := m.Policy().Set("aa", policy.Policy{
+		Confirm:    []string{"deploy*"},
+		AutoAnswer: []policy.AutoAnswer{{Match: "continue?", Send: "yes"}},
+	}); err != nil {
+		t.Fatalf("seed aa: %v", err)
+	}
+	if code, _ := do(t, mux, "POST", "/api/policies/set", `{"name":"aa","confirm":["deploy*","release*"]}`); code != 200 {
+		t.Fatal("editing managed aa should succeed")
+	}
+	aa := m.Policy().Policies()["aa"].AutoAnswer
+	if len(aa) != 1 || aa[0].Send != "yes" {
+		t.Fatalf("auto_answer dropped on edit: %v", aa)
 	}
 }

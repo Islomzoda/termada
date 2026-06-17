@@ -82,12 +82,14 @@
   .hold-tag{font-size:10px;color:var(--yellow)}
   button.mini{padding:2px 7px;font-size:11px}
   .sdot{font-size:10px;margin-right:4px}
-  #server-form{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:8px;margin:4px 0;display:none}
-  #server-form input,#server-form textarea{width:100%;margin:3px 0;background:#0d1117;color:var(--fg);
+  #server-form,#policy-form{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:8px;margin:4px 0;display:none}
+  #server-form input,#server-form textarea,#policy-form input,#policy-form textarea{width:100%;margin:3px 0;background:#0d1117;color:var(--fg);
     border:1px solid var(--border);border-radius:6px;padding:6px;font:inherit}
-  #server-form textarea{height:54px;resize:vertical}
-  #server-form .row{display:flex;gap:6px;margin-top:6px}
-  #sf-msg{margin-top:6px;font-size:11px}
+  #server-form textarea,#policy-form textarea{height:54px;resize:vertical}
+  #server-form .row,#policy-form .row{display:flex;gap:6px;margin-top:6px}
+  #sf-msg,#pf-msg{margin-top:6px;font-size:11px}
+  .pol .ctl{float:right} .pol .ctl button{padding:1px 6px;font-size:10px;margin-left:3px}
+  .pol .tag.cfg{color:var(--muted)}
   .sf-hint{font-size:10.5px;color:var(--muted);line-height:1.5;margin:5px 2px 2px;opacity:.85}
   h2 .mini{float:right;margin-top:-2px}
   .item.srv{flex-wrap:wrap}
@@ -148,6 +150,7 @@
       <div class="leg"><span class="badge st-awaiting_confirmation">awaiting_confirmation</span> a risky command needs your approval ↑</div>
       <div class="leg"><span class="badge st-killed">killed / failed / timed_out</span> stopped before finishing</div>
       <div class="leg"><span class="badge st-orphaned">orphaned</span> daemon restarted — process &amp; output were lost</div>
+      <div class="leg"><span class="muted">Finished &amp; failed jobs don't stay in this list — find them under 📜 History.</span></div>
     </details>
     <h2>Servers <button class="mini" onclick="toggleServerForm()">+ add</button></h2>
     <div id="server-form">
@@ -165,7 +168,18 @@
     </div>
     <div id="servers"><div class="empty">none</div></div>
     <h2>Agents</h2><div id="agents"><div class="empty">none connected yet</div></div>
-    <h2>Policies <span class="muted" style="font-size:9px">(read-only)</span></h2><div id="policies"><div class="empty">—</div></div>
+    <h2>Policies <button class="mini" onclick="togglePolicyForm()">+ add</button></h2>
+    <div id="policy-form">
+      <input id="pf-name" placeholder="name  (e.g. restricted)">
+      <textarea id="pf-allow" placeholder="allow — one glob per line. If set, this is a WHITELIST: anything not matched is denied."></textarea>
+      <textarea id="pf-deny" placeholder="deny — one glob per line  (e.g. rm -rf *, sudo *)"></textarea>
+      <textarea id="pf-confirm" placeholder="confirm — one glob per line  (parks the command for your approval)"></textarea>
+      <div class="sf-hint">Globs match the command's argv — <code>git push*</code>, <code>rm *</code>, <code>sudo*</code>. Precedence: <b>allow</b> (whitelist) → <b>deny</b> → <b>confirm</b> → allow. To apply a policy to an agent, set <code>agents:</code> in <code>config.yaml</code>.</div>
+      <div class="row"><button class="on" onclick="savePolicy()">Save</button>
+        <button onclick="togglePolicyForm()">cancel</button></div>
+      <div id="pf-msg" class="muted"></div>
+    </div>
+    <div id="policies"><div class="empty">—</div></div>
     <h2>Activity</h2><div id="feed" class="feed"></div>
   </aside>
   <main>
@@ -346,7 +360,9 @@ async function refresh(){
   document.getElementById('ver').textContent='v'+(s.version||'?');
 
   const jobs=s.jobs||[]; lastJobs={}; jobs.forEach(j=>lastJobs[j.job_id]=j);
-  const active_jobs=jobs.filter(j=>!TERMINAL.includes(j.status));
+  // A command parked for approval is also in s.pending and shown as an Approval
+  // card, so it must NOT also count as an "active" job or it's counted twice.
+  const active_jobs=jobs.filter(j=>!TERMINAL.includes(j.status)&&j.status!=='awaiting_confirmation');
   document.getElementById('s-sess').textContent=(s.sessions||[]).length;
   document.getElementById('s-jobs').textContent=active_jobs.length;
   document.getElementById('s-pend').textContent=(s.pending||[]).length;
@@ -362,18 +378,28 @@ async function refresh(){
       <span class="cmd">▸ ${esc(short(x.session_id,18))}</span><span class="badge">${esc(x.owner||'—')}</span>
       <span class="badge ${x.active_jobs?'st-running':''}">${x.active_jobs?'busy':'idle'}</span></div>`).join('') : '<div class="empty">none</div>';
 
-  document.getElementById('jobs').innerHTML=jobs.length ? jobs.map(j=>`
+  // awaiting_confirmation commands are surfaced as Approval cards above; don't
+  // also list them here (and they aren't a real job terminal yet).
+  const jobList=jobs.filter(j=>j.status!=='awaiting_confirmation');
+  document.getElementById('jobs').innerHTML=jobList.length ? jobList.map(j=>`
     <div class="item ${active==='job:'+j.job_id?'sel':''}" onclick="openJobById('${j.job_id}')">
       <span class="cmd">${esc(cmd(j.command))}</span>
       ${j.hold_input?'<span class="hold-tag">⌨</span>':''}${j.hold_output?'<span class="hold-tag">⏸</span>':''}
       <span class="badge st-${esc(j.status)}">${esc(j.status)}</span></div>`).join('') : '<div class="empty">none</div>';
 
   document.getElementById('servers').innerHTML=(s.servers&&s.servers.length)? s.servers.map(x=>{
-    const st=srvStatus[x.name]||x.status||''; const c={ok:'#3fb950',testing:'#d29922'}[st]||(st?'#f85149':'#8b949e');
+    const st=srvStatus[x.name]||x.status||'';
+    // The health-check result is only as fresh as the last check (~30s cadence);
+    // grey a stale 'ok' dot and surface "checked Xago" so a lagging/stalled check
+    // can't masquerade as live.
+    const stale=x.checked_unix&&(Date.now()/1000-x.checked_unix)>90;
+    let c={ok:'#3fb950',testing:'#d29922'}[st]||(st?'#f85149':'#8b949e');
+    if(stale) c='#8b949e';
     const dot=st==='testing'?'…':'●';
-    return `<div class="item srv" title="${esc(st||'click test')}">
+    const checked=x.checked_unix?'checked '+relTime(x.checked_unix):'not checked yet';
+    return `<div class="item srv" title="${esc((st||'click test')+' · '+checked)}">
       <span class="srv-name"><span class="sdot" style="color:${c}">${dot}</span><b>${esc(x.name)}</b>
-        <span class="muted">${esc(x.user)}@${esc(x.host)}${st?' · '+esc(st):''}</span></span>
+        <span class="muted">${esc(x.user)}@${esc(x.host)}${st?' · '+esc(st):''}${stale?' · <span style="color:var(--yellow)">stale</span>':''}</span></span>
       ${(x.tags||[]).map(t=>'<span class="badge">'+esc(t)+'</span>').join('')}
       <span style="flex:1"></span>
       <button class="mini" onclick="testServer('${esc(x.name)}')">test</button>
@@ -393,7 +419,7 @@ async function refresh(){
         <span class="badge">${a.jobs||0} jobs</span>
         ${a.sessions?`<span class="badge">${a.sessions} sess</span>`:''}
         ${a.denied?`<span class="badge st-failed">${a.denied} denied</span>`:''}
-      </div>${a.last_command?`<div class="amini" title="${esc(hist)}">↳ ${esc(a.last_command)} · ${ago}</div>`:''}`;
+      </div>${a.last_command?`<div class="amini" title="${esc(hist)}">↳ ${esc(a.last_command)} · ${a.last_command_unix?relTime(a.last_command_unix):ago}</div>`:''}`;
   }).join('') : '<div class="empty">none connected yet</div>';
 
   for(const key in terms){ if(!key.startsWith('job:')) continue; const id=key.slice(4); const j=lastJobs[id]; if(!j) continue;
@@ -404,21 +430,59 @@ async function refresh(){
 async function resolve(kind,id){ await api('/api/'+kind,{method:'POST',body:JSON.stringify({confirmation_id:id,by:'dashboard'})}); refresh(); }
 async function stopAll(){ if(!confirm('Kill ALL active jobs?'))return; await api('/api/stop_all',{method:'POST'}); refresh(); }
 
-// ---- policies (read-only view of the allow/deny/confirm rules) -----------
+// ---- policies (add / edit / delete the allow/deny/confirm rules) ----------
+let lastPolicies={};
+const lines=id=>document.getElementById(id).value.split('\n').map(s=>s.trim()).filter(Boolean);
+function togglePolicyForm(){ const f=document.getElementById('policy-form'); const show=f.style.display!=='block';
+  f.style.display=show?'block':'none'; if(!show){clearPolicyForm();} }
+function clearPolicyForm(){ ['pf-name','pf-allow','pf-deny','pf-confirm'].forEach(i=>document.getElementById(i).value='');
+  document.getElementById('pf-msg').textContent=''; }
+function editPolicy(name){
+  const po=lastPolicies[name]||{};
+  document.getElementById('pf-name').value=name;
+  document.getElementById('pf-allow').value=(po.allow||[]).join('\n');
+  document.getElementById('pf-deny').value=(po.deny||[]).join('\n');
+  document.getElementById('pf-confirm').value=(po.confirm||[]).join('\n');
+  document.getElementById('pf-msg').textContent='';
+  document.getElementById('policy-form').style.display='block';
+  document.getElementById('pf-name').focus();
+}
+async function savePolicy(){
+  const msg=document.getElementById('pf-msg'); const set=(c,t)=>{msg.style.color='var(--'+c+')';msg.textContent=t;};
+  const name=val('pf-name');
+  if(!name){ set('red','✗ name is required'); return; }
+  set('muted','saving…');
+  const body={name, allow:lines('pf-allow'), deny:lines('pf-deny'), confirm:lines('pf-confirm')};
+  const r=await api('/api/policies/set',{method:'POST',body:JSON.stringify(body)});
+  if(r&&r.error){ set('red','✗ '+(r.error.message||r.error.code)); return; }
+  set('green','✓ saved'); clearPolicyForm();
+  document.getElementById('policy-form').style.display='none';
+  loadPolicies();
+}
+async function deletePolicy(name){
+  if(!confirm('Delete policy "'+name+'"? Agents using it fall back to allow-all.'))return;
+  const r=await api('/api/policies/remove',{method:'POST',body:JSON.stringify({name})});
+  if(r&&r.error){ alert(r.error.message||r.error.code); return; }
+  loadPolicies();
+}
 async function loadPolicies(){
   let p={}; try{ p=await api('/api/policies'); }catch(e){ return; }
-  const pols=p.policies||{}, agents=p.agents||{};
+  const pols=p.policies||{}, agents=p.agents||{}, managed=p.managed||{};
+  lastPolicies=pols;
   const byPol={}; for(const a in agents){ (byPol[agents[a]]=byPol[agents[a]]||[]).push(a); }
   const names=Object.keys(pols).sort();
   const el=document.getElementById('policies');
   el.innerHTML = names.length ? names.map(n=>{
     const po=pols[n]||{}, rules=[];
-    if((po.Allow||[]).length) rules.push('<span class="tag st-exited">allow</span> '+po.Allow.map(esc).join(', '));
-    if((po.Deny||[]).length) rules.push('<span class="tag st-killed">deny</span> '+po.Deny.map(esc).join(', '));
-    if((po.Confirm||[]).length) rules.push('<span class="tag st-awaiting_input">confirm</span> '+po.Confirm.map(esc).join(', '));
+    if((po.allow||[]).length) rules.push('<span class="tag st-exited">allow</span> '+po.allow.map(esc).join(', '));
+    if((po.deny||[]).length) rules.push('<span class="tag st-killed">deny</span> '+po.deny.map(esc).join(', '));
+    if((po.confirm||[]).length) rules.push('<span class="tag st-awaiting_input">confirm</span> '+po.confirm.map(esc).join(', '));
     const who=(byPol[n]||[]).map(esc).join(', ');
-    return `<div class="pol"><b>${esc(n)}</b>${who?' <span class="muted">· '+who+'</span>':''}<div class="pr">${rules.join('<br>')||'<span class="muted">no rules → allow all</span>'}</div></div>`;
-  }).join('') : '<div class="empty">none configured</div>';
+    const ctl = managed[n]
+      ? `<span class="ctl"><button onclick="editPolicy('${esc(n)}')">edit</button><button class="danger" onclick="deletePolicy('${esc(n)}')">✕</button></span>`
+      : `<span class="ctl"><span class="tag cfg" title="defined in config.yaml — edit the file to change">config</span></span>`;
+    return `<div class="pol">${ctl}<b>${esc(n)}</b>${who?' <span class="muted">· '+who+'</span>':''}<div class="pr">${rules.join('<br>')||'<span class="muted">no rules → allow all</span>'}</div></div>`;
+  }).join('') : '<div class="empty">none yet — click <b>+ add</b></div>';
 }
 
 // ---- history / replay (persistent hash-chained audit) --------------------

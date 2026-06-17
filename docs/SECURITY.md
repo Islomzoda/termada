@@ -12,8 +12,11 @@ states what is and isn't protected so you can decide what to trust it with.
 - **The human (dashboard/CLI) is trusted.** The dashboard is the human control
   surface: it can approve/deny, kill, take over input, and manage servers. It is
   reachable only on loopback and gated by a token.
-- **Credential/server management is CLI- and dashboard-only, never an MCP tool**
-  (SEC-7). An agent cannot change its own policy, add servers, or read the vault.
+- **Policy/server management is dashboard-only, never an MCP tool** (SEC-7). The
+  mutating routes (`/api/policies/{set,remove}`, `/api/servers/{add,remove}`) are
+  refused on the local control socket and served only over the token-gated
+  dashboard — so an agent cannot change its own policy or add a server even by
+  shelling out to `curl` the socket. The vault is never readable via the API.
 
 ## What IS protected
 
@@ -32,6 +35,13 @@ states what is and isn't protected so you can decide what to trust it with.
   `file_read` can read `~/.ssh`, `~/.aws/credentials`, env, etc. The vault
   boundary does not cover these. Mitigation: run sessions under a restricted uid
   (not yet automated).
+- **The local control socket is local-trust.** Apart from the policy/server
+  routes above (refused on it), the socket also carries the human CLI's own
+  commands — approve/deny, stop-all, vault unlock — with no token. An agent
+  allowed to run an HTTP client could reach those over the socket too (e.g.
+  self-approve a command it parked for confirmation). Closing this fully needs
+  the agent's sessions under a restricted uid that can't open the `0600` socket —
+  the same mitigation as above, not yet automated.
 - **Output redaction is best-effort.** Known token formats (PEM/JWT/AWS/GCP/
   api-key/GitHub/Slack) plus exact vault values are masked; an arbitrary secret
   may slip through.

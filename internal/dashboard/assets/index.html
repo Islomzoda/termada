@@ -41,6 +41,8 @@
   .legend{margin:6px 4px 2px;font-size:11px} .legend summary{cursor:pointer;color:var(--muted);user-select:none}
   .legend summary:hover{color:var(--fg)} .leg{display:flex;gap:7px;align-items:center;margin:5px 2px;color:var(--muted)}
   .leg .badge{flex-shrink:0}
+  .pol{margin:5px 4px;font-size:11px} .pol .pr{color:var(--muted);margin-top:2px;line-height:1.6}
+  .pol .tag{font-size:9px;padding:0 4px;border-radius:7px;border:1px solid var(--border)}
   #gate{display:none;position:fixed;inset:0;z-index:1000;background:rgba(10,12,16,.93);align-items:center;justify-content:center}
   .gate-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:26px 28px;max-width:460px;width:90%;text-align:center;box-shadow:0 12px 48px rgba(0,0,0,.5)}
   .gate-h{font-size:18px;font-weight:600;margin-bottom:10px}
@@ -163,6 +165,7 @@
     </div>
     <div id="servers"><div class="empty">none</div></div>
     <h2>Agents</h2><div id="agents"><div class="empty">none connected yet</div></div>
+    <h2>Policies <span class="muted" style="font-size:9px">(read-only)</span></h2><div id="policies"><div class="empty">—</div></div>
     <h2>Activity</h2><div id="feed" class="feed"></div>
   </aside>
   <main>
@@ -401,6 +404,23 @@ async function refresh(){
 async function resolve(kind,id){ await api('/api/'+kind,{method:'POST',body:JSON.stringify({confirmation_id:id,by:'dashboard'})}); refresh(); }
 async function stopAll(){ if(!confirm('Kill ALL active jobs?'))return; await api('/api/stop_all',{method:'POST'}); refresh(); }
 
+// ---- policies (read-only view of the allow/deny/confirm rules) -----------
+async function loadPolicies(){
+  let p={}; try{ p=await api('/api/policies'); }catch(e){ return; }
+  const pols=p.policies||{}, agents=p.agents||{};
+  const byPol={}; for(const a in agents){ (byPol[agents[a]]=byPol[agents[a]]||[]).push(a); }
+  const names=Object.keys(pols).sort();
+  const el=document.getElementById('policies');
+  el.innerHTML = names.length ? names.map(n=>{
+    const po=pols[n]||{}, rules=[];
+    if((po.Allow||[]).length) rules.push('<span class="tag st-exited">allow</span> '+po.Allow.map(esc).join(', '));
+    if((po.Deny||[]).length) rules.push('<span class="tag st-killed">deny</span> '+po.Deny.map(esc).join(', '));
+    if((po.Confirm||[]).length) rules.push('<span class="tag st-awaiting_input">confirm</span> '+po.Confirm.map(esc).join(', '));
+    const who=(byPol[n]||[]).map(esc).join(', ');
+    return `<div class="pol"><b>${esc(n)}</b>${who?' <span class="muted">· '+who+'</span>':''}<div class="pr">${rules.join('<br>')||'<span class="muted">no rules → allow all</span>'}</div></div>`;
+  }).join('') : '<div class="empty">none configured</div>';
+}
+
 // ---- history / replay (persistent hash-chained audit) --------------------
 let auditRecs=[];
 async function openHistory(){
@@ -442,6 +462,7 @@ try{
 
 window.addEventListener('resize',()=>{ if(active&&terms[active]&&terms[active].fit){try{terms[active].fit.fit();}catch(_){}}});
 refresh(); // always try — local-trust answers without a token; a 401 shows the gate
+loadPolicies();
 setInterval(()=>{ if(!gated) refresh(); }, 1500);
 </script>
 </body>

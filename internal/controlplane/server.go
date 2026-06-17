@@ -56,6 +56,7 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/api/status", s.hStatus)
 	mux.HandleFunc("/api/stop_all", s.hStopAll)
 	mux.HandleFunc("/api/audit", s.hAudit)
+	mux.HandleFunc("/api/policies", s.hPolicies)
 	mux.HandleFunc("/api/events", s.hEvents)
 	mux.HandleFunc("/api/file/read", s.hFileRead)
 	mux.HandleFunc("/api/file/write", s.hFileWrite)
@@ -699,6 +700,17 @@ func (s *Server) hStopAll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]any{"killed": n})
+}
+
+// hPolicies returns the configured policies + agent→policy mapping (read-only,
+// for the dashboard). Editing is intentionally not exposed here — it writes
+// config and is a deliberate, out-of-band action.
+func (s *Server) hPolicies(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{"agents": s.mgr.AgentPolicies(), "policies": map[string]any{}}
+	if p := s.mgr.Policy(); p != nil {
+		out["policies"] = p.Policies()
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) hAudit(w http.ResponseWriter, r *http.Request) {

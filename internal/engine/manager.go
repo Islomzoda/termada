@@ -150,6 +150,17 @@ func (m *Manager) Policy() *policy.Engine { return m.pol }
 // AgentPolicy returns the policy name for an agent.
 func (m *Manager) AgentPolicy(agent string) string { return m.agentPolicies[agent] }
 
+// AgentPolicies returns a copy of the agent→policy-name mapping (read-only view).
+func (m *Manager) AgentPolicies() map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]string, len(m.agentPolicies))
+	for k, v := range m.agentPolicies {
+		out[k] = v
+	}
+	return out
+}
+
 func (m *Manager) publish(e bus.Event) {
 	if m.bus != nil {
 		m.bus.Publish(e)

@@ -66,6 +66,18 @@ func (e *Engine) Reload(policies map[string]Policy) {
 	e.mu.Unlock()
 }
 
+// Policies returns a shallow copy of the named policy set (read-only view, e.g.
+// for the dashboard). The slices inside are shared — treat them as immutable.
+func (e *Engine) Policies() map[string]Policy {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make(map[string]Policy, len(e.policies))
+	for k, v := range e.policies {
+		out[k] = v
+	}
+	return out
+}
+
 // AutoAnswers returns the auto-answer rules for a policy.
 func (e *Engine) AutoAnswers(policyName string) []AutoAnswer {
 	e.mu.RLock()

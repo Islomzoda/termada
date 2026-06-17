@@ -54,6 +54,8 @@ dockers:
       - "--label=org.opencontainers.image.source=https://github.com/Islomzoda/termada"
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.licenses=Apache-2.0"
+      # Required by the MCP registry to prove this image belongs to the server.
+      - "--label=io.modelcontextprotocol.server.name=io.github.Islomzoda/termada"
 
 nfpms:
   - id: termada

@@ -1,17 +1,16 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Islomzoda/termada",
-  "description": "Reliable, transparent terminal runtime for AI agents: persistent local/SSH shell sessions, async jobs with streamed output, interactive-prompt handling, structured results, and a human dashboard with policy/approval/audit.",
+  "description": "Reliable, transparent terminal runtime between AI agents and the shell (local + SSH).",
   "repository": {
     "url": "https://github.com/Islomzoda/termada",
     "source": "github"
   },
-  "version": "0.7.2",
+  "version": "0.7.4",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/islomzoda/termada",
-      "version": "0.7.2",
+      "identifier": "ghcr.io/islomzoda/termada:0.7.5",
       "transport": { "type": "stdio" },
       "runtimeArguments": [
         { "type": "positional", "value": "serve" },

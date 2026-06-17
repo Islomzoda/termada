@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## [0.7.5] — 2026-06-17
+
+### Added
+- Listed on the official **MCP Registry** (`io.github.Islomzoda/termada`). The
+  release Docker image now carries the `io.modelcontextprotocol.server.name`
+  label the registry requires for OCI package ownership.
+
 ## [0.7.4] — 2026-06-17
 
 ### Added

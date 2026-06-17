@@ -11,14 +11,14 @@ import (
 // AgentStat is per-agent activity surfaced to the human (spec MA-2): who
 // connected, how often, and what they did.
 type AgentStat struct {
-	ID            string   `json:"id"`
-	Connections   int      `json:"connections"`
-	Jobs          int      `json:"jobs"`
-	Sessions      int      `json:"sessions"`
-	Denied        int      `json:"denied"`
-	FirstSeenUnix int64    `json:"first_seen_unix"`
-	LastSeenUnix  int64    `json:"last_seen_unix"`
-	LastCommand   string   `json:"last_command,omitempty"`
+	ID            string `json:"id"`
+	Connections   int    `json:"connections"`
+	Jobs          int    `json:"jobs"`
+	Sessions      int    `json:"sessions"`
+	Denied        int    `json:"denied"`
+	FirstSeenUnix int64  `json:"first_seen_unix"`
+	LastSeenUnix  int64  `json:"last_seen_unix"`
+	LastCommand   string `json:"last_command,omitempty"`
 	// LastCommandUnix anchors LastCommand to when that command actually started,
 	// distinct from LastSeenUnix (which any activity — connect, session, deny —
 	// bumps), so the dashboard doesn't show a stale command as "just now".

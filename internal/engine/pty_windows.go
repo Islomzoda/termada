@@ -9,7 +9,10 @@ import "errors"
 // (spec §26/§31, fork R6: Windows is best-effort in 0.x). The build is provided
 // so the rest of the toolchain cross-compiles; persistent-shell execution
 // returns a clear error until the ConPTY backend lands.
-func startShell(cols, rows int) (*ptyShell, error) {
+func startShell(cols, rows int, sp SpawnConfig) (*ptyShell, error) {
+	if sp.SeparateUID {
+		return nil, errors.New("security.run_as (uid separation) is not supported on Windows")
+	}
 	return nil, errors.New("local PTY sessions are not yet supported on Windows (ConPTY backend pending)")
 }
 

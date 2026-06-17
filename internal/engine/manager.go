@@ -46,9 +46,11 @@ type Manager struct {
 	auditOK        func() bool       // audit health probe; dangerous ops fail closed if false
 	remoteDial     RemoteDialer      // opens a shell to a named remote server (wired by daemon)
 
-	persistPath string
-	snapshotDir string
-	recovered   []Info // jobs recovered from a previous run (orphaned/terminal)
+	persistPath    string
+	snapshotDir    string
+	protectedPaths []string    // canonical paths file_read/file_write refuse (C2/FS-3)
+	spawn          SpawnConfig // how local agent shells are launched (uid separation, SEC-8)
+	recovered      []Info      // jobs recovered from a previous run (orphaned/terminal)
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -114,6 +116,10 @@ func (m *Manager) ResolveAgent(token, fallback string) string {
 func (m *Manager) SetTimeoutClasses(classes map[string]int) {
 	m.timeoutClasses = classes
 }
+
+// SetSpawnConfig installs how local agent shells are launched (uid separation,
+// SEC-8). The daemon resolves and validates it (requires root) before wiring.
+func (m *Manager) SetSpawnConfig(sp SpawnConfig) { m.spawn = sp }
 
 // RemoteDialer opens a persistent shell transport to a named remote target (a
 // configured server). It is wired by the daemon, which holds the server
@@ -202,7 +208,7 @@ func (m *Manager) CreateSession(owner, target, mode string) (*Session, error) {
 	var sess *Session
 	var err error
 	if target == "local" {
-		sess, err = newSession(owner, target, mode, scfg, m.redactor)
+		sess, err = newSession(owner, target, mode, scfg, m.redactor, m.spawn)
 	} else {
 		if m.remoteDial == nil {
 			return nil, errs.New(errs.NotSupported, "remote sessions require a configured server and unlocked vault")

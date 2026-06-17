@@ -15,7 +15,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,21 +47,27 @@ func SocketPath() string { return filepath.Join(RuntimeDir(), "termada.sock") }
 // TokenPath is the dashboard token file.
 func TokenPath() string { return filepath.Join(RuntimeDir(), "token") }
 
+// CLITokenPath is the human-CLI auth token for the local control socket. It
+// gates the human approval routes (approve/deny/stop_all) on the UDS so an agent
+// shelling out to curl the socket cannot self-approve a parked command.
+func CLITokenPath() string { return filepath.Join(RuntimeDir(), "cli.token") }
+
 // AuditPath is the audit log file.
 func AuditPath() string { return filepath.Join(RuntimeDir(), "audit.log") }
 
 // Daemon bundles the running services.
 type Daemon struct {
-	cfg     config.Config
-	version string
-	logger  *log.Logger
-	mgr     *engine.Manager
-	bus     *bus.Bus
-	audit   *audit.Logger
-	vault   *vault.Vault
-	fleet   *fleet.Manager
-	plugins *plugin.Manager
-	token   string
+	cfg      config.Config
+	version  string
+	logger   *log.Logger
+	mgr      *engine.Manager
+	bus      *bus.Bus
+	audit    *audit.Logger
+	vault    *vault.Vault
+	fleet    *fleet.Manager
+	plugins  *plugin.Manager
+	token    string
+	cliToken string
 }
 
 // New builds a daemon from config.
@@ -89,6 +97,22 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	mgr.SetAgentTokens(buildAgentTokens(cfg))
 	mgr.SetRecipes(buildRecipes(cfg))
 	mgr.SetTimeoutClasses(cfg.TimeoutClasses)
+	// file_read/file_write refuse the daemon's own secrets (tokens, vault) and the
+	// usual host credential stores, so an agent can't exfiltrate them — including
+	// the cli.token that gates self-approval — through the file API (C2/FS-3).
+	mgr.SetProtectedPaths(buildProtectedPaths(cfg))
+	// Optionally drop agent shells to a less-privileged uid so their `exec` can't
+	// read those secrets either (SEC-8). Fail closed: if the operator asked for
+	// uid separation but we can't provide it (not root), refuse to start rather
+	// than silently running agents with full privileges.
+	spawn, err := resolveSpawn(cfg.Security.RunAs)
+	if err != nil {
+		return nil, err
+	}
+	mgr.SetSpawnConfig(spawn)
+	if spawn.SeparateUID {
+		logger.Printf("uid separation ON: agent sessions run as uid=%d gid=%d", spawn.UID, spawn.GID)
+	}
 	if err := mgr.EnablePersistence(filepath.Join(RuntimeDir(), "registry.json")); err != nil {
 		logger.Printf("warning: registry recovery failed: %v", err)
 	}
@@ -118,13 +142,17 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 		logger.Printf("warning: plugin load: %v", err)
 	}
 
-	token, err := loadOrCreateToken()
+	token, err := loadOrCreateTokenAt(TokenPath())
+	if err != nil {
+		return nil, err
+	}
+	cliToken, err := loadOrCreateTokenAt(CLITokenPath())
 	if err != nil {
 		return nil, err
 	}
 
 	return &Daemon{cfg: cfg, version: version, logger: logger, mgr: mgr, bus: b, audit: aud,
-		vault: v, fleet: fl, plugins: plugins, token: token}, nil
+		vault: v, fleet: fl, plugins: plugins, token: token, cliToken: cliToken}, nil
 }
 
 // Run starts the listeners and blocks until ctx is cancelled.
@@ -201,7 +229,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// genuinely human-only mutating routes are refused here and served only over
 	// the TCP dashboard — otherwise the SEC-7 "an agent cannot change its own
 	// policy or add servers" guarantee would be tool-surface-only, not enforced.
-	udsSrv := &http.Server{Handler: dashboardOnly(root)}
+	// The human approval routes (approve/deny/stop_all) must STAY reachable here
+	// because the CLI uses them over the socket, so they are gated by a CLI auth
+	// token instead — a tokenless curl from an agent is refused.
+	udsSrv := &http.Server{Handler: udsGuard(d.cliToken, root)}
 	go func() { _ = udsSrv.Serve(uds) }()
 	d.logger.Printf("control-plane on unix:%s", SocketPath())
 
@@ -222,7 +253,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			tcpSrv = &http.Server{Handler: tokenAuth(d.token, localTrust, root)}
 			go func() { _ = tcpSrv.Serve(ln) }()
 			if localTrust {
-				d.logger.Printf("dashboard:  http://%s/   (open on this machine — no token needed; `termada dashboard` opens it)", ln.Addr().String())
+				d.logger.Printf("dashboard:  http://%s/   (viewing needs no token on this machine; approving/managing needs it — `termada dashboard` opens the dashboard with the token)", ln.Addr().String())
 			} else {
 				d.logger.Printf("dashboard:  http://%s/?token=%s", ln.Addr().String(), d.token)
 			}
@@ -255,17 +286,51 @@ var humanOnlyRoutes = map[string]bool{
 	"/api/servers/remove":  true,
 }
 
-// dashboardOnly wraps the UDS handler and refuses the human-only mutating routes.
-func dashboardOnly(h http.Handler) http.Handler {
+// cliAuthRoutes are the human approval/stop actions the CLI invokes over the UDS
+// (`termada approve|deny|stop`). They cannot be refused outright like the routes
+// above because the CLI genuinely needs them, but an agent shelling out to curl
+// the socket is otherwise indistinguishable from the CLI and could self-approve a
+// command it parked under a `confirm` policy. So we require the CLI auth token on
+// these routes: the CLI reads it from the 0600 cli.token file and sends it; a
+// tokenless agent curl is refused. The TCP dashboard reaches the same handlers
+// over its own token/local-trust path, which this guard does not touch.
+var cliAuthRoutes = map[string]bool{
+	"/api/approve":  true,
+	"/api/deny":     true,
+	"/api/stop_all": true,
+}
+
+// udsGuard wraps the UDS handler: it refuses the human-only mutating routes
+// outright and requires the CLI auth token on the human approval routes.
+func udsGuard(cliToken string, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if humanOnlyRoutes[r.URL.Path] {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"error":{"code":"denied_by_policy","message":"this action is available only from the dashboard, not over the local control socket"}}`))
+			denyUDS(w, "this action is available only from the dashboard, not over the local control socket")
 			return
+		}
+		if cliAuthRoutes[r.URL.Path] {
+			got := r.Header.Get("X-Termada-CLI-Token")
+			if cliToken == "" || subtle.ConstantTimeCompare([]byte(got), []byte(cliToken)) != 1 {
+				denyUDS(w, "this action requires the human CLI auth token; agents cannot approve, deny or stop over the local control socket")
+				return
+			}
 		}
 		h.ServeHTTP(w, r)
 	})
+}
+
+func denyUDS(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(`{"error":{"code":"denied_by_policy","message":"` + msg + `"}}`))
+}
+
+// sensitiveRoute reports whether a route mutates security-sensitive state and so
+// must require the dashboard token on TCP even in local-trust mode — an agent
+// runs on the same loopback/uid and would otherwise reach it tokenless. It is the
+// union of the routes refused on the UDS and those gated by the CLI token there.
+func sensitiveRoute(path string) bool {
+	return humanOnlyRoutes[path] || cliAuthRoutes[path]
 }
 
 func buildPolicies(cfg config.Config) map[string]policy.Policy {
@@ -316,8 +381,80 @@ func buildRecipes(cfg config.Config) map[string]engine.Recipe {
 	return out
 }
 
-func loadOrCreateToken() (string, error) {
-	p := TokenPath()
+// buildProtectedPaths lists the paths file_read/file_write must refuse: the
+// daemon's own runtime dir (cli.token, dashboard token, vault, audit log,
+// registry, known_hosts, snapshots, plugins), the vault file if configured
+// elsewhere, the common host credential stores, and any operator additions.
+func buildProtectedPaths(cfg config.Config) []string {
+	paths := []string{RuntimeDir()}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths,
+			filepath.Join(home, ".ssh"),
+			filepath.Join(home, ".aws"),
+			filepath.Join(home, ".gnupg"),
+		)
+	}
+	if cfg.Vault.File != "" {
+		paths = append(paths, config.ExpandPath(cfg.Vault.File))
+	}
+	for _, p := range cfg.Security.ProtectedPaths {
+		paths = append(paths, config.ExpandPath(p))
+	}
+	return paths
+}
+
+// resolveSpawn turns the configured security.run_as into a validated spawn
+// policy. An empty spec runs agent sessions as the daemon (the default). A
+// non-empty spec requires the daemon to be root (we can't setuid otherwise) and
+// must not resolve to root — both are fail-closed errors so an operator who
+// asked for uid separation never silently gets full-privilege agent sessions.
+func resolveSpawn(spec string) (engine.SpawnConfig, error) {
+	if strings.TrimSpace(spec) == "" {
+		return engine.SpawnConfig{}, nil
+	}
+	if os.Geteuid() != 0 {
+		return engine.SpawnConfig{}, fmt.Errorf("security.run_as=%q requires running the daemon as root (to drop agent sessions to that user); start termada as root or unset run_as", spec)
+	}
+	uid, gid, err := resolveRunAs(spec)
+	if err != nil {
+		return engine.SpawnConfig{}, fmt.Errorf("security.run_as: %w", err)
+	}
+	if uid == 0 {
+		return engine.SpawnConfig{}, fmt.Errorf("security.run_as=%q resolves to uid 0 — that defeats the purpose; use a dedicated unprivileged user", spec)
+	}
+	return engine.SpawnConfig{SeparateUID: true, UID: uid, GID: gid}, nil
+}
+
+// resolveRunAs parses a run_as spec: an explicit numeric "uid:gid", a bare
+// numeric uid (gid looked up), or a username (uid + primary gid looked up).
+func resolveRunAs(spec string) (uid, gid int, err error) {
+	spec = strings.TrimSpace(spec)
+	if i := strings.IndexByte(spec, ':'); i >= 0 {
+		u, e1 := strconv.Atoi(strings.TrimSpace(spec[:i]))
+		g, e2 := strconv.Atoi(strings.TrimSpace(spec[i+1:]))
+		if e1 != nil || e2 != nil {
+			return 0, 0, fmt.Errorf("invalid numeric uid:gid %q", spec)
+		}
+		return u, g, nil
+	}
+	var usr *user.User
+	if _, e := strconv.Atoi(spec); e == nil {
+		usr, err = user.LookupId(spec)
+	} else {
+		usr, err = user.Lookup(spec)
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("cannot resolve user %q: %w", spec, err)
+	}
+	u, e1 := strconv.Atoi(usr.Uid)
+	g, e2 := strconv.Atoi(usr.Gid)
+	if e1 != nil || e2 != nil {
+		return 0, 0, fmt.Errorf("user %q has non-numeric uid/gid", spec)
+	}
+	return u, g, nil
+}
+
+func loadOrCreateTokenAt(p string) (string, error) {
 	if b, err := os.ReadFile(p); err == nil && len(b) >= 16 {
 		return strings.TrimSpace(string(b)), nil
 	}
@@ -359,11 +496,18 @@ func tokenAuth(token string, localTrust bool, h http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/metrics" {
 			// The Host + Origin checks above already reject every cross-site and
 			// DNS-rebinding request, so anything reaching here is a genuine
-			// same-machine client. In local-trust mode (the default) that's
-			// enough — no token, so http://127.0.0.1:7717 just works on your own
-			// machine. The token is still accepted, and REQUIRED when local-trust
-			// is off (shared / multi-user hosts).
-			if !localTrust {
+			// same-machine client. In local-trust mode (the default) that's enough
+			// for read/observe routes — no token, so http://127.0.0.1:7717 just
+			// works on your own machine.
+			//
+			// BUT a malicious agent runs on the SAME loopback and uid, so "local =
+			// trusted" doesn't hold for the security-sensitive mutating routes
+			// (approve/deny/stop_all, policy/server management). Those require the
+			// token EVEN in local-trust — otherwise an agent could `curl` the TCP
+			// dashboard and self-approve, bypassing the socket guard. The SPA
+			// already sends the token (and shows its gate on a 401), so the human
+			// dashboard keeps working; only a tokenless caller is refused.
+			if !localTrust || sensitiveRoute(r.URL.Path) {
 				got := bearer(r)
 				if got == "" {
 					got = r.URL.Query().Get("token")

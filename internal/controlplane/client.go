@@ -19,13 +19,20 @@ import (
 // implements mcp.Backend so the stdio shim can proxy to the daemon, and adds
 // human-facing calls used by the CLI/TUI.
 type Client struct {
-	http  *http.Client
-	base  string
-	token string // optional per-agent identity token (X-Termada-Agent-Token)
+	http     *http.Client
+	base     string
+	token    string // optional per-agent identity token (X-Termada-Agent-Token)
+	cliToken string // optional human-CLI auth token (X-Termada-CLI-Token) for approve/deny/stop over the UDS
 }
 
 // SetToken sets the per-agent identity token sent with every request.
 func (c *Client) SetToken(t string) { c.token = t }
+
+// SetCLIToken sets the human-CLI auth token sent with every request. The daemon
+// requires it on the approval routes (approve/deny/stop_all) over the local
+// socket so an agent cannot self-approve; only the human CLI (which can read the
+// 0600 cli.token file) presents it.
+func (c *Client) SetCLIToken(t string) { c.cliToken = t }
 
 // NewUnixClient returns a client bound to the daemon's Unix socket.
 func NewUnixClient(socketPath string) *Client {
@@ -65,6 +72,11 @@ func (c *Client) get(path string, out any) error {
 func (c *Client) auth(r *http.Request) {
 	if c.token != "" {
 		r.Header.Set("X-Termada-Agent-Token", c.token)
+	}
+	// Harmless on every request; the daemon only checks it on the approval routes
+	// over the UDS. The agent shim never sets it, so it cannot self-approve.
+	if c.cliToken != "" {
+		r.Header.Set("X-Termada-CLI-Token", c.cliToken)
 	}
 }
 

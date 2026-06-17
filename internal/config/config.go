@@ -24,6 +24,21 @@ type Config struct {
 	Policies       map[string]PolicyConfig `yaml:"policies"`
 	Redaction      []string                `yaml:"redaction"`
 	Recipes        map[string]RecipeConfig `yaml:"recipes"`
+	Security       SecurityConfig          `yaml:"security"`
+}
+
+// SecurityConfig holds host-level guard rails.
+type SecurityConfig struct {
+	// ProtectedPaths are extra paths that file_read/file_write must refuse, on top
+	// of the always-protected defaults (the daemon runtime dir with its tokens and
+	// vault, plus ~/.ssh, ~/.aws, ~/.gnupg). Supports ~ expansion. (spec C2/FS-3)
+	ProtectedPaths []string `yaml:"protected_paths"`
+	// RunAs drops local agent sessions to a less-privileged user so their `exec`
+	// can't read the daemon's secrets, the control socket, or host credential
+	// stores (SEC-8). Either a username ("termada-agent") or a numeric "uid:gid".
+	// Empty = run as the daemon (default). REQUIRES the daemon to run as root, and
+	// the agent uid needs access (group/ACL) to the working directories it edits.
+	RunAs string `yaml:"run_as"`
 }
 
 type HTTPConfig struct {

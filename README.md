@@ -75,8 +75,7 @@ the agent and **transparent** for you:
 - `termada update` — self-update from GitHub releases (download → verify SHA-256 → atomic replace).
 
 > **Not yet:** a native Windows ConPTY runtime (cross-compiles today, but PTY and
-> signals are stubs) and code-signing / notarization. See the
-> [roadmap](docs/tz/Termada-TZ.md).
+> signals are stubs) and code-signing / notarization.
 
 ## Install
 
@@ -184,7 +183,6 @@ termada update                       self-update from GitHub releases
 - [docs/SECURITY.md](docs/SECURITY.md) — threat model: what's protected and what isn't.
 - [docs/PLUGINS.md](docs/PLUGINS.md) — writing out-of-process tool plugins.
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — release & MCP-registry process.
-- [docs/tz/Termada-TZ.md](docs/tz/Termada-TZ.md) — full product specification / roadmap.
 
 ## Architecture
 

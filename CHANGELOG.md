@@ -285,9 +285,8 @@ tamper-evident audit log.
 ## [0.1.0] — 2026-06-16
 
 First usable release: a local command-execution engine for AI agents, exposed
-over MCP. Scope is phase 1 of the spec (see `docs/tz/Termada-TZ.md` §30); the
-long-lived daemon, dashboard/TUI, SSH/fleet, vault and policy engine are later
-phases.
+over MCP. Scope is phase 1 of the spec; the long-lived daemon, dashboard/TUI,
+SSH/fleet, vault and policy engine are later phases.
 
 ### Added
 - Persistent-shell sessions over a real PTY that preserve `cwd`, env and venv

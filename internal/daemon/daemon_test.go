@@ -3,6 +3,7 @@ package daemon
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 )
 
@@ -159,6 +160,50 @@ func TestUDSApprovalRefusedWhenNoCLIToken(t *testing.T) {
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("%s with empty server token => %d, want 403 (fail closed)", p, rec.Code)
+		}
+	}
+}
+
+// resolveRunAs parses usernames and numeric specs; resolveSpawn enforces the
+// fail-closed rules (needs root, must not resolve to root).
+func TestResolveRunAs(t *testing.T) {
+	// explicit numeric uid:gid needs no user database
+	if uid, gid, err := resolveRunAs("1234:5678"); err != nil || uid != 1234 || gid != 5678 {
+		t.Fatalf(`resolveRunAs("1234:5678") = %d,%d,%v; want 1234,5678,nil`, uid, gid, err)
+	}
+	// bare numeric id with a bad pair
+	if _, _, err := resolveRunAs("12:bad"); err == nil {
+		t.Fatal(`resolveRunAs("12:bad") should error`)
+	}
+	// root resolves (uid 0) — every system has it; used to check uid:gid path
+	if uid, _, err := resolveRunAs("0:0"); err != nil || uid != 0 {
+		t.Fatalf(`resolveRunAs("0:0") = %d,_,%v; want 0,_,nil`, uid, err)
+	}
+	// a username that cannot exist
+	if _, _, err := resolveRunAs("no-such-user-xyz-123"); err == nil {
+		t.Fatal("resolveRunAs(unknown user) should error")
+	}
+}
+
+func TestResolveSpawnFailClosed(t *testing.T) {
+	// Empty spec = no separation, always OK regardless of privilege.
+	if sp, err := resolveSpawn(""); err != nil || sp.SeparateUID {
+		t.Fatalf(`resolveSpawn("") = %+v,%v; want disabled,nil`, sp, err)
+	}
+
+	// A non-empty spec while not root must fail closed (we can't setuid).
+	if os.Geteuid() != 0 {
+		if _, err := resolveSpawn("1234:5678"); err == nil {
+			t.Fatal("resolveSpawn with run_as set but not root should fail closed")
+		}
+	} else {
+		// Running as root: a valid unprivileged spec enables separation, but a
+		// spec resolving to root is refused.
+		if sp, err := resolveSpawn("1234:5678"); err != nil || !sp.SeparateUID || sp.UID != 1234 {
+			t.Fatalf("resolveSpawn(unprivileged) as root = %+v,%v; want enabled", sp, err)
+		}
+		if _, err := resolveSpawn("0:0"); err == nil {
+			t.Fatal("resolveSpawn resolving to uid 0 should be refused")
 		}
 	}
 }

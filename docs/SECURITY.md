@@ -36,6 +36,7 @@ states what is and isn't protected so you can decide what to trust it with.
 |-----------|-------|
 | Vault secrets are never returned to an agent or shown in the dashboard/audit | Only secrets *managed by the vault*. |
 | `file_read`/`file_write` refuse protected secret paths | The daemon runtime dir (`cli.token`, dashboard token, vault, audit log, registry, `known_hosts`), the vault file, and `~/.ssh` / `~/.aws` / `~/.gnupg`; canonicalized so `../` and symlinked parents can't slip past (C2/FS-3). Extend via `security.protected_paths`. Does **not** cover `exec` (see limits). |
+| Agent sessions can run under a separate uid (opt-in) | `security.run_as` (daemon as root) drops local shells to an unprivileged user, so an agent's `exec` can't read the socket, tokens, vault or host credentials (SEC-8). Off by default; fails closed if set without root. |
 | Secret input (sudo/SSH passwords, `exec_write secret=true`) is not logged or echoed | Excluded from audit and replay. |
 | Credentials encrypted at rest | age (CGO-free) or OS keychain. |
 | Tamper-**evident** audit | Hash-chained; any edit/deletion breaks the chain (`termada audit verify`). |
@@ -44,29 +45,32 @@ states what is and isn't protected so you can decide what to trust it with.
 
 ## What is NOT protected (know the limits)
 
-- **Secrets on the host filesystem / environment.** The `file_read`/`file_write`
-  API refuses the protected secret paths above, so an agent can't exfiltrate
-  `cli.token`, the vault, `~/.ssh`, etc. *through the file tools*. But an agent
-  with `exec` runs a shell as the **same uid** as the daemon, so `cat ~/.ssh/id_rsa`
-  (or `cat ~/.config/termada/cli.token`) still works — the path-deny covers the
-  file API, not the shell. Closing the `exec` vector needs sessions under a
-  restricted uid (not yet automated; see below).
-- **The local control socket is local-trust, and agents run as the same uid.**
-  The approval routes (approve/deny/stop-all) are now gated by the CLI auth token
-  above, so a *blind* agent `curl` of the socket is refused. The `file_read` path
-  to the token is also closed now (it's a protected path). But agent sessions
-  currently run as the **same uid** that owns the socket and the `0600`
-  `cli.token` (no uid separation yet — see below), so an agent with `exec` can
-  still `cat` that token file from its shell and forge the header. The token
-  therefore raises the bar and is defense-in-depth today — a self-approve is no
-  longer a one-line tokenless `curl`; it requires deliberately `cat`-ing the CLI
-  token from a shell, a louder and auditable act. The **complete** guarantee
-  needs the agent's sessions under a restricted uid that can neither open the
-  `0600` socket nor read `cli.token` — at which point the token gate becomes a
-  hard boundary. That uid separation is the same mitigation noted above and is
-  not yet automated. (Routes that are not self-escalating — e.g. `vault/unlock`,
-  which needs a passphrase the agent doesn't hold and never returns secrets to an
-  agent — remain tokenless on the socket.)
+- **Secrets on the host filesystem / environment — unless you enable uid
+  separation.** The `file_read`/`file_write` API refuses the protected secret
+  paths above, so an agent can't exfiltrate `cli.token`, the vault, `~/.ssh`, etc.
+  *through the file tools*. By **default**, though, an agent's `exec` runs a shell
+  as the **same uid** as the daemon, so `cat ~/.ssh/id_rsa` (or
+  `cat ~/.config/termada/cli.token`) still works — the path-deny covers the file
+  API, not the shell. **Set `security.run_as`** (a dedicated unprivileged user;
+  the daemon must run as root) to drop agent sessions to that uid: their `exec`
+  then can't read the `0600` socket, `cli.token`, the vault, or the operator's
+  `~/.ssh`/`~/.aws`. Trade-offs: the agent uid needs group/ACL access to the
+  working directories it edits, and the daemon's **environment** is still
+  inherited by the shell, so run the daemon with a clean environment (don't export
+  host secrets into it).
+- **The local control socket is local-trust, and by default agents share the
+  uid.** The approval routes (approve/deny/stop-all) are gated by the CLI auth
+  token on the socket and the dashboard token on TCP (even in local-trust), so a
+  *blind* agent `curl` on either transport is refused, and the `file_read` path to
+  the token is closed (it's a protected path). The one residual is `exec`: with
+  the default same-uid sessions an agent can `cat ~/.config/termada/cli.token`
+  (or the dashboard token) from its shell and forge the header. So the tokens are
+  defense-in-depth by default — self-approval is no longer a one-line tokenless
+  `curl`, it takes a deliberate, auditable `cat` from a shell — and become a
+  **hard** boundary once `security.run_as` is set (the dropped uid can neither open
+  the `0600` socket nor read the token files). (Routes that aren't self-escalating
+  — e.g. `vault/unlock`, which needs a passphrase the agent doesn't hold and never
+  returns secrets — remain tokenless on the socket.)
 - **Output redaction is best-effort.** Known token formats (PEM/JWT/AWS/GCP/
   api-key/GitHub/Slack) plus exact vault values are masked; an arbitrary secret
   may slip through.

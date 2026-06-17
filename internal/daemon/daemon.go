@@ -15,7 +15,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,6 +101,18 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	// usual host credential stores, so an agent can't exfiltrate them — including
 	// the cli.token that gates self-approval — through the file API (C2/FS-3).
 	mgr.SetProtectedPaths(buildProtectedPaths(cfg))
+	// Optionally drop agent shells to a less-privileged uid so their `exec` can't
+	// read those secrets either (SEC-8). Fail closed: if the operator asked for
+	// uid separation but we can't provide it (not root), refuse to start rather
+	// than silently running agents with full privileges.
+	spawn, err := resolveSpawn(cfg.Security.RunAs)
+	if err != nil {
+		return nil, err
+	}
+	mgr.SetSpawnConfig(spawn)
+	if spawn.SeparateUID {
+		logger.Printf("uid separation ON: agent sessions run as uid=%d gid=%d", spawn.UID, spawn.GID)
+	}
 	if err := mgr.EnablePersistence(filepath.Join(RuntimeDir(), "registry.json")); err != nil {
 		logger.Printf("warning: registry recovery failed: %v", err)
 	}
@@ -387,6 +401,57 @@ func buildProtectedPaths(cfg config.Config) []string {
 		paths = append(paths, config.ExpandPath(p))
 	}
 	return paths
+}
+
+// resolveSpawn turns the configured security.run_as into a validated spawn
+// policy. An empty spec runs agent sessions as the daemon (the default). A
+// non-empty spec requires the daemon to be root (we can't setuid otherwise) and
+// must not resolve to root — both are fail-closed errors so an operator who
+// asked for uid separation never silently gets full-privilege agent sessions.
+func resolveSpawn(spec string) (engine.SpawnConfig, error) {
+	if strings.TrimSpace(spec) == "" {
+		return engine.SpawnConfig{}, nil
+	}
+	if os.Geteuid() != 0 {
+		return engine.SpawnConfig{}, fmt.Errorf("security.run_as=%q requires running the daemon as root (to drop agent sessions to that user); start termada as root or unset run_as", spec)
+	}
+	uid, gid, err := resolveRunAs(spec)
+	if err != nil {
+		return engine.SpawnConfig{}, fmt.Errorf("security.run_as: %w", err)
+	}
+	if uid == 0 {
+		return engine.SpawnConfig{}, fmt.Errorf("security.run_as=%q resolves to uid 0 — that defeats the purpose; use a dedicated unprivileged user", spec)
+	}
+	return engine.SpawnConfig{SeparateUID: true, UID: uid, GID: gid}, nil
+}
+
+// resolveRunAs parses a run_as spec: an explicit numeric "uid:gid", a bare
+// numeric uid (gid looked up), or a username (uid + primary gid looked up).
+func resolveRunAs(spec string) (uid, gid int, err error) {
+	spec = strings.TrimSpace(spec)
+	if i := strings.IndexByte(spec, ':'); i >= 0 {
+		u, e1 := strconv.Atoi(strings.TrimSpace(spec[:i]))
+		g, e2 := strconv.Atoi(strings.TrimSpace(spec[i+1:]))
+		if e1 != nil || e2 != nil {
+			return 0, 0, fmt.Errorf("invalid numeric uid:gid %q", spec)
+		}
+		return u, g, nil
+	}
+	var usr *user.User
+	if _, e := strconv.Atoi(spec); e == nil {
+		usr, err = user.LookupId(spec)
+	} else {
+		usr, err = user.Lookup(spec)
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("cannot resolve user %q: %w", spec, err)
+	}
+	u, e1 := strconv.Atoi(usr.Uid)
+	g, e2 := strconv.Atoi(usr.Gid)
+	if e1 != nil || e2 != nil {
+		return 0, 0, fmt.Errorf("user %q has non-numeric uid/gid", spec)
+	}
+	return u, g, nil
 }
 
 func loadOrCreateTokenAt(p string) (string, error) {

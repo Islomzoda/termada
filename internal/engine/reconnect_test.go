@@ -19,7 +19,7 @@ type reconnShell struct {
 }
 
 func newReconnShell() (*reconnShell, error) {
-	in, err := startShell(200, 50)
+	in, err := startShell(200, 50, SpawnConfig{})
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +38,7 @@ func (s *reconnShell) Close() error                { return s.get().Close() }
 func (s *reconnShell) Signal(n string) error       { return s.get().Signal(n) }
 
 func (s *reconnShell) Reconnect() error {
-	in, err := startShell(200, 50)
+	in, err := startShell(200, 50, SpawnConfig{})
 	if err != nil {
 		return err
 	}

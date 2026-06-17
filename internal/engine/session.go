@@ -23,6 +23,18 @@ type SessionConfig struct {
 	OutputRetentionBytes int
 }
 
+// SpawnConfig controls how a local agent shell is launched. The zero value runs
+// the shell as the daemon's own uid (the default, legacy behaviour). When
+// SeparateUID is set the daemon (which must be root) drops the shell to UID/GID
+// so an agent's `exec` can't read the daemon's secrets, the control socket, or
+// the operator's credential stores — closing the same-uid residual of the
+// file/socket guards (spec SEC-8/§3a). It is platform-specific: honoured on Unix,
+// rejected on Windows.
+type SpawnConfig struct {
+	SeparateUID bool
+	UID, GID    int
+}
+
 // Session is a persistent shell over a PTY that preserves cwd/env/venv between
 // commands (spec SS-1/SS-3). One foreground command runs at a time (SS-5).
 type Session struct {
@@ -52,8 +64,8 @@ type Session struct {
 // newSession spawns the shell, starts the reader, and runs the init sequence
 // (disable echo, enable job control). It blocks until init completes so the
 // session is ready for jobs on return.
-func newSession(owner, target, mode string, cfg SessionConfig, redactor *output.Redactor) (*Session, error) {
-	shell, err := startShell(200, 50)
+func newSession(owner, target, mode string, cfg SessionConfig, redactor *output.Redactor, sp SpawnConfig) (*Session, error) {
+	shell, err := startShell(200, 50, sp)
 	if err != nil {
 		return nil, errs.New(errs.Internal, "start shell: %v", err)
 	}

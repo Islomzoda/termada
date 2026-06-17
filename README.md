@@ -11,6 +11,8 @@ prompts, structured results — while a human watches and controls everything fr
 a live dashboard with a kill-switch and approval queue.
 
 > Status: **0.7.2 — phases 1–4 complete + multi-agent hardening & agent-UX pass.** See [docs/tz/Termada-TZ.md](docs/tz/Termada-TZ.md)
+
+> 📽️ **Demo:** render a terminal walkthrough with [`vhs docs/demo.tape`](docs/demo.tape) → `docs/demo.gif` (then embed it here).
 > for the full spec / roadmap (§30) and [CHANGELOG.md](CHANGELOG.md). License: Apache-2.0.
 
 ## What works

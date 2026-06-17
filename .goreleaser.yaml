@@ -69,15 +69,12 @@ nfpms:
 
 brews:
   - name: termada
-    # The formula is generated, but NOT pushed: the Islomzoda/homebrew-tap repo
-    # doesn't exist yet and the default GITHUB_TOKEN can't write to a separate
-    # repo anyway (this is why the v0.7.0 release workflow went red). To enable
-    # `brew install`: create the homebrew-tap repo + a PAT, then flip this off.
-    # See docs/PUBLISHING.md.
-    skip_upload: "true"
     repository:
       owner: Islomzoda
       name: homebrew-tap
+      # PAT with write access to the tap repo (the default GITHUB_TOKEN can't push
+      # to a separate repo). Set as the HOMEBREW_TAP_TOKEN secret on this repo.
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: https://github.com/Islomzoda/termada
     description: The reliable, transparent terminal runtime for AI agents.
     license: Apache-2.0

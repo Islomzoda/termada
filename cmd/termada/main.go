@@ -35,7 +35,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.7.3"
+const version = "0.7.4"
 
 func main() {
 	if len(os.Args) < 2 {

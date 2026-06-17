@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## [0.7.4] — 2026-06-17
+
+### Added
+- **Homebrew**: the release now publishes the formula to the `Islomzoda/homebrew-tap`
+  tap (using a `HOMEBREW_TAP_TOKEN` PAT), so `brew install islomzoda/termada/termada`
+  works.
+
 ## [0.7.3] — 2026-06-17
 
 ### Fixed

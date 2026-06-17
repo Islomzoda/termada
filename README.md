@@ -60,8 +60,8 @@ Pin a version with `TERMADA_VERSION=v0.7.0`, or change the location with
 `TERMADA_BIN_DIR=~/bin`. Other ways:
 
 ```bash
-# Docker (no install) — build the image locally (a published ghcr.io image lands with the next release):
-docker build -t termada . && docker run --rm -p 7717:7717 termada serve
+# Docker (no install) — pull the published image:
+docker run --rm -p 7717:7717 ghcr.io/islomzoda/termada serve
 
 # From source (needs Go 1.26+) — clone, then:
 TERMADA_FROM_SOURCE=1 ./install.sh        # or:  go build -o ~/.local/bin/termada ./cmd/termada

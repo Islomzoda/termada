@@ -7,6 +7,57 @@ import (
 )
 
 const testCLIToken = "cli-secret-token-1234567890abcdef"
+const testDashToken = "dash-secret-token-abcdef1234567890"
+
+// In local-trust mode the read/observe API answers without a token, but the
+// security-sensitive mutating routes must STILL require it — otherwise an agent
+// on the same loopback/uid could curl the TCP dashboard and self-approve or
+// rewrite its policy, bypassing the socket guard.
+func TestTokenAuthGatesSensitiveRoutesInLocalTrust(t *testing.T) {
+	var reached []string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = append(reached, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	})
+	h := tokenAuth(testDashToken, true /*localTrust*/, inner)
+
+	req := func(path string, withToken bool) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("POST", "http://127.0.0.1:7717"+path, nil)
+		if withToken {
+			r.Header.Set("Authorization", "Bearer "+testDashToken)
+		}
+		h.ServeHTTP(rec, r)
+		return rec
+	}
+
+	sensitive := []string{"/api/approve", "/api/deny", "/api/stop_all", "/api/policies/set", "/api/policies/remove", "/api/servers/add", "/api/servers/remove"}
+
+	// Tokenless sensitive calls (an agent's curl) are refused even in local-trust.
+	for _, p := range sensitive {
+		if code := req(p, false).Code; code != http.StatusUnauthorized {
+			t.Fatalf("%s tokenless in local-trust => %d, want 401", p, code)
+		}
+	}
+	if len(reached) != 0 {
+		t.Fatalf("sensitive routes leaked to inner handler without a token: %v", reached)
+	}
+
+	// With the dashboard token (the SPA), they pass through.
+	for _, p := range sensitive {
+		if code := req(p, true).Code; code != http.StatusOK {
+			t.Fatalf("%s with token in local-trust => %d, want 200", p, code)
+		}
+	}
+
+	// Read/observe routes still answer tokenless in local-trust (the dashboard
+	// loads without a token).
+	for _, p := range []string{"/api/status", "/api/pending", "/api/exec/list"} {
+		if code := req(p, false).Code; code != http.StatusOK {
+			t.Fatalf("%s tokenless in local-trust => %d, want 200 (read is open)", p, code)
+		}
+	}
+}
 
 // The human-only mutating routes must be refused over the UDS (which the agent's
 // shim — and a shelled-out curl — can reach), and served only over the TCP

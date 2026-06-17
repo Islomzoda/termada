@@ -14,17 +14,21 @@ states what is and isn't protected so you can decide what to trust it with.
   reachable only on loopback and gated by a token.
 - **Policy/server management is dashboard-only, never an MCP tool** (SEC-7). The
   mutating routes (`/api/policies/{set,remove}`, `/api/servers/{add,remove}`) are
-  refused on the local control socket and served only over the token-gated
-  dashboard — so an agent cannot change its own policy or add a server even by
-  shelling out to `curl` the socket. The vault is never readable via the API.
-- **Human approval routes require a CLI auth token on the socket.** The approval
-  actions (`/api/{approve,deny,stop_all}`) must stay reachable on the socket
-  because the human CLI (`termada approve|deny|stop`) uses them, so they can't be
-  refused outright like the routes above. Instead they require the CLI auth token
-  (`~/.config/termada/cli.token`, mode `0600`), which the CLI reads and sends; a
-  tokenless `curl` from an agent is refused. This stops an agent from
-  self-approving a command it parked under a `confirm` policy. See the limits
-  below for the residual same-uid caveat.
+  refused on the local control socket and served only over the dashboard — and
+  they require the dashboard token **even in local-trust mode** (see below), so an
+  agent on the same loopback cannot change its own policy or add a server either by
+  shelling out to `curl` the socket or by hitting the TCP dashboard. The vault is
+  never readable via the API.
+- **Human approval routes need a token on *both* transports.** The approval
+  actions (`/api/{approve,deny,stop_all}`) must stay reachable for the human
+  (`termada approve|deny|stop` over the socket; the dashboard over TCP), so they
+  can't be refused outright. Instead: over the **socket** they require the CLI auth
+  token (`~/.config/termada/cli.token`, mode `0600`) which only the CLI sends; over
+  **TCP** they require the dashboard token *even in local-trust mode*, because a
+  malicious agent runs on the same loopback/uid and `local = trusted` does not hold
+  for it. A tokenless `curl` on either transport is refused, so an agent cannot
+  self-approve a command it parked under a `confirm` policy. See the limits below
+  for the residual same-uid caveat.
 
 ## What IS protected
 
@@ -35,8 +39,8 @@ states what is and isn't protected so you can decide what to trust it with.
 | Secret input (sudo/SSH passwords, `exec_write secret=true`) is not logged or echoed | Excluded from audit and replay. |
 | Credentials encrypted at rest | age (CGO-free) or OS keychain. |
 | Tamper-**evident** audit | Hash-chained; any edit/deletion breaks the chain (`termada audit verify`). |
-| Dangerous commands gated by human approval | Policy `confirm`/`deny`; deny-by-default on timeout; agents can't self-approve (socket approval routes require the CLI auth token; see limits re: same-uid). |
-| Dashboard API gated | Token (≥128-bit) on `/api/*` and `/metrics`; loopback Host/Origin checks (anti-DNS-rebinding). Static assets serve freely on loopback (no secrets in them). |
+| Dangerous commands gated by human approval | Policy `confirm`/`deny`; deny-by-default on timeout; agents can't self-approve — approval routes require a token on both transports (CLI token on the socket, dashboard token on TCP even in local-trust); see limits re: same-uid. |
+| Dashboard API gated | Token (≥128-bit) on `/api/*` and `/metrics`; loopback Host/Origin checks (anti-DNS-rebinding). In local-trust mode read/observe routes answer tokenless, but the security-sensitive mutating routes (approve/deny/stop_all, policy/server management) require the token **even then** (an agent shares the loopback). Static assets serve freely on loopback (no secrets in them). |
 
 ## What is NOT protected (know the limits)
 

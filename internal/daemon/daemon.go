@@ -239,7 +239,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			tcpSrv = &http.Server{Handler: tokenAuth(d.token, localTrust, root)}
 			go func() { _ = tcpSrv.Serve(ln) }()
 			if localTrust {
-				d.logger.Printf("dashboard:  http://%s/   (open on this machine — no token needed; `termada dashboard` opens it)", ln.Addr().String())
+				d.logger.Printf("dashboard:  http://%s/   (viewing needs no token on this machine; approving/managing needs it — `termada dashboard` opens the dashboard with the token)", ln.Addr().String())
 			} else {
 				d.logger.Printf("dashboard:  http://%s/?token=%s", ln.Addr().String(), d.token)
 			}
@@ -309,6 +309,14 @@ func denyUDS(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)
 	_, _ = w.Write([]byte(`{"error":{"code":"denied_by_policy","message":"` + msg + `"}}`))
+}
+
+// sensitiveRoute reports whether a route mutates security-sensitive state and so
+// must require the dashboard token on TCP even in local-trust mode — an agent
+// runs on the same loopback/uid and would otherwise reach it tokenless. It is the
+// union of the routes refused on the UDS and those gated by the CLI token there.
+func sensitiveRoute(path string) bool {
+	return humanOnlyRoutes[path] || cliAuthRoutes[path]
 }
 
 func buildPolicies(cfg config.Config) map[string]policy.Policy {
@@ -423,11 +431,18 @@ func tokenAuth(token string, localTrust bool, h http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/metrics" {
 			// The Host + Origin checks above already reject every cross-site and
 			// DNS-rebinding request, so anything reaching here is a genuine
-			// same-machine client. In local-trust mode (the default) that's
-			// enough — no token, so http://127.0.0.1:7717 just works on your own
-			// machine. The token is still accepted, and REQUIRED when local-trust
-			// is off (shared / multi-user hosts).
-			if !localTrust {
+			// same-machine client. In local-trust mode (the default) that's enough
+			// for read/observe routes — no token, so http://127.0.0.1:7717 just
+			// works on your own machine.
+			//
+			// BUT a malicious agent runs on the SAME loopback and uid, so "local =
+			// trusted" doesn't hold for the security-sensitive mutating routes
+			// (approve/deny/stop_all, policy/server management). Those require the
+			// token EVEN in local-trust — otherwise an agent could `curl` the TCP
+			// dashboard and self-approve, bypassing the socket guard. The SPA
+			// already sends the token (and shows its gate on a 401), so the human
+			// dashboard keeps working; only a tokenless caller is refused.
+			if !localTrust || sensitiveRoute(r.URL.Path) {
 				got := bearer(r)
 				if got == "" {
 					got = r.URL.Query().Get("token")

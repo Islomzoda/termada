@@ -20,6 +20,8 @@ const (
 	EvConfirmRequested = "confirm.requested"
 	EvConfirmResolved  = "confirm.resolved"
 	EvPolicyDenied     = "policy.denied"
+	EvFleetStarted     = "fleet.started"
+	EvFleetFinished    = "fleet.finished"
 )
 
 // Event is a single observable action.

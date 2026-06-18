@@ -165,6 +165,54 @@ func TestAPISessionLifecycle(t *testing.T) {
 	}
 }
 
+// fleet_run bypasses the per-job engine path, so without explicit events it is
+// invisible in the dashboard and the audit log (both fed from the bus). It must
+// publish a start + finished event, attributed to the acting agent, with the
+// per-server outcomes.
+func TestAPIFleetRunIsObservable(t *testing.T) {
+	m := engine.NewManager(engine.DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	b := bus.New(100)
+	m.SetBus(b)
+	v := vault.New(filepath.Join(t.TempDir(), "v.age"))
+	fl := fleet.New([]fleet.Server{{Name: "web1", Host: "h1", User: "u"}, {Name: "web2", Host: "h2", User: "u"}}, okRunner{}, 2)
+	mux := New(m, b, nil, fl, v, nil, "test").Mux()
+
+	ch, cancel := b.Subscribe(64)
+	defer cancel()
+
+	if code, out := do(t, mux, "POST", "/api/fleet/run", `{"owner":"claude-code","command":["uptime"],"servers":["web1","web2"]}`); code != 200 {
+		t.Fatalf("fleet run code=%d body=%v", code, out)
+	}
+
+	var start, fin *bus.Event
+	deadline := time.After(2 * time.Second)
+	for start == nil || fin == nil {
+		select {
+		case e := <-ch:
+			ev := e
+			if ev.Type == bus.EvFleetStarted {
+				start = &ev
+			} else if ev.Type == bus.EvFleetFinished {
+				fin = &ev
+			}
+		case <-deadline:
+			t.Fatalf("missing fleet events (start=%v finished=%v)", start != nil, fin != nil)
+		}
+	}
+
+	if start.AgentID != "claude-code" || fin.AgentID != "claude-code" {
+		t.Fatalf("fleet run not attributed to the agent: start=%q fin=%q", start.AgentID, fin.AgentID)
+	}
+	if start.Message != "uptime" {
+		t.Fatalf("start message = %q, want the command line", start.Message)
+	}
+	results, ok := fin.Data["results"].([]map[string]any)
+	if !ok || len(results) != 2 {
+		t.Fatalf("finished event must carry per-server outcomes, got: %v", fin.Data["results"])
+	}
+}
+
 func TestAPIPolicyCRUD(t *testing.T) {
 	mux, m := newTestServer(t)
 	// One config-defined policy "prod"; agentX is assigned the (to-be-created)

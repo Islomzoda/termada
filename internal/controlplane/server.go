@@ -37,6 +37,13 @@ func New(mgr *engine.Manager, b *bus.Bus, a *audit.Logger, fl *fleet.Manager, v 
 	return &Server{mgr: mgr, bus: b, audit: a, fleet: fl, vault: v, plugins: pl, version: version}
 }
 
+// publish emits an observability/audit event if a bus is wired (no-op otherwise).
+func (s *Server) publish(e bus.Event) {
+	if s.bus != nil {
+		s.bus.Publish(e)
+	}
+}
+
 // Mux returns the HTTP handler for the API and (later) the dashboard.
 func (s *Server) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
@@ -239,6 +246,7 @@ func (s *Server) hFleetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
+		Owner       string   `json:"owner"`
 		Command     []string `json:"command"`
 		Servers     []string `json:"servers"`
 		Tags        []string `json:"tags"`
@@ -246,11 +254,32 @@ func (s *Server) hFleetRun(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = decode(r, &req)
 	selector := append(append([]string{}, req.Servers...), req.Tags...)
+	// Attribute to the acting agent and make the run observable: fleet runs bypass
+	// the per-job engine path, so without these events they'd be invisible in the
+	// dashboard and the audit log (which is fed from the bus). We record the
+	// command + per-server outcome — not stdout/stderr (too large, may carry
+	// secrets; the live result still returns those to the caller).
+	owner := s.ownerFor(r, req.Owner)
+	cmdline := strings.Join(req.Command, " ")
+	s.publish(bus.Event{Type: bus.EvFleetStarted, AgentID: owner, Message: cmdline,
+		Data: map[string]any{"command": req.Command, "servers": selector}})
 	res, err := s.fleet.Run(req.Command, selector, req.Parallelism)
 	if err != nil {
+		s.publish(bus.Event{Type: bus.EvFleetFinished, AgentID: owner, Message: cmdline,
+			Data: map[string]any{"servers": selector, "error": err.Error()}})
 		writeErr(w, err)
 		return
 	}
+	outcomes := make([]map[string]any, 0, len(res.Results))
+	for _, rr := range res.Results {
+		o := map[string]any{"server": rr.Server, "status": rr.Status, "exit_code": rr.ExitCode, "duration_ms": rr.DurationMS}
+		if rr.Error != "" {
+			o["error"] = rr.Error
+		}
+		outcomes = append(outcomes, o)
+	}
+	s.publish(bus.Event{Type: bus.EvFleetFinished, AgentID: owner, Message: cmdline,
+		Data: map[string]any{"command": req.Command, "status": res.Status, "results": outcomes, "summary": res.Summary}})
 	writeJSON(w, res)
 }
 

@@ -41,6 +41,7 @@ states what is and isn't protected so you can decide what to trust it with.
 | Credentials encrypted at rest | age (CGO-free) or OS keychain. |
 | Tamper-**evident** audit | Hash-chained; any edit/deletion breaks the chain (`termada audit verify`). |
 | Dangerous commands gated by human approval | Policy `confirm`/`deny`; deny-by-default on timeout; agents can't self-approve — approval routes require a token on both transports (CLI token on the socket, dashboard token on TCP even in local-trust); see limits re: same-uid. |
+| Remote (`fleet_run`) commands are policy-gated + audited | The same agent policy applies to fleet commands: `deny` (and non-allowlisted) are refused, `confirm` fails **closed** (refused — fleet can't request approval yet, so run those from a session/dashboard). Every fleet run is recorded in the activity feed and the audit log (`fleet.started`/`fleet.finished`, attributed to the agent). |
 | Dashboard API gated | Token (≥128-bit) on `/api/*` and `/metrics`; loopback Host/Origin checks (anti-DNS-rebinding). In local-trust mode read/observe routes answer tokenless, but the security-sensitive mutating routes (approve/deny/stop_all, policy/server management) require the token **even then** (an agent shares the loopback). Static assets serve freely on loopback (no secrets in them). |
 
 ## What is NOT protected (know the limits)

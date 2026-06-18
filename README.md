@@ -112,21 +112,26 @@ termada serve         # start the daemon + dashboard (prints the URL)
 termada dashboard     # open it — http://127.0.0.1:7717, no token on your own machine
 ```
 
-Connect it to your agent — for Claude Code:
+Connect it to your agent — this is a **one-time, machine-wide** step. You do it
+once and every project gets Termada automatically; there's nothing to copy into
+each repo.
+
+For Claude Code, one command does it:
 
 ```bash
-claude mcp add termada -- termada serve --stdio
+claude mcp add --scope user termada -- termada serve --stdio
 ```
 
-Or drop it into a project `.mcp.json` (see [`.mcp.json.example`](.mcp.json.example)):
+Using a different agent (or prefer a file)? Add this once to your **global** MCP
+config — see [`.mcp.json.example`](.mcp.json.example):
 
 ```json
 { "mcpServers": { "termada": { "command": "termada", "args": ["serve", "--stdio"] } } }
 ```
 
-Then just ask the agent to do terminal work — it flows through Termada while you
-watch and control it live. One daemon is shared across every agent session and
-shows them all on the same dashboard.
+That's it. From now on, just ask the agent to do terminal work — it flows through
+Termada while you watch and control it live. The one shared daemon serves every
+project and every agent session, all on the same dashboard.
 
 ### Reach remote servers through Termada
 

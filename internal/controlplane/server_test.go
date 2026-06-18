@@ -213,6 +213,37 @@ func TestAPIFleetRunIsObservable(t *testing.T) {
 	}
 }
 
+// fleet_run must enforce the agent's policy like local commands do — otherwise an
+// agent runs anything on remote servers with no allow/deny/confirm gate. Denied
+// and confirm-required commands are refused (confirm fails closed: fleet can't
+// request approval yet); allowed commands run.
+func TestAPIFleetRunPolicyGated(t *testing.T) {
+	m := engine.NewManager(engine.DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	b := bus.New(100)
+	m.SetBus(b)
+	v := vault.New(filepath.Join(t.TempDir(), "v.age"))
+	fl := fleet.New([]fleet.Server{{Name: "web1", Host: "h", User: "u"}}, okRunner{}, 2)
+	m.SetPolicy(policy.NewEngine(map[string]policy.Policy{
+		"ro":   {Allow: []string{"ls"}, Deny: []string{"*"}}, // whitelist: only ls
+		"prod": {Confirm: []string{"systemctl*"}},
+	}), map[string]string{"ci": "ro", "ops": "prod"})
+	mux := New(m, b, nil, fl, v, nil, "test").Mux()
+
+	// not on the whitelist → denied
+	if code, _ := do(t, mux, "POST", "/api/fleet/run", `{"owner":"ci","command":["rm","-rf","/"],"servers":["web1"]}`); code != 422 {
+		t.Fatalf("denied fleet command => %d, want 422", code)
+	}
+	// confirm-required → fail closed (refused), not run unsupervised
+	if code, _ := do(t, mux, "POST", "/api/fleet/run", `{"owner":"ops","command":["systemctl","stop","api"],"servers":["web1"]}`); code != 422 {
+		t.Fatalf("confirm-required fleet command => %d, want 422 (fail closed)", code)
+	}
+	// allowed by the whitelist → runs
+	if code, out := do(t, mux, "POST", "/api/fleet/run", `{"owner":"ci","command":["ls"],"servers":["web1"]}`); code != 200 {
+		t.Fatalf("allowed fleet command => %d %v, want 200", code, out)
+	}
+}
+
 func TestAPIPolicyCRUD(t *testing.T) {
 	mux, m := newTestServer(t)
 	// One config-defined policy "prod"; agentX is assigned the (to-be-created)

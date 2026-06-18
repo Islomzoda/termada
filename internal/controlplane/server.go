@@ -261,6 +261,27 @@ func (s *Server) hFleetRun(w http.ResponseWriter, r *http.Request) {
 	// secrets; the live result still returns those to the caller).
 	owner := s.ownerFor(r, req.Owner)
 	cmdline := strings.Join(req.Command, " ")
+	// Fleet commands must pass the agent's policy too. The per-job engine path
+	// gates local commands (allow/deny/confirm); fleet_run bypassed it, so an agent
+	// could run anything on remote servers with no gate. Evaluate the command once
+	// (it's identical across targets) against the acting agent's policy.
+	if pol := s.mgr.Policy(); pol != nil {
+		dec := pol.Evaluate(s.mgr.AgentPolicy(owner), req.Command)
+		switch dec.Decision {
+		case policy.Deny:
+			s.publish(bus.Event{Type: bus.EvPolicyDenied, AgentID: owner, Message: cmdline,
+				Data: map[string]any{"reason": dec.Reason, "matched": dec.Matched, "servers": selector, "transport": "fleet"}})
+			writeErr(w, errs.New(errs.DeniedByPolicy, "command denied by policy (%s)", dec.Reason))
+			return
+		case policy.Confirm:
+			// Human approval (confirm) isn't wired for fleet yet — fail closed and
+			// refuse rather than run a dangerous command on servers unsupervised.
+			s.publish(bus.Event{Type: bus.EvPolicyDenied, AgentID: owner, Message: cmdline,
+				Data: map[string]any{"reason": "requires confirmation; not supported over fleet_run", "matched": dec.Matched, "servers": selector, "transport": "fleet"}})
+			writeErr(w, errs.New(errs.DeniedByPolicy, "command needs human approval (matched %q); fleet_run can't request it yet — run it from a session or the dashboard", dec.Matched))
+			return
+		}
+	}
 	s.publish(bus.Event{Type: bus.EvFleetStarted, AgentID: owner, Message: cmdline,
 		Data: map[string]any{"command": req.Command, "servers": selector}})
 	res, err := s.fleet.Run(req.Command, selector, req.Parallelism)

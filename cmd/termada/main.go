@@ -657,19 +657,21 @@ func cmdDashboard(args []string) {
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"
 	}
-	// local-trust (default): same-machine access needs no token, so print the
-	// clean bare URL. Only append ?token= when strict mode is on.
+	// Always hand out the token URL when a token exists. Even in local-trust mode
+	// the read views load without a token, but ACTIONS — approve/deny, kill,
+	// stop-all, policy/server edits — require it, so a bare URL would let you view
+	// the dashboard yet bounce every action to the unlock gate. Including the
+	// token (the dashboard stores it and strips it from the address bar) makes the
+	// page fully usable. In strict (non-local-trust) mode the token is mandatory.
 	localTrust := cfg.Dashboard.LocalTrust == nil || *cfg.Dashboard.LocalTrust
-	var url string
-	if localTrust {
-		url = fmt.Sprintf("http://%s:%s/", host, port)
-	} else {
-		tok, err := os.ReadFile(daemon.TokenPath())
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "no dashboard token at %s — is the daemon running?\nstart it with:  termada serve\n", daemon.TokenPath())
-			os.Exit(1)
+	url := fmt.Sprintf("http://%s:%s/", host, port)
+	if tok, err := os.ReadFile(daemon.TokenPath()); err == nil {
+		if t := strings.TrimSpace(string(tok)); t != "" {
+			url = fmt.Sprintf("http://%s:%s/?token=%s", host, port, t)
 		}
-		url = fmt.Sprintf("http://%s:%s/?token=%s", host, port, strings.TrimSpace(string(tok)))
+	} else if !localTrust {
+		fmt.Fprintf(os.Stderr, "no dashboard token at %s — is the daemon running?\nstart it with:  termada serve\n", daemon.TokenPath())
+		os.Exit(1)
 	}
 	fmt.Println(url)
 	if open {

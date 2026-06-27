@@ -49,13 +49,25 @@ type Plugin struct {
 type Manager struct {
 	dir string
 
+	// Per-call subprocess timeouts. Discovery (describe) is bounded shorter than
+	// invocation (call). Kept as fields so tests — where a race-instrumented or
+	// loaded machine makes process startup slow enough to trip a tight default —
+	// can widen them without changing production behavior.
+	describeTimeout time.Duration
+	callTimeout     time.Duration
+
 	mu      sync.RWMutex
 	plugins map[string]*Plugin
 }
 
 // New returns a manager for the given plugins directory.
 func New(dir string) *Manager {
-	return &Manager{dir: dir, plugins: map[string]*Plugin{}}
+	return &Manager{
+		dir:             dir,
+		plugins:         map[string]*Plugin{},
+		describeTimeout: 5 * time.Second,
+		callTimeout:     60 * time.Second,
+	}
 }
 
 // Load (re)scans the plugins directory, querying each executable for its tools.
@@ -78,7 +90,7 @@ func (m *Manager) Load() error {
 		}
 		path := filepath.Join(m.dir, e.Name())
 		name := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
-		out, err := run(path, []string{"describe"}, nil, 5*time.Second)
+		out, err := run(path, []string{"describe"}, nil, m.describeTimeout)
 		if err != nil {
 			continue
 		}
@@ -132,7 +144,7 @@ func (m *Manager) Call(name string, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("no such plugin %q", plug)
 	}
 	payload, _ := json.Marshal(args)
-	out, err := run(p.Path, []string{"call", tool}, payload, 60*time.Second)
+	out, err := run(p.Path, []string{"call", tool}, payload, m.callTimeout)
 	if err != nil {
 		return nil, err
 	}

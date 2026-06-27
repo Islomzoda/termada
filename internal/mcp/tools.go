@@ -56,7 +56,7 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "exec_run",
-		Description: "Run a command and wait for it, returning {status, exit_code, stdout} (empty/false fields are omitted to stay light). cwd and env PERSIST across calls in the same session — omit `session` to use your own per-agent default session (state still persists). NOTE: `command` is an argv array, not a shell line; $VARS, |, &&, >, globs and `cd x && y` are literal — for shell features use [\"bash\",\"-lc\",\"<line>\"]. A command still going past timeout_ms returns status=running/backgrounded with a job_id — stream it with exec_poll.",
+		Description: "Run a command and wait for it, returning {status, exit_code, stdout} (empty/false fields are omitted to stay light). `stdout` is the COMBINED stdout+stderr stream (the command runs on a PTY, so the two can't be separated) — if you need them apart, redirect inside the command, e.g. [\"bash\",\"-lc\",\"cmd 2>/tmp/err\"]. cwd and env PERSIST across calls in the same session — omit `session` to use your own per-agent default session (state still persists). NOTE: `command` is an argv array, not a shell line; $VARS, |, &&, >, globs and `cd x && y` are literal — for shell features use [\"bash\",\"-lc\",\"<line>\"]. A command still going past timeout_ms returns status=running/backgrounded with a job_id (plus waited_ms/timeout_ms so you can tell slow from hung) — stream it with exec_poll.",
 		InputSchema: obj(map[string]any{
 			"command":    argvSchema,
 			"session":    sessionSchema,
@@ -103,13 +103,14 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "exec_poll",
-		Description: "Fetch new output for a job since `cursor` (omit cursor to read from the start), plus status. Pass the returned next_cursor on your next poll. status=awaiting_input means the command is blocked on stdin — answer it with exec_write. When status is terminal (exited/killed/…), there is no next_cursor and nothing more to poll.",
+		Description: "Fetch new output for a job since `cursor` (omit cursor to read from the start), plus status. Pass the returned next_cursor on your next poll. Set `wait_ms` to long-poll: the call then blocks (up to 30s) until there's new output, the job ends, or it needs input — so you can follow a job without a manual poll-sleep loop. status=awaiting_input means the command is blocked on stdin — answer it with exec_write. When status is terminal (exited/killed/…), there is no next_cursor and nothing more to poll.",
 		InputSchema: obj(map[string]any{
-			"job_id": strSchema,
-			"cursor": map[string]any{"type": "string", "description": "the next_cursor from your previous poll; omit to read from the start of retained output"},
+			"job_id":  strSchema,
+			"cursor":  map[string]any{"type": "string", "description": "the next_cursor from your previous poll; omit to read from the start of retained output"},
+			"wait_ms": map[string]any{"type": "integer", "description": "long-poll: block up to this many ms (capped at 30000) for new output / completion / input before returning; omit or 0 for an immediate non-blocking poll"},
 		}, "job_id"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			res, err := mgr.Poll(argString(a, "job_id"), argString(a, "cursor"))
+			res, err := mgr.Poll(argString(a, "job_id"), argString(a, "cursor"), argInt(a, "wait_ms"))
 			if err != nil {
 				return nil, asErr(err)
 			}

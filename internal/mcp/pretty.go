@@ -63,6 +63,15 @@ func prettyStatus(m map[string]any) string {
 		mark("duration_ms")
 		header += " · " + dur(d)
 	}
+	if w, ok := ival(m, "waited_ms"); ok {
+		mark("waited_ms")
+		if budget, ok := ival(m, "timeout_ms"); ok {
+			mark("timeout_ms")
+			header += " · waited " + dur(w) + "/" + dur(budget)
+		} else {
+			header += " · waited " + dur(w)
+		}
+	}
 
 	lines := []string{header}
 

@@ -29,3 +29,22 @@ func TestInitializeReturnsInstructions(t *testing.T) {
 		}
 	}
 }
+
+// initialize echoes a protocol version it supports, and falls back to its default
+// for one it doesn't (instead of ignoring the client's request entirely).
+func TestInitializeNegotiatesProtocolVersion(t *testing.T) {
+	s := newTestServer(t)
+	got := func(params string) string {
+		res, rerr := s.dispatch(rpcRequest{Method: "initialize", Params: json.RawMessage(params)})
+		if rerr != nil {
+			t.Fatalf("initialize errored: %v", rerr)
+		}
+		return res.(map[string]any)["protocolVersion"].(string)
+	}
+	if v := got(`{"protocolVersion":"2025-06-18"}`); v != "2025-06-18" {
+		t.Fatalf("supported version not echoed: %q", v)
+	}
+	if v := got(`{"protocolVersion":"1999-01-01"}`); v != "2024-11-05" {
+		t.Fatalf("unknown version not defaulted: %q", v)
+	}
+}

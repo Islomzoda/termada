@@ -456,6 +456,7 @@ type execReq struct {
 	Command       []string `json:"command"`
 	Mode          string   `json:"mode"`
 	TimeoutMS     int      `json:"timeout_ms"`
+	WaitMS        int      `json:"wait_ms"`
 	JobID         string   `json:"job_id"`
 	Cursor        string   `json:"cursor"`
 	Input         string   `json:"input"`
@@ -526,7 +527,7 @@ func (s *Server) hExecStart(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hExecPoll(w http.ResponseWriter, r *http.Request) {
 	var req execReq
 	_ = decode(r, &req)
-	res, err := s.mgr.Poll(req.JobID, req.Cursor)
+	res, err := s.mgr.PollWait(req.JobID, req.Cursor, req.WaitMS)
 	if err != nil {
 		writeErr(w, err)
 		return

@@ -17,6 +17,15 @@ import (
 
 const protocolVersion = "2024-11-05"
 
+// supportedProtocols are the MCP versions whose handshake we're compatible with
+// (the tools surface is the same across them). We echo the client's requested
+// version when it's one of these, else fall back to protocolVersion.
+var supportedProtocols = map[string]bool{
+	"2024-11-05": true,
+	"2025-03-26": true,
+	"2025-06-18": true,
+}
+
 // serverInstructions is returned in the initialize result (MCP InitializeResult.
 // instructions). Every connecting client sees it, even one without the termada
 // skill — so it carries the load-bearing "default to termada, never the raw
@@ -151,7 +160,8 @@ func (s *Server) dispatch(req rpcRequest) (any, *rpcError) {
 		// the dashboard attributes activity to a real name, and count the
 		// connection (spec MA-1/MA-2).
 		var p struct {
-			ClientInfo struct {
+			ProtocolVersion string `json:"protocolVersion"`
+			ClientInfo      struct {
 				Name string `json:"name"`
 			} `json:"clientInfo"`
 		}
@@ -160,8 +170,16 @@ func (s *Server) dispatch(req rpcRequest) (any, *rpcError) {
 			s.agentID = p.ClientInfo.Name
 		}
 		s.backend.RecordConnect(s.agentID)
+		// Negotiate the protocol version: echo the client's requested version when
+		// it's one we speak (the tools surface is compatible across these), else
+		// fall back to our default. Previously the client's version was ignored and
+		// a fixed string returned — a forward-compat liability.
+		negotiated := protocolVersion
+		if supportedProtocols[p.ProtocolVersion] {
+			negotiated = p.ProtocolVersion
+		}
 		return map[string]any{
-			"protocolVersion": protocolVersion,
+			"protocolVersion": negotiated,
 			"serverInfo":      map[string]any{"name": "termada", "version": s.version},
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"instructions":    serverInstructions,

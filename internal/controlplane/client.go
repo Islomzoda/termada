@@ -119,9 +119,9 @@ func (c *Client) Start(owner, session string, command []string, mode string) (en
 	return out, err
 }
 
-func (c *Client) Poll(jobID, cursor string) (*engine.PollResult, error) {
+func (c *Client) Poll(jobID, cursor string, waitMS int) (*engine.PollResult, error) {
 	var out engine.PollResult
-	err := c.post("/api/exec/poll", execReq{JobID: jobID, Cursor: cursor}, &out)
+	err := c.post("/api/exec/poll", execReq{JobID: jobID, Cursor: cursor, WaitMS: waitMS}, &out)
 	if err != nil {
 		return nil, err
 	}

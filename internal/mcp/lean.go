@@ -45,6 +45,14 @@ func leanRun(r *engine.RunResult) map[string]any {
 		if r.NextCursor != "" {
 			m["next_cursor"] = r.NextCursor
 		}
+		// Tell the agent how long it waited vs the budget, so it can distinguish
+		// "slow" from "hung" instead of guessing.
+		if r.WaitedMS > 0 {
+			m["waited_ms"] = r.WaitedMS
+		}
+		if r.TimeoutMS > 0 {
+			m["timeout_ms"] = r.TimeoutMS
+		}
 	}
 	return m
 }

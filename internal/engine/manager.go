@@ -566,6 +566,8 @@ type RunResult struct {
 	Stdout     string `json:"stdout"`
 	NextCursor string `json:"next_cursor"`
 	Truncated  bool   `json:"truncated"`
+	WaitedMS   int64  `json:"waited_ms,omitempty"`  // how long exec_run actually waited
+	TimeoutMS  int64  `json:"timeout_ms,omitempty"` // the wait budget it applied
 }
 
 // Run starts a command and waits up to timeout for completion. If it does not
@@ -590,8 +592,16 @@ func (m *Manager) Run(owner, sessionID string, command []string, mode string, ti
 		wait = 250 * time.Millisecond
 		reason = "started in background"
 	case autoBg && isDaemon(command):
-		wait = 1500 * time.Millisecond
-		reason = "auto-backgrounded (long-running command)"
+		// A daemon-looking command is auto-backgrounded after a short grace — but
+		// honor an EXPLICIT timeout_ms if the agent set one (it would otherwise be
+		// silently discarded for anything matching the daemon heuristic).
+		if timeoutMS > 0 {
+			wait = time.Duration(timeoutMS) * time.Millisecond
+			reason = "still running after timeout; left running in background"
+		} else {
+			wait = 1500 * time.Millisecond
+			reason = "auto-backgrounded (long-running command)"
+		}
 	default:
 		if timeoutMS <= 0 {
 			timeoutMS = m.classTimeout(command)
@@ -599,6 +609,7 @@ func (m *Manager) Run(owner, sessionID string, command []string, mode string, ti
 		wait = time.Duration(timeoutMS) * time.Millisecond
 		reason = "still running after timeout; left running in background"
 	}
+	waitStart := time.Now()
 	select {
 	case <-job.Done():
 	case <-time.After(wait):
@@ -616,6 +627,8 @@ func (m *Manager) Run(owner, sessionID string, command []string, mode string, ti
 		Stdout:     string(chunk),
 		NextCursor: output.EncodeCursor(next),
 		Truncated:  gap,
+		WaitedMS:   time.Since(waitStart).Milliseconds(),
+		TimeoutMS:  wait.Milliseconds(),
 	}, nil
 }
 
@@ -631,6 +644,48 @@ type PollResult struct {
 // Poll returns incremental output for the agent (respects an output hold).
 func (m *Manager) Poll(jobID, cursor string) (*PollResult, error) {
 	return m.PollFor(jobID, cursor, false)
+}
+
+// PollWait is Poll with an optional long-poll: if there is nothing new yet and
+// waitMS > 0, it blocks (capped at 30s) until new output arrives, the job goes
+// terminal, it starts awaiting input, or the budget elapses — then returns the
+// latest. This replaces the agent's busy poll-sleep-poll loop (which the model
+// often gets wrong) with one call. waitMS <= 0 is the old non-blocking behavior.
+func (m *Manager) PollWait(jobID, cursor string, waitMS int) (*PollResult, error) {
+	res, err := m.PollFor(jobID, cursor, false)
+	if err != nil || waitMS <= 0 {
+		return res, err
+	}
+	if res.StdoutChunk != "" || res.Status.Terminal() || res.AwaitingInput || res.OutputHeld {
+		return res, nil
+	}
+	if waitMS > 30_000 {
+		waitMS = 30_000
+	}
+	job, err := m.getJob(jobID)
+	if err != nil {
+		return res, nil
+	}
+	deadline := time.NewTimer(time.Duration(waitMS) * time.Millisecond)
+	defer deadline.Stop()
+	tick := time.NewTicker(150 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			return m.PollFor(jobID, cursor, false)
+		case <-job.Done():
+			return m.PollFor(jobID, cursor, false)
+		case <-tick.C:
+			r, e := m.PollFor(jobID, cursor, false)
+			if e != nil {
+				return r, e
+			}
+			if r.StdoutChunk != "" || r.Status.Terminal() || r.AwaitingInput || r.OutputHeld {
+				return r, nil
+			}
+		}
+	}
 }
 
 // PollFor returns incremental output from the cursor onward plus current status.

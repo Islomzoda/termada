@@ -14,7 +14,7 @@ import (
 type Backend interface {
 	Run(owner, session string, command []string, mode string, timeoutMS int) (*engine.RunResult, error)
 	Start(owner, session string, command []string, mode string) (engine.Info, error)
-	Poll(jobID, cursor string) (*engine.PollResult, error)
+	Poll(jobID, cursor string, waitMS int) (*engine.PollResult, error)
 	Write(jobID, input string, appendNewline, secret bool) error
 	Signal(jobID, signal string) error
 	Kill(jobID string) error
@@ -60,8 +60,8 @@ func (b *LocalBackend) Start(owner, session string, command []string, mode strin
 	return job.Snapshot(), nil
 }
 
-func (b *LocalBackend) Poll(jobID, cursor string) (*engine.PollResult, error) {
-	return b.m.Poll(jobID, cursor)
+func (b *LocalBackend) Poll(jobID, cursor string, waitMS int) (*engine.PollResult, error) {
+	return b.m.PollWait(jobID, cursor, waitMS)
 }
 
 func (b *LocalBackend) Write(jobID, input string, appendNewline, secret bool) error {

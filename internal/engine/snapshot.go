@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/termada/termada/internal/errs"
@@ -74,6 +75,12 @@ func (m *Manager) SnapshotRestore(id string) error {
 	if dir == "" {
 		return errs.New(errs.NotSupported, "snapshots are not configured")
 	}
+	// The id indexes a directory under the snapshot store and is attacker-supplied
+	// over the control plane — confine it to a single path element so it can't
+	// traverse out (e.g. "../../etc") and restore from an arbitrary location.
+	if !validSnapshotID(id) {
+		return errs.New(errs.InvalidArgument, "invalid snapshot id %q", id)
+	}
 	base := filepath.Join(dir, id)
 	meta, err := os.ReadFile(filepath.Join(base, "meta.json"))
 	if err != nil {
@@ -84,19 +91,42 @@ func (m *Manager) SnapshotRestore(id string) error {
 		return errs.New(errs.Internal, "%v", err)
 	}
 	payload := filepath.Join(base, "payload")
-	// Restore via a temp sibling then atomic swap, so a failed copy doesn't
-	// destroy the original.
+	// Stage the restored copy, then SWAP rather than delete-then-rename: move the
+	// current source aside (kept as a backup), move the new copy into place, and
+	// only then drop the backup — rolling back if the swap fails. The previous
+	// order deleted the original before the rename, so a rename failure was
+	// unrecoverable.
 	tmp := info.Source + ".termada-restore"
+	backup := info.Source + ".termada-backup"
 	_ = os.RemoveAll(tmp)
 	if _, err := copyTree(payload, tmp); err != nil {
 		_ = os.RemoveAll(tmp)
 		return errs.New(errs.Internal, "%v", err)
 	}
-	_ = os.RemoveAll(info.Source)
+	_ = os.RemoveAll(backup)
+	hadSource := false
+	if _, err := os.Lstat(info.Source); err == nil {
+		if err := os.Rename(info.Source, backup); err != nil {
+			_ = os.RemoveAll(tmp)
+			return errs.New(errs.Internal, "set aside original: %v", err)
+		}
+		hadSource = true
+	}
 	if err := os.Rename(tmp, info.Source); err != nil {
+		if hadSource {
+			_ = os.Rename(backup, info.Source) // roll back
+		}
+		_ = os.RemoveAll(tmp)
 		return errs.New(errs.Internal, "restore swap: %v", err)
 	}
+	_ = os.RemoveAll(backup)
 	return nil
+}
+
+// validSnapshotID accepts only a single, separator-free path element (the form
+// ids.New produces), so a restore can't be steered outside the snapshot store.
+func validSnapshotID(id string) bool {
+	return id != "" && id != "." && id != ".." && !strings.ContainsAny(id, `/\`)
 }
 
 // SnapshotList returns saved snapshots, newest first.

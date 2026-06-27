@@ -220,6 +220,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 			case <-t.C:
 				d.mgr.GCOnce(3_600_000, 500) // drop terminal jobs >1h old; keep last 500
 				d.mgr.ReapOnce()             // SIGKILL runaway/hung jobs (no-op unless max_job_runtime_ms is set)
+				if ms := d.cfg.Vault.IdleRelockMS; ms > 0 {
+					d.vault.RelockIfIdle(time.Duration(ms) * time.Millisecond) // auto-lock an idle vault
+				}
 			}
 		}
 	}()

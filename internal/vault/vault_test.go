@@ -2,8 +2,50 @@ package vault
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
+
+// Repeated wrong passphrases trip a lockout so a reachable socket can't be
+// brute-forced; even the correct passphrase is refused during the window.
+func TestUnlockThrottle(t *testing.T) {
+	v := New(filepath.Join(t.TempDir(), "v.age"))
+	if err := v.Init("correct"); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	v.Lock()
+	for i := 0; i < unlockAttemptLimit; i++ {
+		if err := v.Unlock("wrong"); err == nil {
+			t.Fatal("wrong passphrase accepted")
+		}
+	}
+	err := v.Unlock("correct")
+	if err == nil || !strings.Contains(err.Error(), "too many") {
+		t.Fatalf("expected throttle after %d failures, got %v", unlockAttemptLimit, err)
+	}
+}
+
+// An unlocked-but-idle vault auto-locks; a fresh or 0 idle is a no-op.
+func TestRelockIfIdle(t *testing.T) {
+	v := New(filepath.Join(t.TempDir(), "v.age"))
+	if err := v.Init("p"); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if v.RelockIfIdle(time.Hour) {
+		t.Fatal("relocked while not idle")
+	}
+	if v.RelockIfIdle(0) {
+		t.Fatal("relocked with idle=0 (disabled)")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if !v.RelockIfIdle(10 * time.Millisecond) {
+		t.Fatal("should have relocked when idle past threshold")
+	}
+	if !v.Locked() {
+		t.Fatal("vault should be locked after idle relock")
+	}
+}
 
 func TestVaultRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vault.age")

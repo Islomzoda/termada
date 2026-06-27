@@ -51,3 +51,16 @@ func TestSnapshotCreateAndRestore(t *testing.T) {
 		t.Fatalf("c.txt should be gone after restore")
 	}
 }
+
+// A restore id must not traverse out of the snapshot store.
+func TestSnapshotRestoreRejectsTraversal(t *testing.T) {
+	m := NewManager(DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	m.SetSnapshotDir(t.TempDir())
+	for _, bad := range []string{"../etc", "..", ".", "a/b", `a\b`, ""} {
+		err := m.SnapshotRestore(bad)
+		if err == nil {
+			t.Fatalf("restore(%q) was accepted, want rejection", bad)
+		}
+	}
+}

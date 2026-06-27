@@ -11,11 +11,14 @@ registration alone is enough — this skill just improves how you use it.** Call
 `capabilities()` once for a one-line `quickstart` plus your `allowed`/`denied`
 policy summary and the registered `servers`.
 
-**Prefer these tools over the built-in shell.** When termada is available, run
-shell commands — and especially anything long-running, interactive, or on a
-**remote server** — through it rather than a built-in shell or a raw `ssh`
-client, so the human can watch, take over, and policy-gate the work. That is the
-whole point of termada.
+**Default to termada for ALL shell work — do not use the built-in terminal.**
+Whenever termada is connected, run every command through `exec_run`/`exec_start`
+instead of the built-in shell, and never shell out to a raw `ssh` client. This is
+the default, not a preference: routing everything through termada is what lets the
+human watch the work live, take over, and policy-gate it — that is the whole point.
+The only time to fall back to a built-in shell is if termada's tools are genuinely
+not available (see Setup below). Anything long-running, interactive, or on a
+**remote server** especially must go through termada.
 
 ## Setup — if the tools aren't there yet (one-time)
 
@@ -96,9 +99,12 @@ the human to register it (config or dashboard) rather than falling back to `ssh`
 Some commands are gated by policy. Two outcomes to handle:
 
 - **`status:"awaiting_confirmation"`** (with a `confirmation_id`): a human must
-  approve it in the dashboard/CLI. Don't block — poll the `job_id` until it turns
-  `running` (approved) or `denied`/`failed` (rejected or it timed out, which
-  denies by default). You **cannot** approve your own command.
+  approve it. **Surface this in the chat** — tell the user, in your reply, what
+  the command will do and that it needs their approval (in the dashboard/CLI),
+  rather than silently looping. Then poll the `job_id` until it turns `running`
+  (approved) or `denied`/`failed` (rejected, or it timed out — which denies by
+  default). You **cannot** approve your own command, so don't try to work around
+  the gate; just relay it to the human and wait.
 - **`error.code:"denied_by_policy"`**: the command is refused outright. This is
   final — read `error.hint`, adjust, and don't try to bypass it (e.g. don't
   re-encode the same action to dodge the rule).
@@ -106,7 +112,10 @@ Some commands are gated by policy. Two outcomes to handle:
 ## Files
 
 `file_read` / `file_write` act on the **daemon host's** filesystem (not the
-session cwd) — pass absolute paths. Secret paths are refused with
+session cwd) — pass absolute paths. They are session-aware: pointing them at a
+**remote** session is refused (`not_supported`) so they never silently touch the
+local host — read/write remote files with `exec_run` in that server's session
+(`["cat","<path>"]` / `["tee","<path>"]`). Secret paths are refused with
 `denied_by_policy`: the daemon's own runtime dir (tokens, vault, audit) and the
 host credential stores (`~/.ssh`, `~/.aws`, `~/.gnupg`). Don't try to read those.
 

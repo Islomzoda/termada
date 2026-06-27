@@ -17,6 +17,22 @@ import (
 
 const protocolVersion = "2024-11-05"
 
+// serverInstructions is returned in the initialize result (MCP InitializeResult.
+// instructions). Every connecting client sees it, even one without the termada
+// skill — so it carries the load-bearing "default to termada, never the raw
+// terminal" guidance and how the human-in-the-loop confirmation flow surfaces.
+const serverInstructions = `termada gives you reliable persistent terminal sessions (local and remote-SSH).
+
+USE THESE TOOLS FOR ALL SHELL WORK BY DEFAULT. Run every command through exec_run / exec_start instead of a built-in shell, and never shell out to a raw ` + "`ssh`" + ` client — go through termada so the human can watch, take over, and policy-gate the work.
+
+- Sessions persist cwd and env. Omit ` + "`session`" + ` to use your per-agent default (state still persists); create a separate one with session_create, and for a remote server create session_create(target=<server-name>) and run in that session_id.
+- Long-running jobs (dev servers, builds, watchers) run async: exec_start (or exec_run mode:"background") returns a job_id; read output with exec_poll(job_id, cursor), passing back next_cursor.
+- Interactive prompts come back as status "awaiting_input" with the prompt — answer with exec_write(job_id, input) (secret:true for passwords).
+- Dangerous commands come back as status "awaiting_confirmation" with a confirmation_id and need a HUMAN to approve. You CANNOT self-approve. Do not silently poll: tell the user in chat what the command will do and that it needs their approval (dashboard/CLI), then wait. denied_by_policy is final — don't try to bypass it.
+- file_read / file_write act on the daemon host; for files on a remote server use exec_run in that server's session (cat / tee).
+
+Call capabilities() once for a quickstart plus your allowed/denied policy summary and the registered servers.`
+
 // Server serves MCP requests backed by a Backend (in-process engine or a daemon
 // proxy).
 type Server struct {
@@ -148,6 +164,7 @@ func (s *Server) dispatch(req rpcRequest) (any, *rpcError) {
 			"protocolVersion": protocolVersion,
 			"serverInfo":      map[string]any{"name": "termada", "version": s.version},
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
+			"instructions":    serverInstructions,
 		}, nil
 	case "ping":
 		return map[string]any{}, nil
@@ -186,14 +203,13 @@ func (s *Server) callTool(params json.RawMessage) (any, *rpcError) {
 }
 
 // toolResult formats a value as an MCP tools/call result. Tool-level errors are
-// returned as isError results (so the model sees them), not JSON-RPC errors.
+// returned as isError results (so the model sees them), not JSON-RPC errors. The
+// content[].text is rendered human-legibly (prettyResult) for the chat
+// transcript, while the exact object rides along in structuredContent for
+// machine consumers — neither view drops an actionable field.
 func toolResult(v any, isErr bool) map[string]any {
-	text, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		text = []byte(`{"error":"failed to encode result"}`)
-	}
 	return map[string]any{
-		"content":           []map[string]any{{"type": "text", "text": string(text)}},
+		"content":           []map[string]any{{"type": "text", "text": prettyResult(v, isErr)}},
 		"structuredContent": v,
 		"isError":           isErr,
 	}

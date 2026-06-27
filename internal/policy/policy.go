@@ -234,30 +234,132 @@ func (e *Engine) Evaluate(policyName string, argv []string) Result {
 		return Result{Decision: Allow, Reason: "no such policy: " + policyName}
 	}
 
-	cmd := strings.Join(argv, " ")
-	prog := argv[0]
-
+	// Allowlists match the command as written, plus a basename form so an absolute
+	// path (/bin/ls) satisfies a bare `ls` rule. We deliberately do NOT unwrap
+	// wrappers here: `sudo ls` must not pass a whitelist of `ls` — it fails the
+	// whitelist and is denied, which is the safe direction.
 	if len(p.Allow) > 0 {
-		if m := firstMatch(p.Allow, cmd, prog); m != "" {
+		if m := firstMatchT(p.Allow, matchTargets(argv)); m != "" {
 			return Result{Decision: Allow, Matched: m}
 		}
-		return Result{Decision: Deny, Reason: "not in allowlist", Matched: ""}
+		return Result{Decision: Deny, Reason: "not in allowlist"}
 	}
-	if m := firstMatch(p.Deny, cmd, prog); m != "" {
+
+	// Deny/confirm match an EXPANDED target set: the command, its basename form,
+	// and the same for any wrapped command it carries (sudo/env/nice/nohup/… and
+	// `<shell> -c "…"`). This stops a deny/confirm rule from being dodged by
+	// `sudo rm`, `env X=1 rm`, `/bin/rm` or `bash -c "rm …"`. Matching is
+	// case-sensitive, as Unix commands are — case-folding is intentionally avoided
+	// (it would over-deny, or worse over-allow a whitelist).
+	gate := expandTargets(argv)
+	if m := firstMatchT(p.Deny, gate); m != "" {
 		return Result{Decision: Deny, Reason: "matched deny rule", Matched: m}
 	}
-	if m := firstMatch(p.Confirm, cmd, prog); m != "" {
+	if m := firstMatchT(p.Confirm, gate); m != "" {
 		return Result{Decision: Confirm, Reason: "matched confirm rule", Matched: m}
 	}
 	return Result{Decision: Allow}
 }
 
-// firstMatch returns the first glob in patterns that matches the full command
-// string or the program name.
-func firstMatch(patterns []string, cmd, prog string) string {
+// matchTargets returns the strings a rule is matched against for one argv: the
+// full command line and the program name, each also with the program's basename
+// substituted so an absolute path (/bin/rm) matches a bare-name rule (rm).
+func matchTargets(argv []string) []string {
+	if len(argv) == 0 {
+		return nil
+	}
+	full := strings.Join(argv, " ")
+	prog := argv[0]
+	t := []string{full, prog}
+	if base := baseName(prog); base != prog {
+		t = append(t, base, base+full[len(prog):])
+	}
+	return t
+}
+
+// expandTargets is matchTargets over argv plus every wrapped command it carries,
+// so deny/confirm rules see through sudo/env/nice/nohup/setsid/time/command and
+// `<shell> -c "…"`. Unwrapping is bounded in depth.
+func expandTargets(argv []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(av []string) {
+		for _, s := range matchTargets(av) {
+			if !seen[s] {
+				seen[s] = true
+				out = append(out, s)
+			}
+		}
+	}
+	for cur, depth := argv, 0; len(cur) > 0 && depth < 6; depth++ {
+		add(cur)
+		inner, ok := unwrapOne(cur)
+		if !ok {
+			break
+		}
+		cur = inner
+	}
+	return out
+}
+
+// unwrapOne strips one layer of a known command wrapper, returning the inner
+// command it would run: `<shell> -c "<line>"` (the line is tokenised) and prefix
+// wrappers (sudo/doas/env/nice/nohup/setsid/stdbuf/ionice/time/command) by
+// skipping the wrapper and its option/assignment args. ok=false if not a wrapper.
+func unwrapOne(argv []string) ([]string, bool) {
+	if len(argv) == 0 {
+		return nil, false
+	}
+	switch baseName(argv[0]) {
+	case "bash", "sh", "zsh", "dash", "ash", "ksh":
+		for i := 1; i < len(argv)-1; i++ {
+			if argv[i] == "-c" {
+				if f := strings.Fields(argv[i+1]); len(f) > 0 {
+					return f, true
+				}
+			}
+		}
+		return nil, false
+	case "sudo", "doas", "env", "nice", "nohup", "setsid", "stdbuf", "ionice", "time", "command":
+		i := 1
+		for i < len(argv) {
+			if a := argv[i]; strings.HasPrefix(a, "-") || isAssignment(a) {
+				i++
+				continue
+			}
+			break
+		}
+		if i < len(argv) {
+			return argv[i:], true
+		}
+		return nil, false
+	}
+	return nil, false
+}
+
+// isAssignment reports whether s looks like a VAR=value env assignment.
+func isAssignment(s string) bool {
+	eq := strings.IndexByte(s, '=')
+	if eq <= 0 {
+		return false
+	}
+	return !strings.ContainsAny(s[:eq], "/ \t")
+}
+
+func baseName(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
+	}
+	return p
+}
+
+// firstMatchT returns the first glob in patterns that matches any of targets.
+func firstMatchT(patterns, targets []string) string {
 	for _, pat := range patterns {
-		if matchGlob(pat, cmd) || matchGlob(pat, prog) {
-			return pat
+		for _, s := range targets {
+			if matchGlob(pat, s) {
+				return pat
+			}
 		}
 	}
 	return ""

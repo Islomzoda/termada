@@ -1,8 +1,10 @@
 // Package notify sends desktop and optional Telegram notifications for key
 // events (spec §8.3/OB-7): a command needs approval, a job failed, an agent
 // connected. External channels are the one explicit exception to local-first and
-// are opt-in. Notification content is best-effort minimal; the message comes
-// from already-redacted bus events.
+// are opt-in. Notification content is best-effort minimal and, because the bus is
+// not redacted at the source, every message is run through the redactor before it
+// leaves the box (Telegram especially) so a secret in a command line / prompt is
+// masked rather than shipped to a third party.
 package notify
 
 import (
@@ -17,10 +19,14 @@ import (
 	"github.com/termada/termada/internal/bus"
 )
 
+// Redactor masks secrets in notification text before it leaves the box.
+type Redactor interface{ Redact(string) string }
+
 // Notifier delivers notifications for selected event types.
 type Notifier struct {
 	desktop  bool
 	telegram TelegramConfig
+	redactor Redactor
 	http     *http.Client
 }
 
@@ -31,9 +37,9 @@ type TelegramConfig struct {
 	ChatID   string
 }
 
-// New builds a notifier.
-func New(desktop bool, tg TelegramConfig) *Notifier {
-	return &Notifier{desktop: desktop, telegram: tg, http: &http.Client{Timeout: 8 * time.Second}}
+// New builds a notifier. redactor may be nil (no masking).
+func New(desktop bool, tg TelegramConfig, redactor Redactor) *Notifier {
+	return &Notifier{desktop: desktop, telegram: tg, redactor: redactor, http: &http.Client{Timeout: 8 * time.Second}}
 }
 
 // Subscribe consumes bus events and notifies on the interesting ones. It runs
@@ -65,6 +71,10 @@ func interesting(e bus.Event) (title, body string, ok bool) {
 }
 
 func (n *Notifier) send(title, body string) {
+	if n.redactor != nil {
+		title = n.redactor.Redact(title)
+		body = n.redactor.Redact(body)
+	}
 	if n.desktop {
 		n.desktopNotify(title, body)
 	}

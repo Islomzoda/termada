@@ -435,8 +435,13 @@ func (m *Manager) autoAnswerWatch(job *Job, owner string) {
 					if strings.Contains(info.Prompt, rule.Match) {
 						answered[rule.Match] = true
 						_ = job.sess.writeInput([]byte(rule.Send + "\n"))
+						// The answer may be a secret (a configured passphrase), so it
+						// must never reach the bus — which feeds the audit log,
+						// off-box notifications and the dashboard. Surface only what
+						// it matched, not the value sent. (PTY echo is already off, so
+						// the value doesn't land in the output buffer either.)
 						m.publish(bus.Event{Type: "auto_answer", AgentID: owner, JobID: job.ID,
-							Message: rule.Send, Data: map[string]any{"matched": rule.Match}})
+							Message: "auto-answered prompt matching " + rule.Match, Data: map[string]any{"matched": rule.Match}})
 					}
 				}
 			}

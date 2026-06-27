@@ -187,7 +187,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		Enabled:  d.cfg.Notifications.Telegram.Enabled,
 		BotToken: d.cfg.Notifications.Telegram.BotToken,
 		ChatID:   d.cfg.Notifications.Telegram.ChatID,
-	})
+	}, d.mgr.Redactor())
 	nch, cancelNotify := d.bus.Subscribe(256)
 	go notifier.Subscribe(nch)
 	defer cancelNotify()

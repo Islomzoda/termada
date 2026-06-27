@@ -22,6 +22,35 @@ func TestAllowlistWhitelist(t *testing.T) {
 	}
 }
 
+// A deny/confirm rule must not be dodged by a wrapper or an absolute path.
+func TestNormalizationClosesBypasses(t *testing.T) {
+	e := engine()
+	denied := [][]string{
+		{"/bin/rm", "-rf", "/"},          // absolute path
+		{"sudo", "rm", "-rf", "/"},       // sudo wrapper
+		{"env", "X=1", "rm", "-rf", "/"}, // env assignment + wrapper
+		{"nice", "rm", "-rf", "/"},       // nice wrapper
+		{"bash", "-c", "rm -rf /"},       // shell -c payload
+		{"sudo", "/bin/rm", "-rf", "/"},  // wrapper + absolute path
+	}
+	for _, av := range denied {
+		if d := e.Evaluate("prod-safe", av).Decision; d != Deny {
+			t.Fatalf("%v => %s, want deny", av, d)
+		}
+	}
+	if d := e.Evaluate("prod-safe", []string{"sudo", "rm", "-rf", "build"}).Decision; d != Confirm {
+		t.Fatalf("sudo rm -rf build => %s, want confirm", d)
+	}
+	// An absolute path satisfies an allowlist's bare name…
+	if d := e.Evaluate("read-only", []string{"/bin/ls", "-la"}).Decision; d != Allow {
+		t.Fatalf("/bin/ls => %s, want allow", d)
+	}
+	// …but a wrapper must NOT slip a non-allowed program past the whitelist.
+	if d := e.Evaluate("read-only", []string{"sudo", "ls"}).Decision; d != Deny {
+		t.Fatalf("sudo ls (allowlist) => %s, want deny", d)
+	}
+}
+
 func TestDenyAndConfirm(t *testing.T) {
 	e := engine()
 	if d := e.Evaluate("prod-safe", []string{"rm", "-rf", "/"}).Decision; d != Deny {

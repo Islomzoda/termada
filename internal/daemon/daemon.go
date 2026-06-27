@@ -336,12 +336,25 @@ func denyUDS(w http.ResponseWriter, msg string) {
 	_, _ = w.Write([]byte(`{"error":{"code":"denied_by_policy","message":"` + msg + `"}}`))
 }
 
-// sensitiveRoute reports whether a route mutates security-sensitive state and so
-// must require the dashboard token on TCP even in local-trust mode — an agent
-// runs on the same loopback/uid and would otherwise reach it tokenless. It is the
-// union of the routes refused on the UDS and those gated by the CLI token there.
+// streamReadRoutes are server-sent-event endpoints exposing live terminal output
+// and the global activity feed. They stay open on the UDS (the CLI/TUI tail them)
+// but must require the dashboard token on TCP even in local-trust: otherwise any
+// local process — including a rogue agent on the same loopback — could connect to
+// the dashboard port and tail another agent's session token-lessly. The SPA
+// already appends ?token= to these URLs, so the human dashboard keeps working.
+var streamReadRoutes = map[string]bool{
+	"/api/events":         true,
+	"/api/exec/stream":    true,
+	"/api/session/stream": true,
+}
+
+// sensitiveRoute reports whether a route mutates security-sensitive state or
+// exposes another agent's output, and so must require the dashboard token on TCP
+// even in local-trust mode — an agent runs on the same loopback/uid and would
+// otherwise reach it tokenless. It is the union of the routes refused / CLI-token
+// gated on the UDS plus the live-stream read routes.
 func sensitiveRoute(path string) bool {
-	return humanOnlyRoutes[path] || cliAuthRoutes[path]
+	return humanOnlyRoutes[path] || cliAuthRoutes[path] || streamReadRoutes[path]
 }
 
 func buildPolicies(cfg config.Config) map[string]policy.Policy {

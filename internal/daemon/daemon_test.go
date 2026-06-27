@@ -32,7 +32,10 @@ func TestTokenAuthGatesSensitiveRoutesInLocalTrust(t *testing.T) {
 		return rec
 	}
 
-	sensitive := []string{"/api/approve", "/api/deny", "/api/stop_all", "/api/policies/set", "/api/policies/remove", "/api/servers/add", "/api/servers/remove"}
+	sensitive := []string{"/api/approve", "/api/deny", "/api/stop_all", "/api/policies/set", "/api/policies/remove", "/api/servers/add", "/api/servers/remove",
+		// live-stream reads: a rogue agent on loopback must not tail another
+		// agent's session/output token-lessly even in local-trust.
+		"/api/events", "/api/exec/stream", "/api/session/stream"}
 
 	// Tokenless sensitive calls (an agent's curl) are refused even in local-trust.
 	for _, p := range sensitive {

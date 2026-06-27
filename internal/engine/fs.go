@@ -133,7 +133,10 @@ func (m *Manager) FileWrite(path, content, mode string) (*FileWriteResult, error
 	} else {
 		flags |= os.O_TRUNC
 	}
-	f, err := os.OpenFile(path, flags, 0o644)
+	// 0o600 (not 0o644): a file the agent writes may carry secrets/config and
+	// must not be world-readable. Only applies when creating the file; an existing
+	// file keeps its mode.
+	f, err := os.OpenFile(path, flags, 0o600)
 	if err != nil {
 		return nil, errs.New(errs.Internal, "%v", err)
 	}

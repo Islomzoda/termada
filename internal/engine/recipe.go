@@ -65,6 +65,32 @@ func (m *Manager) RunRecipe(owner, sessionID, name string) (*RecipeRunResult, er
 	if !ok {
 		return nil, errs.New(errs.NotFound, "recipe %s not found", name)
 	}
+
+	// Honor the recipe's declared target so a recipe written for a remote server
+	// can't silently run on the local/default session (the silent-wrong-host
+	// class of bug). With a target set: a passed session must match it (else fail
+	// loud), and with no session we open an ad-hoc one on the target and close it
+	// after the run.
+	if target := r.Target; target != "" && target != "local" {
+		if sessionID != "" {
+			st, ok := m.SessionTarget(sessionID)
+			if !ok {
+				return nil, errs.New(errs.NotFound, "session %s not found", sessionID)
+			}
+			if st != target {
+				return nil, errs.New(errs.InvalidArgument,
+					"recipe %q targets %q but session %s targets %q — run it without a session or pass one on %q", name, target, sessionID, st, target)
+			}
+		} else {
+			sess, err := m.CreateSession(owner, target, "shell")
+			if err != nil {
+				return nil, err
+			}
+			sessionID = sess.ID
+			defer func() { _ = m.CloseSession(sessionID) }()
+		}
+	}
+
 	res := &RecipeRunResult{Recipe: name, Status: "ok"}
 	for _, step := range r.Steps {
 		job, err := m.Start(owner, sessionID, step, ModeForeground)

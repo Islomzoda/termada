@@ -820,6 +820,24 @@ func (m *Manager) Shutdown() {
 	}
 }
 
+// SessionTarget returns a session's target ("local" or a server name) and
+// whether the session exists. An empty id (the per-agent default session) is
+// reported as not-found so callers treat it as local. Used to keep file_read/
+// file_write from operating on the wrong host (e.g. local FS while the agent
+// believes it is in a remote session).
+func (m *Manager) SessionTarget(id string) (string, bool) {
+	if id == "" {
+		return "", false
+	}
+	m.mu.Lock()
+	s := m.sessions[id]
+	m.mu.Unlock()
+	if s == nil {
+		return "", false
+	}
+	return s.Target, true
+}
+
 func (m *Manager) getSession(id string) (*Session, error) {
 	m.mu.Lock()
 	s := m.sessions[id]

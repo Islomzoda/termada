@@ -293,3 +293,23 @@ func TestAPIPolicyCRUD(t *testing.T) {
 		t.Fatalf("auto_answer dropped on edit: %v", aa)
 	}
 }
+
+// The (local) default session must still read/write the daemon host over HTTP —
+// the new session-aware guard only refuses REMOTE sessions, not local ones.
+func TestAPIFileReadWriteLocalSession(t *testing.T) {
+	mux, _ := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "note.txt")
+
+	wbody, _ := json.Marshal(map[string]any{"path": path, "content": "hello-local"})
+	if code, out := do(t, mux, "POST", "/api/file/write", string(wbody)); code != 200 {
+		t.Fatalf("file/write => %d %v", code, out)
+	}
+	rbody, _ := json.Marshal(map[string]any{"path": path})
+	code, out := do(t, mux, "POST", "/api/file/read", string(rbody))
+	if code != 200 {
+		t.Fatalf("file/read => %d %v", code, out)
+	}
+	if c, _ := out["content"].(string); c != "hello-local" {
+		t.Fatalf("content = %q, want hello-local", c)
+	}
+}

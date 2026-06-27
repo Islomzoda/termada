@@ -346,6 +346,10 @@ func (s *Server) hVaultStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hFileRead(w http.ResponseWriter, r *http.Request) {
 	var req execReq
 	_ = decode(r, &req)
+	if err := s.mgr.EnsureLocalFileOp(req.Session); err != nil {
+		writeErr(w, err)
+		return
+	}
 	res, err := s.mgr.FileRead(req.Path, req.MaxBytes)
 	if err != nil {
 		writeErr(w, err)
@@ -357,6 +361,10 @@ func (s *Server) hFileRead(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hFileWrite(w http.ResponseWriter, r *http.Request) {
 	var req execReq
 	_ = decode(r, &req)
+	if err := s.mgr.EnsureLocalFileOp(req.Session); err != nil {
+		writeErr(w, err)
+		return
+	}
 	res, err := s.mgr.FileWrite(req.Path, req.Content, req.FileMode)
 	if err != nil {
 		writeErr(w, err)

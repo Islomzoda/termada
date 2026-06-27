@@ -175,18 +175,18 @@ func (c *Client) Tail(jobID, cursor string) (*engine.TailResult, error) {
 	return &out, nil
 }
 
-func (c *Client) FileRead(path string, maxBytes int) (*engine.FileReadResult, error) {
+func (c *Client) FileRead(session, path string, maxBytes int) (*engine.FileReadResult, error) {
 	var out engine.FileReadResult
-	err := c.post("/api/file/read", execReq{Path: path, MaxBytes: maxBytes}, &out)
+	err := c.post("/api/file/read", execReq{Session: session, Path: path, MaxBytes: maxBytes}, &out)
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *Client) FileWrite(path, content, mode string) (*engine.FileWriteResult, error) {
+func (c *Client) FileWrite(session, path, content, mode string) (*engine.FileWriteResult, error) {
 	var out engine.FileWriteResult
-	err := c.post("/api/file/write", execReq{Path: path, Content: content, FileMode: mode}, &out)
+	err := c.post("/api/file/write", execReq{Session: session, Path: path, Content: content, FileMode: mode}, &out)
 	if err != nil {
 		return nil, err
 	}
@@ -217,6 +217,11 @@ func (c *Client) ServerList() []fleet.ServerInfo {
 	_ = c.get("/api/servers", &out)
 	return out.Servers
 }
+
+// RemoteAvailable is true for the daemon-backed client: remote SSH sessions,
+// fleet and the vault are reachable (subject to server config and an unlocked
+// vault). Contrast with the in-process LocalBackend.
+func (c *Client) RemoteAvailable() bool { return true }
 
 func (c *Client) FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error) {
 	body := map[string]any{"command": command, "servers": selector, "parallelism": parallelism}

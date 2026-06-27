@@ -132,7 +132,16 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	mgr.SetRemoteDialer(func(target string, cols, rows int) (engine.ShellConn, error) {
 		srv, ok := fl.Get(target)
 		if !ok {
-			return nil, fmt.Errorf("no server named %q", target)
+			// Spell out what IS configured so the agent fixes the name (or adds
+			// the server) instead of silently giving up and using a local shell.
+			known := make([]string, 0)
+			for _, s := range fl.ServerList() {
+				known = append(known, s.Name)
+			}
+			if len(known) == 0 {
+				return nil, fmt.Errorf("no server named %q (no servers configured — add one in the dashboard or via /api/servers/add)", target)
+			}
+			return nil, fmt.Errorf("no server named %q (configured: %s)", target, strings.Join(known, ", "))
 		}
 		return runner.OpenShell(srv, cols, rows)
 	})

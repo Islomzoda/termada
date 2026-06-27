@@ -255,13 +255,14 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "file_read",
-		Description: "Read a file on the daemon host (secrets best-effort redacted). Returns {content, size}. NOT session-scoped — a session's cwd does not apply, so pass an absolute path. Large files are capped (set max_bytes); a `truncated:true` flag appears only when content was cut.",
+		Description: "Read a file on the daemon host (secrets best-effort redacted). Returns {content, size}. Runs on the daemon host, NOT inside a session — cwd does not apply, so pass an absolute path. For a file on a REMOTE server, this refuses; read it with exec_run in that server's session instead (command=[\"cat\",\"<path>\"]). Large files are capped (set max_bytes); a `truncated:true` flag appears only when content was cut.",
 		InputSchema: obj(map[string]any{
 			"path":      map[string]any{"type": "string", "description": "absolute path on the daemon host (not relative to any session's cwd)"},
+			"session":   sessionSchema,
 			"max_bytes": intSchema,
 		}, "path"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			res, err := mgr.FileRead(argString(a, "path"), argInt(a, "max_bytes"))
+			res, err := mgr.FileRead(argString(a, "session"), argString(a, "path"), argInt(a, "max_bytes"))
 			if err != nil {
 				return nil, asErr(err)
 			}
@@ -271,14 +272,15 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "file_write",
-		Description: "Write content to a file on the daemon host. mode 'append' appends, otherwise truncates. NOT session-scoped — pass an absolute path (a session's cwd does not apply).",
+		Description: "Write content to a file on the daemon host. mode 'append' appends, otherwise truncates. Runs on the daemon host, NOT inside a session — pass an absolute path. For a file on a REMOTE server, this refuses; write it with exec_run in that server's session instead (e.g. command=[\"tee\",\"<path>\"]).",
 		InputSchema: obj(map[string]any{
 			"path":    strSchema,
 			"content": strSchema,
+			"session": sessionSchema,
 			"mode":    map[string]any{"type": "string", "enum": []string{"truncate", "append"}},
 		}, "path", "content"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			res, err := mgr.FileWrite(argString(a, "path"), argString(a, "content"), argString(a, "mode"))
+			res, err := mgr.FileWrite(argString(a, "session"), argString(a, "path"), argString(a, "content"), argString(a, "mode"))
 			return res, asErr(err)
 		},
 	})
@@ -359,13 +361,25 @@ func (s *Server) registerTools() {
 		Description: "Report this agent's identity, the API version, available tools and execution modes.",
 		InputSchema: emptySchema,
 		Handler: func(a map[string]any) (any, *errs.Error) {
+			remote := mgr.RemoteAvailable()
+			execMode := "in-process"
+			notes := "in-process fallback (no daemon): remote SSH sessions, fleet, vault and plugins are UNAVAILABLE — session_create accepts target=local only. Start the daemon (`termada serve`) to enable remote targets."
+			if remote {
+				execMode = "daemon"
+				notes = "daemon-backed: local + remote persistent shells (session_create target=<server>), fleet_run, vault and plugins are available. Configure servers with server_list / the dashboard before targeting them."
+			}
 			return map[string]any{
 				"agent_id":    s.agentID,
 				"api_version": "0.x",
 				"tools":       s.order,
 				"modes":       []string{engine.ModeAuto, engine.ModeForeground, engine.ModeBackground},
-				"quickstart":  "commands are argv arrays, not shell lines ($VAR/pipes/&&/globs are literal — use [\"bash\",\"-lc\",\"...\"] for shell features). cwd & env persist across calls in a session; omit `session` to use your per-agent default session. exec_run waits and returns stdout; exec_start returns a job_id you stream with exec_poll(job_id, next_cursor). When status=awaiting_input, reply with exec_write. Responses omit empty/false fields to stay light; errors carry a `hint`.",
-				"notes":       "phase 1: local persistent-shell engine; SSH/fleet/vault are phase 2",
+				// remote tells the agent whether a non-local target can work at
+				// all, so it never silently settles for a local shell when it
+				// meant to reach a server.
+				"remote":     remote,
+				"exec_mode":  execMode,
+				"quickstart": "commands are argv arrays, not shell lines ($VAR/pipes/&&/globs are literal — use [\"bash\",\"-lc\",\"...\"] for shell features). cwd & env persist across calls in a session; omit `session` to use your per-agent default session (always LOCAL). To act on a server, session_create target=<server> and pass the returned session_id to exec_run. exec_run waits and returns stdout; exec_start returns a job_id you stream with exec_poll(job_id, next_cursor). When status=awaiting_input, reply with exec_write. Responses omit empty/false fields to stay light; errors carry a `hint`.",
+				"notes":      notes,
 			}, nil
 		},
 	})

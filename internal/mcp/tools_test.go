@@ -3,6 +3,7 @@ package mcp
 import (
 	"io"
 	"log"
+	"strings"
 	"testing"
 
 	"github.com/termada/termada/internal/engine"
@@ -136,5 +137,40 @@ func TestCapabilitiesHasQuickstart(t *testing.T) {
 	out := callMap(t, s, "capabilities", map[string]any{})
 	if q, _ := out["quickstart"].(string); q == "" {
 		t.Fatal("capabilities missing quickstart cheatsheet")
+	}
+}
+
+// In-process (no daemon) the agent must be told remote is unavailable, instead
+// of the old stale "SSH/fleet/vault are phase 2" note that made it give up and
+// silently use a local shell.
+func TestCapabilitiesReportsInProcessMode(t *testing.T) {
+	s := newTestServer(t)
+	out := callMap(t, s, "capabilities", map[string]any{})
+	if r, _ := out["remote"].(bool); r {
+		t.Fatalf("in-process capabilities should report remote=false: %v", out)
+	}
+	if m, _ := out["exec_mode"].(string); m != "in-process" {
+		t.Fatalf("exec_mode = %q, want in-process", m)
+	}
+	if n, _ := out["notes"].(string); strings.Contains(n, "phase 2") {
+		t.Fatalf("notes still claim the stale phase-2 status: %q", n)
+	}
+}
+
+// A remote target with no daemon must fail LOUDLY (so the agent doesn't fall
+// through to exec_run's silent local default session) and the error must say how
+// to enable remote.
+func TestRemoteSessionRejectedInProcess(t *testing.T) {
+	s := newTestServer(t)
+	_, e := s.tools["session_create"].Handler(map[string]any{"target": "ravand.pro"})
+	if e == nil {
+		t.Fatal("expected an error creating a remote session in-process")
+	}
+	if e.Code != errs.NotSupported {
+		t.Fatalf("code = %v, want not_supported", e.Code)
+	}
+	// local must still work.
+	if _, e := s.tools["session_create"].Handler(map[string]any{"target": "local"}); e != nil {
+		t.Fatalf("local session_create should still work: %v", e)
 	}
 }

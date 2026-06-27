@@ -23,8 +23,11 @@ type Backend interface {
 	ListSessions() []engine.SessionInfo
 	CloseSession(id string) error
 	Tail(jobID, cursor string) (*engine.TailResult, error)
-	FileRead(path string, maxBytes int) (*engine.FileReadResult, error)
-	FileWrite(path, content, mode string) (*engine.FileWriteResult, error)
+	// FileRead/FileWrite are session-aware: with an empty or local session they
+	// act on the daemon host; with a remote session they refuse loudly (instead
+	// of silently touching the local FS while the agent believes it is remote).
+	FileRead(session, path string, maxBytes int) (*engine.FileReadResult, error)
+	FileWrite(session, path, content, mode string) (*engine.FileWriteResult, error)
 	RecipeList() []engine.RecipeInfo
 	RecipeRun(owner, session, name string) (*engine.RecipeRunResult, error)
 	ServerList() []fleet.ServerInfo
@@ -32,6 +35,11 @@ type Backend interface {
 	PluginTools() []plugin.ToolSpec
 	PluginCall(name string, args map[string]any) (any, error)
 	RecordConnect(agent string)
+	// RemoteAvailable reports whether remote (SSH) sessions, fleet and plugins
+	// are reachable — true only when backed by a running daemon. The in-process
+	// fallback returns false so the agent can tell it is in degraded mode
+	// instead of silently landing on a local shell.
+	RemoteAvailable() bool
 }
 
 // LocalBackend adapts an in-process *engine.Manager to the Backend interface.
@@ -68,6 +76,13 @@ func (b *LocalBackend) ListJobs(filter string) []engine.Info {
 }
 
 func (b *LocalBackend) CreateSession(owner, target, mode string) (engine.SessionInfo, error) {
+	// Remote sessions need the daemon (server inventory + vault). Reject them
+	// loudly here instead of letting the agent fall through to a silent local
+	// default session and run remote-intended commands on this host.
+	if target != "" && target != "local" {
+		return engine.SessionInfo{}, errs.New(errs.NotSupported,
+			"remote session to %q requires the termada daemon (none running); start it with `termada serve`. In-process mode supports target=local only", target)
+	}
 	sess, err := b.m.CreateSession(owner, target, mode)
 	if err != nil {
 		return engine.SessionInfo{}, err
@@ -81,11 +96,17 @@ func (b *LocalBackend) Tail(jobID, cursor string) (*engine.TailResult, error) {
 	return b.m.Tail(jobID, cursor)
 }
 
-func (b *LocalBackend) FileRead(path string, maxBytes int) (*engine.FileReadResult, error) {
+func (b *LocalBackend) FileRead(session, path string, maxBytes int) (*engine.FileReadResult, error) {
+	if err := b.m.EnsureLocalFileOp(session); err != nil {
+		return nil, err
+	}
 	return b.m.FileRead(path, maxBytes)
 }
 
-func (b *LocalBackend) FileWrite(path, content, mode string) (*engine.FileWriteResult, error) {
+func (b *LocalBackend) FileWrite(session, path, content, mode string) (*engine.FileWriteResult, error) {
+	if err := b.m.EnsureLocalFileOp(session); err != nil {
+		return nil, err
+	}
 	return b.m.FileWrite(path, content, mode)
 }
 
@@ -100,6 +121,10 @@ func (b *LocalBackend) RecipeRun(owner, session, name string) (*engine.RecipeRun
 func (b *LocalBackend) RecordConnect(agent string) { b.m.RecordConnect(agent) }
 
 func (b *LocalBackend) ServerList() []fleet.ServerInfo { return nil }
+
+// RemoteAvailable is false in-process: no daemon, so no server inventory, vault
+// or SSH. The agent should treat target=local as the only option here.
+func (b *LocalBackend) RemoteAvailable() bool { return false }
 
 func (b *LocalBackend) FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error) {
 	return nil, errs.New(errs.NotSupported, "fleet requires a running daemon (run: termada serve)")

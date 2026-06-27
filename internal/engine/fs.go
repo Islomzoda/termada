@@ -58,6 +58,19 @@ func canonicalPath(p string) string {
 	return filepath.Clean(abs)
 }
 
+// EnsureLocalFileOp returns an error when session targets a remote host.
+// file_read/file_write always run on the daemon host, so callers use this to
+// refuse a remote-intended file op loudly instead of silently touching the
+// local filesystem while the agent believes it is inside a remote session.
+// An empty or local session passes (the common case).
+func (m *Manager) EnsureLocalFileOp(session string) error {
+	if target, ok := m.SessionTarget(session); ok && target != "" && target != "local" {
+		return errs.New(errs.NotSupported,
+			"file_read/file_write run on the daemon host, but session %q targets %q; read/write remote files with exec_run in that session (e.g. command=[\"cat\",\"<path>\"] or [\"tee\",\"<path>\"])", session, target)
+	}
+	return nil
+}
+
 // FileReadResult is returned by FileRead.
 type FileReadResult struct {
 	Content   string `json:"content"`

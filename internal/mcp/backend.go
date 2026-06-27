@@ -33,7 +33,7 @@ type Backend interface {
 	ServerList() []fleet.ServerInfo
 	FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error)
 	PluginTools() []plugin.ToolSpec
-	PluginCall(name string, args map[string]any) (any, error)
+	PluginCall(owner, name string, args map[string]any) (any, error)
 	RecordConnect(agent string)
 	// RemoteAvailable reports whether remote (SSH) sessions, fleet and plugins
 	// are reachable — true only when backed by a running daemon. The in-process
@@ -134,6 +134,6 @@ func (b *LocalBackend) FleetRun(command []string, selector []string, parallelism
 // has none.
 func (b *LocalBackend) PluginTools() []plugin.ToolSpec { return nil }
 
-func (b *LocalBackend) PluginCall(name string, args map[string]any) (any, error) {
+func (b *LocalBackend) PluginCall(owner, name string, args map[string]any) (any, error) {
 	return nil, errs.New(errs.NotSupported, "plugins require a running daemon")
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/termada/termada/internal/bus"
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/fleet"
+	"github.com/termada/termada/internal/plugin"
 	"github.com/termada/termada/internal/policy"
 	"github.com/termada/termada/internal/vault"
 )
@@ -291,6 +292,29 @@ func TestAPIPolicyCRUD(t *testing.T) {
 	aa := m.Policy().Policies()["aa"].AutoAnswer
 	if len(aa) != 1 || aa[0].Send != "yes" {
 		t.Fatalf("auto_answer dropped on edit: %v", aa)
+	}
+}
+
+// A plugin call is an arbitrary executable, so it must pass the agent's policy
+// like exec/fleet: a denied plugin is refused, and a confirm-required one fails
+// closed (human approval isn't wired for plugins) — never executed unsupervised.
+func TestAPIPluginCallPolicyGated(t *testing.T) {
+	m := engine.NewManager(engine.DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	b := bus.New(100)
+	m.SetBus(b)
+	v := vault.New(filepath.Join(t.TempDir(), "v.age"))
+	m.SetPolicy(policy.NewEngine(map[string]policy.Policy{
+		"p": {Deny: []string{"plugin danger"}, Confirm: []string{"plugin risky"}},
+	}), map[string]string{"agent": "p"})
+	pl := plugin.New(t.TempDir())
+	mux := New(m, b, nil, fleet.New(nil, okRunner{}, 2), v, pl, "test").Mux()
+
+	if code, out := do(t, mux, "POST", "/api/plugin/call", `{"owner":"agent","name":"danger"}`); code != 422 {
+		t.Fatalf("denied plugin => %d %v, want 422", code, out)
+	}
+	if code, out := do(t, mux, "POST", "/api/plugin/call", `{"owner":"agent","name":"risky"}`); code != 422 {
+		t.Fatalf("confirm-required plugin => %d %v, want 422 (fail closed)", code, out)
 	}
 }
 

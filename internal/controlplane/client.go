@@ -240,9 +240,9 @@ func (c *Client) PluginTools() []plugin.ToolSpec {
 	return out.Tools
 }
 
-func (c *Client) PluginCall(name string, args map[string]any) (any, error) {
+func (c *Client) PluginCall(owner, name string, args map[string]any) (any, error) {
 	var out any
-	err := c.post("/api/plugin/call", map[string]any{"name": name, "args": args}, &out)
+	err := c.post("/api/plugin/call", map[string]any{"owner": owner, "name": name, "args": args}, &out)
 	return out, err
 }
 

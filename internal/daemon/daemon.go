@@ -85,6 +85,7 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 		OutputRetentionBytes: cfg.Defaults.OutputRetentionBytes,
 		MaxForegroundJobs:    cfg.Defaults.MaxForegroundJobs,
 		MaxJobsPerAgent:      cfg.Defaults.MaxJobsPerAgent,
+		MaxJobRuntimeMS:      cfg.Defaults.MaxJobRuntimeMS,
 		DefaultTimeoutMS:     cfg.Defaults.TimeoutMS,
 		ConfirmTimeoutMS:     cfg.Defaults.ConfirmTimeoutMS,
 		RedactionPatterns:    cfg.Redaction,
@@ -218,6 +219,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 				return
 			case <-t.C:
 				d.mgr.GCOnce(3_600_000, 500) // drop terminal jobs >1h old; keep last 500
+				d.mgr.ReapOnce()             // SIGKILL runaway/hung jobs (no-op unless max_job_runtime_ms is set)
 			}
 		}
 	}()

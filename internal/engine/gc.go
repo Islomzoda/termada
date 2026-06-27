@@ -3,7 +3,46 @@ package engine
 import (
 	"sort"
 	"time"
+
+	"github.com/termada/termada/internal/bus"
 )
+
+// ReapOnce SIGKILLs jobs that have been running longer than Config.MaxJobRuntimeMS
+// — a safety net for runaway/hung jobs that never emit a completion marker and
+// would otherwise pin their session and the global foreground-job quota forever.
+// DISABLED by default (0): a long-lived dev server is a first-class use case, so
+// reaping only happens when an operator opts in (typically CI/headless). Parked
+// confirm-jobs are left to their own ConfirmTimeout. Returns the number reaped.
+func (m *Manager) ReapOnce() int {
+	maxMS := m.cfg.MaxJobRuntimeMS
+	if maxMS <= 0 {
+		return 0
+	}
+	cutoff := time.Duration(maxMS) * time.Millisecond
+	now := time.Now()
+	var victims []string
+	m.mu.Lock()
+	for id, j := range m.jobs {
+		j.mu.Lock()
+		terminal := j.status.Terminal()
+		parked := j.status == StatusAwaitingConfirmation
+		started := j.startedAt
+		j.mu.Unlock()
+		if terminal || parked || started.IsZero() {
+			continue
+		}
+		if now.Sub(started) > cutoff {
+			victims = append(victims, id)
+		}
+	}
+	m.mu.Unlock()
+	for _, id := range victims {
+		m.publish(bus.Event{Type: bus.EvJobKilled, JobID: id,
+			Message: "reaped: exceeded max_job_runtime_ms"})
+		_ = m.Kill(id)
+	}
+	return len(victims)
+}
 
 // GCOnce prunes the job registry (spec EX-9): terminal jobs that finished longer
 // than maxAgeMS ago are dropped, and the number of retained terminal jobs is

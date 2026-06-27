@@ -107,15 +107,46 @@ func (s *Server) hPluginCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name string         `json:"name"`
-		Args map[string]any `json:"args"`
+		Owner string         `json:"owner"`
+		Name  string         `json:"name"`
+		Args  map[string]any `json:"args"`
 	}
 	_ = decode(r, &req)
+	owner := s.ownerFor(r, req.Owner)
+	// A plugin is an arbitrary executable the agent can invoke, so it must pass
+	// the same policy gate and leave the same audit trail as exec/fleet — without
+	// this it was an untraced, ungated execution vector. Model the call as the
+	// argv ["plugin", <name>] so operators can deny/confirm plugin tools by name.
+	cmd := []string{"plugin", req.Name}
+	cmdline := strings.Join(cmd, " ")
+	if pol := s.mgr.Policy(); pol != nil {
+		dec := pol.Evaluate(s.mgr.AgentPolicy(owner), cmd)
+		switch dec.Decision {
+		case policy.Deny:
+			s.publish(bus.Event{Type: bus.EvPolicyDenied, AgentID: owner, Message: cmdline,
+				Data: map[string]any{"reason": dec.Reason, "matched": dec.Matched, "transport": "plugin"}})
+			writeErr(w, errs.New(errs.DeniedByPolicy, "plugin call denied by policy (%s)", dec.Reason))
+			return
+		case policy.Confirm:
+			// Human approval isn't wired for plugin calls — fail closed and refuse
+			// rather than run an unsupervised plugin that policy flagged dangerous.
+			s.publish(bus.Event{Type: bus.EvPolicyDenied, AgentID: owner, Message: cmdline,
+				Data: map[string]any{"reason": "requires confirmation; not supported for plugin calls", "matched": dec.Matched, "transport": "plugin"}})
+			writeErr(w, errs.New(errs.DeniedByPolicy, "plugin call needs human approval (matched %q); not supported yet — run the underlying action from a session or the dashboard", dec.Matched))
+			return
+		}
+	}
+	s.publish(bus.Event{Type: bus.EvPluginStarted, AgentID: owner, Message: cmdline,
+		Data: map[string]any{"plugin": req.Name}})
 	res, err := s.plugins.Call(req.Name, req.Args)
 	if err != nil {
+		s.publish(bus.Event{Type: bus.EvPluginFinished, AgentID: owner, Message: cmdline,
+			Data: map[string]any{"plugin": req.Name, "error": err.Error()}})
 		writeErr(w, errs.New(errs.Internal, "%v", err))
 		return
 	}
+	s.publish(bus.Event{Type: bus.EvPluginFinished, AgentID: owner, Message: cmdline,
+		Data: map[string]any{"plugin": req.Name, "status": "ok"}})
 	writeJSON(w, res)
 }
 

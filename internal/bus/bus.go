@@ -22,6 +22,8 @@ const (
 	EvPolicyDenied     = "policy.denied"
 	EvFleetStarted     = "fleet.started"
 	EvFleetFinished    = "fleet.finished"
+	EvPluginStarted    = "plugin.started"
+	EvPluginFinished   = "plugin.finished"
 )
 
 // Event is a single observable action.

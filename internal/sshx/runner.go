@@ -90,10 +90,14 @@ func (r *Runner) dial(server fleet.Server) (*ssh.Client, error) {
 	if port == 0 {
 		port = 22
 	}
-	auths, err := r.authMethods(server)
+	auths, cleanup, err := r.authMethods(server)
 	if err != nil {
 		return nil, err
 	}
+	// The ssh-agent socket is only needed during the handshake; close it once
+	// Dial returns so a per-dial agent connection can't leak (a 30s fleet
+	// health-loop would otherwise exhaust FDs over time, taking down all dials).
+	defer cleanup()
 	cfg := &ssh.ClientConfig{
 		User:            server.User,
 		Auth:            auths,
@@ -109,49 +113,63 @@ func (r *Runner) dial(server fleet.Server) (*ssh.Client, error) {
 //   - server.Auth empty -> the operator's own SSH identity: ssh-agent plus the
 //     default ~/.ssh keys. So a server you can already `ssh` into needs no stored
 //     secret — and therefore no vault and no passphrase (spec RM: agent auth).
-func (r *Runner) authMethods(server fleet.Server) ([]ssh.AuthMethod, error) {
+//
+// It also returns a cleanup func the caller MUST invoke after the handshake to
+// release any ssh-agent connection opened for agent auth.
+func (r *Runner) authMethods(server fleet.Server) ([]ssh.AuthMethod, func(), error) {
+	noop := func() {}
 	if server.Auth != "" {
 		if r.vault == nil || r.vault.Locked() {
-			return nil, fmt.Errorf("vault is locked; run `termada unlock`")
+			return nil, noop, fmt.Errorf("vault is locked; run `termada unlock`")
 		}
 		secret, ok := r.vault.Get(server.Auth)
 		if !ok {
-			return nil, fmt.Errorf("no vault entry %q for server %s", server.Auth, server.Name)
+			return nil, noop, fmt.Errorf("no vault entry %q for server %s", server.Auth, server.Name)
 		}
 		if strings.Contains(secret, "PRIVATE KEY") {
 			signer, err := ssh.ParsePrivateKey([]byte(secret))
 			if err != nil {
-				return nil, fmt.Errorf("parse private key: %w", err)
+				return nil, noop, fmt.Errorf("parse private key: %w", err)
 			}
-			return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil
+			return []ssh.AuthMethod{ssh.PublicKeys(signer)}, noop, nil
 		}
-		return []ssh.AuthMethod{ssh.Password(secret)}, nil
+		return []ssh.AuthMethod{ssh.Password(secret)}, noop, nil
 	}
 	var methods []ssh.AuthMethod
-	if m := agentAuth(); m != nil {
+	var conns []net.Conn
+	if m, conn := agentAuth(); m != nil {
 		methods = append(methods, m)
+		if conn != nil {
+			conns = append(conns, conn)
+		}
 	}
 	if signers := defaultKeySigners(r.keyDir); len(signers) > 0 {
 		methods = append(methods, ssh.PublicKeys(signers...))
 	}
 	if len(methods) == 0 {
-		return nil, fmt.Errorf("no credential for %s: store one (add an SSH key/password), or set up ssh-agent or a key in ~/.ssh", server.Name)
+		return nil, noop, fmt.Errorf("no credential for %s: store one (add an SSH key/password), or set up ssh-agent or a key in ~/.ssh", server.Name)
 	}
-	return methods, nil
+	cleanup := func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}
+	return methods, cleanup, nil
 }
 
-// agentAuth offers the keys held by a running ssh-agent ($SSH_AUTH_SOCK). nil if
-// no agent is reachable.
-func agentAuth() ssh.AuthMethod {
+// agentAuth offers the keys held by a running ssh-agent ($SSH_AUTH_SOCK). It
+// returns the underlying connection so the caller can close it after the
+// handshake; both are nil if no agent is reachable.
+func agentAuth() (ssh.AuthMethod, net.Conn) {
 	sock := os.Getenv("SSH_AUTH_SOCK")
 	if sock == "" {
-		return nil
+		return nil, nil
 	}
 	conn, err := net.Dial("unix", sock)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	return ssh.PublicKeysCallback(agent.NewClient(conn).Signers)
+	return ssh.PublicKeysCallback(agent.NewClient(conn).Signers), conn
 }
 
 // defaultKeySigners loads the usual on-disk private keys. dir defaults to ~/.ssh.

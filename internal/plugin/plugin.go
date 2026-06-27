@@ -7,8 +7,10 @@
 // Capability boundary (spec §29/§3a): plugins run as separate processes with a
 // minimal environment — they get the call arguments and nothing else (no vault,
 // no audit key, no dashboard token, no inherited secrets). Plugin tools are
-// surfaced to agents through MCP and pass through the same policy/audit as any
-// other tool.
+// surfaced to agents through MCP, and the control-plane dispatch gates each call
+// through the acting agent's policy and records it in the audit log (modelled as
+// the command ["plugin", <name>]); a call that policy flags for confirmation is
+// refused (fail-closed), since human approval isn't wired for plugins.
 package plugin
 
 import (

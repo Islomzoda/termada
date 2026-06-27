@@ -18,6 +18,7 @@ type Config struct {
 	OutputRetentionBytes int
 	MaxForegroundJobs    int
 	MaxJobsPerAgent      int // per-agent concurrent-job quota (0 = unlimited, MA-3)
+	MaxJobRuntimeMS      int // 0 = no cap; reaper SIGKILLs jobs running longer (runaway/hung safety net)
 	DefaultTimeoutMS     int
 	ConfirmTimeoutMS     int
 	RedactionPatterns    []string

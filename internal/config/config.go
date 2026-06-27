@@ -79,6 +79,7 @@ type Defaults struct {
 	MaxForegroundJobs    int  `yaml:"max_foreground_jobs"`
 	MaxBackgroundJobs    int  `yaml:"max_background_jobs"`
 	MaxJobsPerAgent      int  `yaml:"max_jobs_per_agent"`
+	MaxJobRuntimeMS      int  `yaml:"max_job_runtime_ms"` // 0 = no cap; reap (SIGKILL) jobs running longer (runaway/hung safety net)
 	SilenceKillMS        int  `yaml:"silence_kill_ms"`
 	InputTimeoutMS       int  `yaml:"input_timeout_ms"`
 	ConfirmTimeoutMS     int  `yaml:"confirm_timeout_ms"`

@@ -350,7 +350,7 @@ func (s *Server) registerTools() {
 			Description: "[plugin] " + pt.Description,
 			InputSchema: schema,
 			Handler: func(a map[string]any) (any, *errs.Error) {
-				res, err := mgr.PluginCall(name, a)
+				res, err := mgr.PluginCall(s.agentID, name, a)
 				return res, asErr(err)
 			},
 		})

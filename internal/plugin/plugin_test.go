@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 const testPlugin = `#!/bin/sh
@@ -26,6 +27,11 @@ func TestPluginDiscoverAndCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := New(dir)
+	// Under `go test -race ./...` the whole binary is race-instrumented and the
+	// machine is busy building/running every package in parallel, so spawning the
+	// describe subprocess can exceed the tight production default and the plugin
+	// would be silently dropped. Give discovery generous headroom for the test.
+	m.describeTimeout = 60 * time.Second
 	if err := m.Load(); err != nil {
 		t.Fatalf("load: %v", err)
 	}

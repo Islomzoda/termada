@@ -20,6 +20,11 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
+      - -X main.version={{ .Version }}
+      # When the release-signing public key is provided (repo secret →
+      # TERMADA_RELEASE_PUBKEY env), embed it so self-update REQUIRES a valid
+      # ed25519 signature on checksums.txt. Empty when unset (signature step off).
+      - -X github.com/termada/termada/internal/selfupdate.ReleasePublicKey={{ if isEnvSet "TERMADA_RELEASE_PUBKEY" }}{{ .Env.TERMADA_RELEASE_PUBKEY }}{{ end }}
     goos:
       - linux
       - darwin
@@ -86,6 +91,20 @@ brews:
 checksum:
   name_template: "checksums.txt"
   algorithm: sha256
+
+# Sign checksums.txt with the release ed25519 key so the in-binary self-update can
+# verify it (selfupdate.VerifyEd25519 against the embedded ReleasePublicKey).
+# Enable once the key exists: create the keypair (`termada` uses base64 ed25519),
+# set repo secrets TERMADA_RELEASE_PRIVKEY + TERMADA_RELEASE_PUBKEY, pass them
+# through in release.yml's `env:`, then uncomment. (Left disabled so releases keep
+# working until the key is provisioned.)
+# signs:
+#   - id: checksums
+#     artifacts: checksum
+#     signature: "${artifact}.sig"
+#     output: true
+#     cmd: go
+#     args: ["run", "./cmd/termada", "sign-checksums", "${artifact}"]
 
 release:
   github:

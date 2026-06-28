@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/fleet"
@@ -110,6 +111,41 @@ func (s *sshShell) Reconnect() error {
 	return nil
 }
 
+// keepalive pings the connection every interval; if a ping fails or times out
+// (a silently-dropped link with no RST), it closes the conn so the session
+// reader sees EOF and reconnects — instead of a Read blocking forever. It stops
+// once the conn is closed. interval <= 0 disables it.
+func keepalive(c *sshConn, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for range t.C {
+		c.mu.RLock()
+		closed, client := c.closed, c.client
+		c.mu.RUnlock()
+		if closed || client == nil {
+			return
+		}
+		res := make(chan error, 1)
+		go func() {
+			_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+			res <- err
+		}()
+		select {
+		case err := <-res:
+			if err != nil {
+				_ = closeConn(c)
+				return
+			}
+		case <-time.After(interval):
+			_ = closeConn(c)
+			return
+		}
+	}
+}
+
 func closeConn(c *sshConn) error {
 	if c == nil {
 		return nil
@@ -177,7 +213,9 @@ func (r *Runner) OpenShell(server fleet.Server, cols, rows int) (engine.ShellCon
 			_ = client.Close()
 			return nil, err
 		}
-		return &sshConn{client: client, sess: sess, stdin: stdin, stdout: stdout}, nil
+		c := &sshConn{client: client, sess: sess, stdin: stdin, stdout: stdout}
+		go keepalive(c, r.keepalive) // detect a silently-dropped link → reconnect
+		return c, nil
 	}
 
 	c, err := open()

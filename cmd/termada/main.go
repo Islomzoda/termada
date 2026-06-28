@@ -33,7 +33,9 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.7.5"
+// version is overridable via -ldflags "-X main.version=..." at release build time
+// (goreleaser injects the git tag); the constant here is the dev-build fallback.
+var version = "0.7.5"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -83,6 +85,8 @@ func main() {
 		cmdService(os.Args[2:])
 	case "update":
 		cmdUpdate()
+	case "sign-checksums": // hidden release tool: sign a file with $TERMADA_RELEASE_PRIVKEY → <file>.sig
+		cmdSignChecksums(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("termada", version)
 	case "help", "--help", "-h":
@@ -102,19 +106,25 @@ func cmdServe(args []string) {
 	agent := fs.String("agent", "default", "agent id used for attribution")
 	token := fs.String("token", os.Getenv("TERMADA_AGENT_TOKEN"), "per-agent identity token (or $TERMADA_AGENT_TOKEN); makes agent_id non-spoofable when configured")
 	cfgPath := fs.String("config", config.DefaultPath(), "config file path")
+	bind := fs.String("bind", os.Getenv("TERMADA_BIND"), "dashboard bind address (or $TERMADA_BIND); e.g. 0.0.0.0:7717 in a container — map it to host loopback (-p 127.0.0.1:7717:7717)")
 	_ = fs.Parse(args)
 	if *stdio {
 		runShim(*agent, *token)
 		return
 	}
-	runDaemon(*cfgPath)
+	runDaemon(*cfgPath, *bind)
 }
 
-func runDaemon(cfgPath string) {
+func runDaemon(cfgPath, bind string) {
 	logger := log.New(os.Stderr, "termada ", log.LstdFlags|log.Lmsgprefix)
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		logger.Fatalf("config: %v", err)
+	}
+	// An explicit --bind / $TERMADA_BIND overrides the config — needed in a
+	// container, where the default 127.0.0.1 bind is unreachable from the host.
+	if bind != "" {
+		cfg.HTTP.Bind = bind
 	}
 	d, err := daemon.New(cfg, version, logger)
 	if err != nil {
@@ -749,6 +759,31 @@ func cmdUpdate() {
 		return
 	}
 	fmt.Printf("updated to %s — restart termada to apply\n", tag)
+}
+
+// cmdSignChecksums is the release-side counterpart to the in-binary signature
+// check: it signs <file> with the ed25519 private key in $TERMADA_RELEASE_PRIVKEY
+// (base64) and writes <file>.sig. Hidden (not in usage) — used by goreleaser.
+func cmdSignChecksums(args []string) {
+	if len(args) < 1 {
+		fatal(fmt.Errorf("usage: termada sign-checksums <file>  (signs with $TERMADA_RELEASE_PRIVKEY)"))
+	}
+	priv := os.Getenv("TERMADA_RELEASE_PRIVKEY")
+	if priv == "" {
+		fatal(fmt.Errorf("TERMADA_RELEASE_PRIVKEY is not set"))
+	}
+	data, err := os.ReadFile(args[0])
+	if err != nil {
+		fatal(err)
+	}
+	sig, err := selfupdate.SignEd25519(data, priv)
+	if err != nil {
+		fatal(err)
+	}
+	if err := os.WriteFile(args[0]+".sig", []byte(sig), 0o644); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("wrote %s.sig\n", args[0])
 }
 
 func cmdSetup() {

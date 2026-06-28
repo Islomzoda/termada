@@ -29,12 +29,18 @@ import (
 // are short ops, not dev servers) but finite. Overridable via SetCommandTimeout.
 const defaultCmdTimeout = 10 * time.Minute
 
+// defaultKeepalive pings a persistent remote shell so a silently-dropped link (no
+// TCP RST — e.g. a NAT/firewall timeout or a frozen host) is detected and the
+// session reconnects, instead of a Read hanging forever. Overridable for tests.
+const defaultKeepalive = 15 * time.Second
+
 // Runner runs commands over SSH. It satisfies fleet.Runner.
 type Runner struct {
 	vault      *vault.Vault
 	knownHosts string
 	timeout    time.Duration // dial timeout
 	cmdTimeout time.Duration // per-command execution timeout (0 = no cap)
+	keepalive  time.Duration // persistent-shell keepalive interval (0 = off)
 	keyDir     string        // default on-disk key dir; "" => ~/.ssh (overridable for tests)
 }
 
@@ -43,11 +49,14 @@ func NewRunner(v *vault.Vault, knownHostsPath string, timeout time.Duration) *Ru
 	if timeout <= 0 {
 		timeout = 20 * time.Second
 	}
-	return &Runner{vault: v, knownHosts: knownHostsPath, timeout: timeout, cmdTimeout: defaultCmdTimeout}
+	return &Runner{vault: v, knownHosts: knownHostsPath, timeout: timeout, cmdTimeout: defaultCmdTimeout, keepalive: defaultKeepalive}
 }
 
 // SetCommandTimeout overrides the per-command execution timeout (0 disables it).
 func (r *Runner) SetCommandTimeout(d time.Duration) { r.cmdTimeout = d }
+
+// SetKeepalive overrides the persistent-shell keepalive interval (0 disables it).
+func (r *Runner) SetKeepalive(d time.Duration) { r.keepalive = d }
 
 // runWithTimeout runs fn, returning its error, or a timeout error if it does not
 // finish within d (then onTimeout fires, e.g. to close the session). d <= 0 runs

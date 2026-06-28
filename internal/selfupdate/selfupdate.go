@@ -45,6 +45,20 @@ func VerifySHA256(data []byte, wantHex string) error {
 	return nil
 }
 
+// SignEd25519 signs message with a base64-encoded ed25519 private key (the
+// 64-byte form from ed25519.GenerateKey) and returns a base64 signature. Used by
+// the release `sign-checksums` step; the matching VerifyEd25519 runs in-binary.
+func SignEd25519(message []byte, privB64 string) (string, error) {
+	priv, err := base64.StdEncoding.DecodeString(strings.TrimSpace(privB64))
+	if err != nil {
+		return "", fmt.Errorf("decode private key: %w", err)
+	}
+	if len(priv) != ed25519.PrivateKeySize {
+		return "", fmt.Errorf("private key is %d bytes, want %d", len(priv), ed25519.PrivateKeySize)
+	}
+	return base64.StdEncoding.EncodeToString(ed25519.Sign(ed25519.PrivateKey(priv), message)), nil
+}
+
 // VerifyEd25519 verifies a base64-encoded ed25519 signature over message using a
 // base64-encoded 32-byte public key.
 func VerifyEd25519(message []byte, sigB64, pubKeyB64 string) error {

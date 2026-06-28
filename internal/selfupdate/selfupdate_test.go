@@ -36,6 +36,19 @@ func TestVerifyEd25519(t *testing.T) {
 	}
 }
 
+// SignEd25519 (release side) and VerifyEd25519 (in-binary) round-trip.
+func TestSignVerifyRoundTrip(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	msg := []byte("checksums file contents\n")
+	sig, err := SignEd25519(msg, base64.StdEncoding.EncodeToString(priv))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := VerifyEd25519(msg, sig, base64.StdEncoding.EncodeToString(pub)); err != nil {
+		t.Fatalf("verify of own signature failed: %v", err)
+	}
+}
+
 func TestVerifySHA256(t *testing.T) {
 	data := []byte("termada binary contents")
 	sum := sha256.Sum256(data)

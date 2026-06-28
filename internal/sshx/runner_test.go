@@ -195,6 +195,82 @@ func TestSSHRunCommand(t *testing.T) {
 	}
 }
 
+// TestIntegrationRealSSH exercises the runner against a REAL OpenSSH server
+// (e.g. a docker sshd container), not the in-process harness. Opt-in:
+//
+//	TERMADA_IT_SSH=127.0.0.1:2222 TERMADA_IT_SSH_USER=root \
+//	TERMADA_IT_SSH_PASS=testpass go test ./internal/sshx/ -run IntegrationRealSSH
+func TestIntegrationRealSSH(t *testing.T) {
+	addr := os.Getenv("TERMADA_IT_SSH")
+	if addr == "" {
+		t.Skip("set TERMADA_IT_SSH=host:port (+ _USER/_PASS) to run against a real sshd")
+	}
+	host, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+	dir := t.TempDir()
+	v := vault.New(filepath.Join(dir, "v.age"))
+	if err := v.Init("vaultpass"); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Set("cred", os.Getenv("TERMADA_IT_SSH_PASS")); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRunner(v, filepath.Join(dir, "known_hosts"), 8*time.Second)
+	srv := fleet.Server{Name: "it", Host: host, Port: port, User: os.Getenv("TERMADA_IT_SSH_USER"), Auth: "cred"}
+
+	res := r.Run(srv, []string{"echo", "real-ssh-ok"})
+	if res.Status != "ok" || !strings.Contains(res.Stdout, "real-ssh-ok") {
+		t.Fatalf("exec: status=%s out=%q err=%s", res.Status, res.Stdout, res.Error)
+	}
+	if res2 := r.Run(srv, []string{"sh", "-c", "exit 7"}); res2.Status != "nonzero_exit" || res2.ExitCode != 7 {
+		t.Fatalf("exit code: status=%s code=%d", res2.Status, res2.ExitCode)
+	}
+	r.SetCommandTimeout(400 * time.Millisecond)
+	start := time.Now()
+	if res3 := r.Run(srv, []string{"sleep", "10"}); res3.Status != "timeout" {
+		t.Fatalf("timeout: status=%s err=%s", res3.Status, res3.Error)
+	}
+	if el := time.Since(start); el > 4*time.Second {
+		t.Fatalf("timeout took %v against real ssh", el)
+	}
+}
+
+// TestIntegrationKeepaliveDropDetected freezes the SSH server (docker pause) so
+// the link goes silent with no RST, and verifies keepalive detects it and closes
+// the connection (a subsequent write fails) instead of hanging forever. Opt-in:
+//
+//	TERMADA_IT_SSH=127.0.0.1:2222 TERMADA_IT_SSH_USER=root TERMADA_IT_SSH_PASS=testpass \
+//	TERMADA_IT_DOCKER=tsshd go test ./internal/sshx/ -run IntegrationKeepalive
+func TestIntegrationKeepaliveDropDetected(t *testing.T) {
+	addr, cname := os.Getenv("TERMADA_IT_SSH"), os.Getenv("TERMADA_IT_DOCKER")
+	if addr == "" || cname == "" {
+		t.Skip("set TERMADA_IT_SSH and TERMADA_IT_DOCKER (container name) to run")
+	}
+	host, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+	dir := t.TempDir()
+	v := vault.New(filepath.Join(dir, "v.age"))
+	_ = v.Init("vaultpass")
+	_ = v.Set("cred", os.Getenv("TERMADA_IT_SSH_PASS"))
+	r := NewRunner(v, filepath.Join(dir, "known_hosts"), 8*time.Second)
+	r.SetKeepalive(time.Second)
+	srv := fleet.Server{Name: "it", Host: host, Port: port, User: os.Getenv("TERMADA_IT_SSH_USER"), Auth: "cred"}
+
+	shell, err := r.OpenShell(srv, 80, 24)
+	if err != nil {
+		t.Fatalf("open shell: %v", err)
+	}
+	defer shell.Close()
+
+	_ = exec.Command("docker", "pause", cname).Run()
+	defer exec.Command("docker", "unpause", cname).Run()
+	time.Sleep(4 * time.Second) // > keepalive interval + ping timeout
+
+	if _, err := shell.Write([]byte("echo hi\n")); err == nil {
+		t.Fatal("write succeeded after a silent drop — keepalive did not detect it")
+	}
+}
+
 func TestRunWithTimeout(t *testing.T) {
 	if err, to := runWithTimeout(50*time.Millisecond, func() error { return nil }, nil); err != nil || to {
 		t.Fatalf("fast fn: err=%v timedOut=%v", err, to)

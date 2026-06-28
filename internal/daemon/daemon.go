@@ -146,6 +146,8 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 		}
 		return runner.OpenShell(srv, cols, rows)
 	})
+	// enable file_read/file_write against a remote session, over SFTP (binary-safe).
+	mgr.SetRemoteFileOps(remoteFileOps{fl: fl, runner: runner})
 
 	plugins := plugin.New(filepath.Join(RuntimeDir(), "plugins"))
 	if err := plugins.Load(); err != nil {
@@ -358,6 +360,30 @@ var streamReadRoutes = map[string]bool{
 // gated on the UDS plus the live-stream read routes.
 func sensitiveRoute(path string) bool {
 	return humanOnlyRoutes[path] || cliAuthRoutes[path] || streamReadRoutes[path]
+}
+
+// remoteFileOps implements engine.RemoteFileOps: file_read/file_write against a
+// remote session resolve the session's server from the inventory and transfer
+// over SFTP (binary-safe). Wired in daemon.New.
+type remoteFileOps struct {
+	fl     *fleet.Manager
+	runner *sshx.Runner
+}
+
+func (o remoteFileOps) ReadFile(target, path string, maxBytes int) ([]byte, int64, bool, error) {
+	srv, ok := o.fl.Get(target)
+	if !ok {
+		return nil, 0, false, fmt.Errorf("no server named %q", target)
+	}
+	return o.runner.SFTPRead(srv, path, maxBytes)
+}
+
+func (o remoteFileOps) WriteFile(target, path, content, mode string) (int, error) {
+	srv, ok := o.fl.Get(target)
+	if !ok {
+		return 0, fmt.Errorf("no server named %q", target)
+	}
+	return o.runner.SFTPWrite(srv, path, content, mode)
 }
 
 func buildPolicies(cfg config.Config) map[string]policy.Policy {

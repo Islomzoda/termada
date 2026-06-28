@@ -271,6 +271,41 @@ func TestIntegrationKeepaliveDropDetected(t *testing.T) {
 	}
 }
 
+// TestIntegrationSFTP round-trips a binary payload through SFTP against a REAL
+// sshd, proving file_read/file_write on a remote session are binary-safe (no
+// cat/base64 corruption) and that truncation is reported. Opt-in via TERMADA_IT_SSH.
+func TestIntegrationSFTP(t *testing.T) {
+	addr := os.Getenv("TERMADA_IT_SSH")
+	if addr == "" {
+		t.Skip("set TERMADA_IT_SSH=host:port (+ _USER/_PASS) to run against a real sshd")
+	}
+	host, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+	dir := t.TempDir()
+	v := vault.New(filepath.Join(dir, "v.age"))
+	_ = v.Init("vaultpass")
+	_ = v.Set("cred", os.Getenv("TERMADA_IT_SSH_PASS"))
+	r := NewRunner(v, filepath.Join(dir, "known_hosts"), 8*time.Second)
+	srv := fleet.Server{Name: "it", Host: host, Port: port, User: os.Getenv("TERMADA_IT_SSH_USER"), Auth: "cred"}
+
+	content := string([]byte{0, 1, 2, 250, 251, 255, 'h', 'i', '\n', 0}) // binary, incl. NULs
+	path := "/tmp/termada-sftp-it.bin"
+	n, err := r.SFTPWrite(srv, path, content, "")
+	if err != nil || n != len(content) {
+		t.Fatalf("sftp write: n=%d err=%v", n, err)
+	}
+	got, size, trunc, err := r.SFTPRead(srv, path, 0)
+	if err != nil {
+		t.Fatalf("sftp read: %v", err)
+	}
+	if string(got) != content || trunc || size != int64(len(content)) {
+		t.Fatalf("roundtrip mismatch: got %d bytes (size=%d trunc=%v), want %d", len(got), size, trunc, len(content))
+	}
+	if g2, _, t2, _ := r.SFTPRead(srv, path, 3); !t2 || len(g2) != 3 {
+		t.Fatalf("truncation: got %d bytes trunc=%v, want 3/true", len(g2), t2)
+	}
+}
+
 func TestRunWithTimeout(t *testing.T) {
 	if err, to := runWithTimeout(50*time.Millisecond, func() error { return nil }, nil); err != nil || to {
 		t.Fatalf("fast fn: err=%v timedOut=%v", err, to)

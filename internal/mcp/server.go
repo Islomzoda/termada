@@ -38,7 +38,7 @@ USE THESE TOOLS FOR ALL SHELL WORK BY DEFAULT. Run every command through exec_ru
 - Long-running jobs (dev servers, builds, watchers) run async: exec_start (or exec_run mode:"background") returns a job_id; read output with exec_poll(job_id, cursor), passing back next_cursor.
 - Interactive prompts come back as status "awaiting_input" with the prompt — answer with exec_write(job_id, input) (secret:true for passwords).
 - Dangerous commands come back as status "awaiting_confirmation" with a confirmation_id and need a HUMAN to approve. You CANNOT self-approve. Do not silently poll: tell the user in chat what the command will do and that it needs their approval (dashboard/CLI), then wait. denied_by_policy is final — don't try to bypass it.
-- file_read / file_write act on the daemon host; for files on a remote server use exec_run in that server's session (cat / tee).
+- file_read / file_write are session-aware: with no/local session they act on the daemon host; with a remote session they read/write that server's files over SFTP (binary-safe). Pass absolute paths.
 
 Call capabilities() once for a quickstart plus your allowed/denied policy summary and the registered servers.`
 

@@ -256,7 +256,7 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "file_read",
-		Description: "Read a file on the daemon host (secrets best-effort redacted). Returns {content, size}. Runs on the daemon host, NOT inside a session — cwd does not apply, so pass an absolute path. For a file on a REMOTE server, this refuses; read it with exec_run in that server's session instead (command=[\"cat\",\"<path>\"]). Large files are capped (set max_bytes); a `truncated:true` flag appears only when content was cut.",
+		Description: "Read a file (secrets best-effort redacted). Returns {content, size}. Session-aware but NOT cwd-relative — pass an absolute path: with no/local `session` it reads the daemon host; with a remote `session` it reads that server's file over SFTP (binary-safe). Large files are capped (set max_bytes); a `truncated:true` flag appears only when content was cut.",
 		InputSchema: obj(map[string]any{
 			"path":      map[string]any{"type": "string", "description": "absolute path on the daemon host (not relative to any session's cwd)"},
 			"session":   sessionSchema,
@@ -273,7 +273,7 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "file_write",
-		Description: "Write content to a file on the daemon host. mode 'append' appends, otherwise truncates. Runs on the daemon host, NOT inside a session — pass an absolute path. For a file on a REMOTE server, this refuses; write it with exec_run in that server's session instead (e.g. command=[\"tee\",\"<path>\"]).",
+		Description: "Write content to a file. mode 'append' appends, otherwise truncates. Session-aware, NOT cwd-relative — pass an absolute path: with no/local `session` it writes the daemon host; with a remote `session` it writes that server's file over SFTP (binary-safe; new files created 0600).",
 		InputSchema: obj(map[string]any{
 			"path":    strSchema,
 			"content": strSchema,

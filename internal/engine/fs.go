@@ -58,17 +58,56 @@ func canonicalPath(p string) string {
 	return filepath.Clean(abs)
 }
 
-// EnsureLocalFileOp returns an error when session targets a remote host.
-// file_read/file_write always run on the daemon host, so callers use this to
-// refuse a remote-intended file op loudly instead of silently touching the
-// local filesystem while the agent believes it is inside a remote session.
-// An empty or local session passes (the common case).
+// EnsureLocalFileOp guards a file op against a remote session: it errors only
+// when the session targets a remote host AND no remote file backend is wired
+// (the in-process fallback). With the daemon's SFTP backend present, remote file
+// ops are supported and this passes. A local/empty session always passes.
 func (m *Manager) EnsureLocalFileOp(session string) error {
 	if target, ok := m.SessionTarget(session); ok && target != "" && target != "local" {
+		if m.remoteFiles != nil {
+			return nil
+		}
 		return errs.New(errs.NotSupported,
-			"file_read/file_write run on the daemon host, but session %q targets %q; read/write remote files with exec_run in that session (e.g. command=[\"cat\",\"<path>\"] or [\"tee\",\"<path>\"])", session, target)
+			"remote file ops need the termada daemon (none running); read/write remote files with exec_run in that session (e.g. command=[\"cat\",\"<path>\"] or [\"tee\",\"<path>\"])")
 	}
 	return nil
+}
+
+// FileReadAt reads path for the given session: locally on the daemon host for a
+// local/default session, or over SFTP on the session's server for a remote one.
+// Secrets are redacted in either case.
+func (m *Manager) FileReadAt(session, path string, maxBytes int) (*FileReadResult, error) {
+	if err := m.EnsureLocalFileOp(session); err != nil {
+		return nil, err
+	}
+	if target, ok := m.SessionTarget(session); ok && target != "" && target != "local" {
+		content, size, truncated, err := m.remoteFiles.ReadFile(target, path, maxBytes)
+		if err != nil {
+			return nil, errs.New(errs.Internal, "remote read on %s: %v", target, err)
+		}
+		s := string(content)
+		if m.redactor != nil {
+			s = m.redactor.Redact(s)
+		}
+		return &FileReadResult{Content: s, Truncated: truncated, Size: size}, nil
+	}
+	return m.FileRead(path, maxBytes)
+}
+
+// FileWriteAt writes path for the given session: locally on the daemon host, or
+// over SFTP on the session's server for a remote session.
+func (m *Manager) FileWriteAt(session, path, content, mode string) (*FileWriteResult, error) {
+	if err := m.EnsureLocalFileOp(session); err != nil {
+		return nil, err
+	}
+	if target, ok := m.SessionTarget(session); ok && target != "" && target != "local" {
+		n, err := m.remoteFiles.WriteFile(target, path, content, mode)
+		if err != nil {
+			return nil, errs.New(errs.Internal, "remote write on %s: %v", target, err)
+		}
+		return &FileWriteResult{OK: true, Bytes: n}, nil
+	}
+	return m.FileWrite(path, content, mode)
 }
 
 // FileReadResult is returned by FileRead.

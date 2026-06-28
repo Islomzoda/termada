@@ -97,17 +97,11 @@ func (b *LocalBackend) Tail(jobID, cursor string) (*engine.TailResult, error) {
 }
 
 func (b *LocalBackend) FileRead(session, path string, maxBytes int) (*engine.FileReadResult, error) {
-	if err := b.m.EnsureLocalFileOp(session); err != nil {
-		return nil, err
-	}
-	return b.m.FileRead(path, maxBytes)
+	return b.m.FileReadAt(session, path, maxBytes)
 }
 
 func (b *LocalBackend) FileWrite(session, path, content, mode string) (*engine.FileWriteResult, error) {
-	if err := b.m.EnsureLocalFileOp(session); err != nil {
-		return nil, err
-	}
-	return b.m.FileWrite(path, content, mode)
+	return b.m.FileWriteAt(session, path, content, mode)
 }
 
 func (b *LocalBackend) RecipeList() []engine.RecipeInfo { return b.m.RecipeList() }

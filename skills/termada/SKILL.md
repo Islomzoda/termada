@@ -111,13 +111,13 @@ Some commands are gated by policy. Two outcomes to handle:
 
 ## Files
 
-`file_read` / `file_write` act on the **daemon host's** filesystem (not the
-session cwd) — pass absolute paths. They are session-aware: pointing them at a
-**remote** session is refused (`not_supported`) so they never silently touch the
-local host — read/write remote files with `exec_run` in that server's session
-(`["cat","<path>"]` / `["tee","<path>"]`). Secret paths are refused with
-`denied_by_policy`: the daemon's own runtime dir (tokens, vault, audit) and the
-host credential stores (`~/.ssh`, `~/.aws`, `~/.gnupg`). Don't try to read those.
+`file_read` / `file_write` are session-aware (pass absolute paths, not relative
+to a session's cwd): with no/`local` session they act on the **daemon host**; with
+a **remote** session (pass its `session_id`) they read/write that server's files
+over **SFTP** — binary-safe, so no `cat`/`base64` corruption. On the daemon host,
+secret paths are refused with `denied_by_policy`: the daemon's own runtime dir
+(tokens, vault, audit) and the host credential stores (`~/.ssh`, `~/.aws`,
+`~/.gnupg`). Don't try to read those.
 
 ## Recipes
 

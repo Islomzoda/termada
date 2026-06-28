@@ -46,6 +46,7 @@ type Manager struct {
 	timeoutClasses map[string]int    // class name -> timeout ms (LR-2)
 	auditOK        func() bool       // audit health probe; dangerous ops fail closed if false
 	remoteDial     RemoteDialer      // opens a shell to a named remote server (wired by daemon)
+	remoteFiles    RemoteFileOps     // file_read/file_write against a remote target (wired by daemon)
 
 	persistPath    string
 	snapshotDir    string
@@ -130,6 +131,18 @@ type RemoteDialer func(target string, cols, rows int) (ShellConn, error)
 // SetRemoteDialer installs the remote-session dialer (enables session_create
 // against a server name).
 func (m *Manager) SetRemoteDialer(d RemoteDialer) { m.remoteDial = d }
+
+// RemoteFileOps performs file_read/file_write against a remote target over SFTP.
+// Wired by the daemon (which holds the server inventory + SSH runner); nil in the
+// in-process fallback, where remote file ops are refused.
+type RemoteFileOps interface {
+	ReadFile(target, path string, maxBytes int) (content []byte, size int64, truncated bool, err error)
+	WriteFile(target, path, content, mode string) (n int, err error)
+}
+
+// SetRemoteFileOps installs the remote file-transfer backend (enables file_read/
+// file_write against a remote session).
+func (m *Manager) SetRemoteFileOps(ops RemoteFileOps) { m.remoteFiles = ops }
 
 // SetAuditHealth installs a probe for audit-log health. When it reports
 // unhealthy, dangerous (confirmation-gated) commands are refused — fail-closed

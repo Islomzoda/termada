@@ -32,6 +32,9 @@ type Backend interface {
 	RecipeRun(owner, session, name string) (*engine.RecipeRunResult, error)
 	ServerList() []fleet.ServerInfo
 	FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error)
+	PortForward(server, remoteHost string, remotePort int, localBind string) (*engine.ForwardInfo, error)
+	PortForwardList() []engine.ForwardInfo
+	PortForwardClose(id string) error
 	PluginTools() []plugin.ToolSpec
 	PluginCall(owner, name string, args map[string]any) (any, error)
 	RecordConnect(agent string)
@@ -123,6 +126,14 @@ func (b *LocalBackend) RemoteAvailable() bool { return false }
 func (b *LocalBackend) FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error) {
 	return nil, errs.New(errs.NotSupported, "fleet requires a running daemon (run: termada serve)")
 }
+
+// Port forwarding needs the daemon (server inventory + SSH runner); the
+// in-process fallback returns NotSupported via the engine.
+func (b *LocalBackend) PortForward(server, remoteHost string, remotePort int, localBind string) (*engine.ForwardInfo, error) {
+	return b.m.PortForward(server, remoteHost, remotePort, localBind)
+}
+func (b *LocalBackend) PortForwardList() []engine.ForwardInfo { return b.m.PortForwardList() }
+func (b *LocalBackend) PortForwardClose(id string) error      { return b.m.PortForwardClose(id) }
 
 // Plugins are daemon-only (loaded from the plugins dir); the in-process fallback
 // has none.

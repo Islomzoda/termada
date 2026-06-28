@@ -306,6 +306,42 @@ func TestIntegrationSFTP(t *testing.T) {
 	}
 }
 
+// TestIntegrationPortForward opens a local→remote tunnel to the server's own sshd
+// and reads the SSH banner THROUGH the tunnel, proving bytes are piped from the
+// remote service. Opt-in via TERMADA_IT_SSH.
+func TestIntegrationPortForward(t *testing.T) {
+	addr := os.Getenv("TERMADA_IT_SSH")
+	if addr == "" {
+		t.Skip("set TERMADA_IT_SSH=host:port (+ _USER/_PASS) to run against a real sshd")
+	}
+	host, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+	dir := t.TempDir()
+	v := vault.New(filepath.Join(dir, "v.age"))
+	_ = v.Init("vaultpass")
+	_ = v.Set("cred", os.Getenv("TERMADA_IT_SSH_PASS"))
+	r := NewRunner(v, filepath.Join(dir, "known_hosts"), 8*time.Second)
+	srv := fleet.Server{Name: "it", Host: host, Port: port, User: os.Getenv("TERMADA_IT_SSH_USER"), Auth: "cred"}
+
+	f, err := r.OpenForward(srv, "127.0.0.1:0", "127.0.0.1", 22) // tunnel → the server's own sshd
+	if err != nil {
+		t.Fatalf("open forward: %v", err)
+	}
+	defer f.Close()
+
+	conn, err := net.DialTimeout("tcp", f.Addr(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial tunnel %s: %v", f.Addr(), err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 64)
+	n, _ := conn.Read(buf)
+	if !strings.HasPrefix(string(buf[:n]), "SSH-") {
+		t.Fatalf("no SSH banner through the tunnel; got %q", string(buf[:n]))
+	}
+}
+
 func TestRunWithTimeout(t *testing.T) {
 	if err, to := runWithTimeout(50*time.Millisecond, func() error { return nil }, nil); err != nil || to {
 		t.Fatalf("fast fn: err=%v timedOut=%v", err, to)

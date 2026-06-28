@@ -47,6 +47,7 @@ type Manager struct {
 	auditOK        func() bool       // audit health probe; dangerous ops fail closed if false
 	remoteDial     RemoteDialer      // opens a shell to a named remote server (wired by daemon)
 	remoteFiles    RemoteFileOps     // file_read/file_write against a remote target (wired by daemon)
+	forwards       ForwardOps        // local→remote SSH port forwards (wired by daemon)
 
 	persistPath    string
 	snapshotDir    string

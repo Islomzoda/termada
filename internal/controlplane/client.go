@@ -232,6 +232,27 @@ func (c *Client) FleetRun(command []string, selector []string, parallelism int) 
 	return &out, nil
 }
 
+func (c *Client) PortForward(server, remoteHost string, remotePort int, localBind string) (*engine.ForwardInfo, error) {
+	body := map[string]any{"server": server, "remote_host": remoteHost, "remote_port": remotePort, "local_bind": localBind}
+	var out engine.ForwardInfo
+	if err := c.post("/api/forward/start", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) PortForwardList() []engine.ForwardInfo {
+	var out struct {
+		Forwards []engine.ForwardInfo `json:"forwards"`
+	}
+	_ = c.post("/api/forward/list", map[string]any{}, &out)
+	return out.Forwards
+}
+
+func (c *Client) PortForwardClose(id string) error {
+	return c.post("/api/forward/close", map[string]any{"id": id}, nil)
+}
+
 func (c *Client) PluginTools() []plugin.ToolSpec {
 	var out struct {
 		Tools []plugin.ToolSpec `json:"tools"`

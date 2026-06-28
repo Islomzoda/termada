@@ -74,6 +74,9 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/api/recipe/run", s.hRecipeRun)
 	mux.HandleFunc("/api/servers", s.hServers)
 	mux.HandleFunc("/api/fleet/run", s.hFleetRun)
+	mux.HandleFunc("/api/forward/start", s.hForwardStart)
+	mux.HandleFunc("/api/forward/list", s.hForwardList)
+	mux.HandleFunc("/api/forward/close", s.hForwardClose)
 	mux.HandleFunc("/api/vault/unlock", s.hVaultUnlock)
 	mux.HandleFunc("/api/vault/status", s.hVaultStatus)
 	mux.HandleFunc("/api/snapshot/create", s.hSnapshotCreate)
@@ -372,6 +375,38 @@ func (s *Server) hVaultStatus(w http.ResponseWriter, r *http.Request) {
 		exists = s.vault.Exists()
 	}
 	writeJSON(w, map[string]any{"exists": exists, "locked": locked})
+}
+
+func (s *Server) hForwardStart(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Server     string `json:"server"`
+		RemoteHost string `json:"remote_host"`
+		RemotePort int    `json:"remote_port"`
+		LocalBind  string `json:"local_bind"`
+	}
+	_ = decode(r, &req)
+	res, err := s.mgr.PortForward(req.Server, req.RemoteHost, req.RemotePort, req.LocalBind)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, res)
+}
+
+func (s *Server) hForwardList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"forwards": s.mgr.PortForwardList()})
+}
+
+func (s *Server) hForwardClose(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id"`
+	}
+	_ = decode(r, &req)
+	if err := s.mgr.PortForwardClose(req.ID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) hFileRead(w http.ResponseWriter, r *http.Request) {

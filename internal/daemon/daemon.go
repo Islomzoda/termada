@@ -17,8 +17,10 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/termada/termada/internal/audit"
@@ -28,6 +30,7 @@ import (
 	"github.com/termada/termada/internal/dashboard"
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/fleet"
+	"github.com/termada/termada/internal/ids"
 	"github.com/termada/termada/internal/notify"
 	"github.com/termada/termada/internal/plugin"
 	"github.com/termada/termada/internal/policy"
@@ -148,6 +151,8 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	})
 	// enable file_read/file_write against a remote session, over SFTP (binary-safe).
 	mgr.SetRemoteFileOps(remoteFileOps{fl: fl, runner: runner})
+	// enable port_forward: local→remote SSH tunnels (like `ssh -L`).
+	mgr.SetForwardOps(newForwardManager(fl, runner))
 
 	plugins := plugin.New(filepath.Join(RuntimeDir(), "plugins"))
 	if err := plugins.Load(); err != nil {
@@ -384,6 +389,63 @@ func (o remoteFileOps) WriteFile(target, path, content, mode string) (int, error
 		return 0, fmt.Errorf("no server named %q", target)
 	}
 	return o.runner.SFTPWrite(srv, path, content, mode)
+}
+
+// forwardManager implements engine.ForwardOps: it keeps a registry of live
+// local→remote SSH tunnels. The OS reclaims listeners/sockets on daemon exit, so
+// there is no explicit shutdown sweep.
+type forwardManager struct {
+	fl     *fleet.Manager
+	runner *sshx.Runner
+	mu     sync.Mutex
+	fwds   map[string]*forwardEntry
+}
+
+type forwardEntry struct {
+	info engine.ForwardInfo
+	fwd  *sshx.Forward
+}
+
+func newForwardManager(fl *fleet.Manager, runner *sshx.Runner) *forwardManager {
+	return &forwardManager{fl: fl, runner: runner, fwds: map[string]*forwardEntry{}}
+}
+
+func (m *forwardManager) Start(server, remoteHost string, remotePort int, localBind string) (engine.ForwardInfo, error) {
+	srv, ok := m.fl.Get(server)
+	if !ok {
+		return engine.ForwardInfo{}, fmt.Errorf("no server named %q", server)
+	}
+	f, err := m.runner.OpenForward(srv, localBind, remoteHost, remotePort)
+	if err != nil {
+		return engine.ForwardInfo{}, err
+	}
+	info := engine.ForwardInfo{ID: ids.New("fwd"), Server: server, RemoteHost: remoteHost, RemotePort: remotePort, LocalAddr: f.Addr()}
+	m.mu.Lock()
+	m.fwds[info.ID] = &forwardEntry{info: info, fwd: f}
+	m.mu.Unlock()
+	return info, nil
+}
+
+func (m *forwardManager) List() []engine.ForwardInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]engine.ForwardInfo, 0, len(m.fwds))
+	for _, e := range m.fwds {
+		out = append(out, e.info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+func (m *forwardManager) Close(id string) error {
+	m.mu.Lock()
+	e := m.fwds[id]
+	delete(m.fwds, id)
+	m.mu.Unlock()
+	if e == nil {
+		return fmt.Errorf("forward %q not found", id)
+	}
+	return e.fwd.Close()
 }
 
 func buildPolicies(cfg config.Config) map[string]policy.Policy {

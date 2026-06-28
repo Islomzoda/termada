@@ -358,6 +358,42 @@ func (s *Server) registerTools() {
 	}
 
 	s.add(toolDef{
+		Name:        "port_forward",
+		Description: "Open a local→remote TCP tunnel through a configured server (like `ssh -L`): the returned local_addr on the daemon host forwards to remote_host:remote_port reached FROM that server — e.g. to reach a DB bound to a remote box's localhost. Stays open until port_forward_close. The remote sshd must allow TCP forwarding.",
+		InputSchema: obj(map[string]any{
+			"server":      map[string]any{"type": "string", "description": "configured server name to tunnel through"},
+			"remote_host": map[string]any{"type": "string", "description": "host to reach FROM the server (often 127.0.0.1)"},
+			"remote_port": intSchema,
+			"local_bind":  map[string]any{"type": "string", "description": "local listen address; default 127.0.0.1:0 (auto loopback port)"},
+		}, "server", "remote_host", "remote_port"),
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			res, err := mgr.PortForward(argString(a, "server"), argString(a, "remote_host"), argInt(a, "remote_port"), argString(a, "local_bind"))
+			return res, asErr(err)
+		},
+	})
+
+	s.add(toolDef{
+		Name:        "port_forward_list",
+		Description: "List the live port forwards (id, server, remote target, local_addr).",
+		InputSchema: emptySchema,
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			return map[string]any{"forwards": mgr.PortForwardList()}, nil
+		},
+	})
+
+	s.add(toolDef{
+		Name:        "port_forward_close",
+		Description: "Close a port forward by its id (from port_forward / port_forward_list).",
+		InputSchema: obj(map[string]any{"id": strSchema}, "id"),
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			if err := mgr.PortForwardClose(argString(a, "id")); err != nil {
+				return nil, asErr(err)
+			}
+			return map[string]any{"ok": true}, nil
+		},
+	})
+
+	s.add(toolDef{
 		Name:        "capabilities",
 		Description: "Report this agent's identity, the API version, available tools and execution modes.",
 		InputSchema: emptySchema,

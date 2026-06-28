@@ -1,12 +1,40 @@
 package selfupdate
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// VerifyEd25519 accepts a valid signature over the message and rejects a tampered
+// message, the wrong key, and a garbage signature.
+func TestVerifyEd25519(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	pubB64 := base64.StdEncoding.EncodeToString(pub)
+	msg := []byte("hash1  termada_linux_amd64.tar.gz\n")
+	sigB64 := base64.StdEncoding.EncodeToString(ed25519.Sign(priv, msg))
+
+	if err := VerifyEd25519(msg, sigB64, pubB64); err != nil {
+		t.Fatalf("valid signature rejected: %v", err)
+	}
+	if err := VerifyEd25519([]byte("tampered checksums"), sigB64, pubB64); err == nil {
+		t.Fatal("tampered message accepted")
+	}
+	otherPub, _, _ := ed25519.GenerateKey(nil)
+	if err := VerifyEd25519(msg, sigB64, base64.StdEncoding.EncodeToString(otherPub)); err == nil {
+		t.Fatal("signature verified against the wrong key")
+	}
+	if err := VerifyEd25519(msg, "not-base64!!", pubB64); err == nil {
+		t.Fatal("garbage signature accepted")
+	}
+}
 
 func TestVerifySHA256(t *testing.T) {
 	data := []byte("termada binary contents")

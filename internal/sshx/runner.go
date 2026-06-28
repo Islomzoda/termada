@@ -24,12 +24,18 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
+// defaultCmdTimeout bounds a single fleet command so a hung remote process can't
+// pin a parallelism slot and stall fleet_run forever. Generous (fleet commands
+// are short ops, not dev servers) but finite. Overridable via SetCommandTimeout.
+const defaultCmdTimeout = 10 * time.Minute
+
 // Runner runs commands over SSH. It satisfies fleet.Runner.
 type Runner struct {
 	vault      *vault.Vault
 	knownHosts string
-	timeout    time.Duration
-	keyDir     string // default on-disk key dir; "" => ~/.ssh (overridable for tests)
+	timeout    time.Duration // dial timeout
+	cmdTimeout time.Duration // per-command execution timeout (0 = no cap)
+	keyDir     string        // default on-disk key dir; "" => ~/.ssh (overridable for tests)
 }
 
 // NewRunner builds an SSH runner.
@@ -37,7 +43,32 @@ func NewRunner(v *vault.Vault, knownHostsPath string, timeout time.Duration) *Ru
 	if timeout <= 0 {
 		timeout = 20 * time.Second
 	}
-	return &Runner{vault: v, knownHosts: knownHostsPath, timeout: timeout}
+	return &Runner{vault: v, knownHosts: knownHostsPath, timeout: timeout, cmdTimeout: defaultCmdTimeout}
+}
+
+// SetCommandTimeout overrides the per-command execution timeout (0 disables it).
+func (r *Runner) SetCommandTimeout(d time.Duration) { r.cmdTimeout = d }
+
+// runWithTimeout runs fn, returning its error, or a timeout error if it does not
+// finish within d (then onTimeout fires, e.g. to close the session). d <= 0 runs
+// fn synchronously with no cap. The bool reports whether it timed out.
+func runWithTimeout(d time.Duration, fn func() error, onTimeout func()) (error, bool) {
+	if d <= 0 {
+		return fn(), false
+	}
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err, false
+	case <-timer.C:
+		if onTimeout != nil {
+			onTimeout()
+		}
+		return fmt.Errorf("command timed out after %s", d), true
+	}
 }
 
 // Run executes command on server and returns a structured result.
@@ -65,10 +96,20 @@ func (r *Runner) Run(server fleet.Server, command []string) fleet.Result {
 	var stdout, stderr bytes.Buffer
 	sess.Stdout = &stdout
 	sess.Stderr = &stderr
-	runErr := sess.Run(shellJoin(command))
+	runErr, timedOut := runWithTimeout(r.cmdTimeout, func() error {
+		return sess.Run(shellJoin(command))
+	}, func() { _ = sess.Close() })
+	res.DurationMS = time.Since(start).Milliseconds()
+	if timedOut {
+		// Don't read the output buffers here: the abandoned sess.Run goroutine may
+		// still be writing to them until Close takes effect (a data race). Report
+		// the timeout without partial output.
+		res.Status = "timeout"
+		res.Error = runErr.Error()
+		return res
+	}
 	res.Stdout = stdout.String()
 	res.Stderr = stderr.String()
-	res.DurationMS = time.Since(start).Milliseconds()
 
 	if runErr == nil {
 		res.Status = "ok"

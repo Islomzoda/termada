@@ -223,6 +223,10 @@ func (m *Manager) CreateSession(owner, target, mode string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	sess.onReset = func() {
+		m.publish(bus.Event{Type: bus.EvSessionReset, AgentID: sess.Owner, SessionID: sess.ID,
+			Message: "remote connection dropped; reconnected — cwd/env were reset"})
+	}
 	m.mu.Lock()
 	m.sessions[sess.ID] = sess
 	m.mu.Unlock()

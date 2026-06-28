@@ -1,8 +1,11 @@
 // Package selfupdate implements opt-in binary self-update (spec DI-3): fetch the
 // latest GitHub release, download the asset for this platform, verify its
-// SHA-256 against the published checksums, and atomically replace the running
-// binary. Signature verification (minisign/cosign) is a later addition gated on
-// release-signing keys.
+// SHA-256 against the published checksums (MANDATORY — an update with no
+// verifiable checksum is refused), and atomically replace the running binary.
+// When a release public key is configured (ReleasePublicKey), the checksums file
+// must also carry a valid ed25519 signature, anchoring trust before any hash in
+// it is trusted — so a compromised/spoofed release can't push a binary that runs
+// as the daemon.
 //
 // The verify + atomic-replace primitives are unit-tested; the end-to-end Run
 // needs a published release to exercise live.
@@ -11,7 +14,9 @@ package selfupdate
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -24,12 +29,41 @@ import (
 	"time"
 )
 
+// ReleasePublicKey, when set to a base64-encoded 32-byte ed25519 public key,
+// makes signature verification of the release checksums MANDATORY. Empty leaves
+// the signature step off (checksum verification is still mandatory) — it is meant
+// to be set via build ldflags / config once releases are signed.
+var ReleasePublicKey = ""
+
 // VerifySHA256 checks that data hashes to the expected hex digest.
 func VerifySHA256(data []byte, wantHex string) error {
 	sum := sha256.Sum256(data)
 	got := hex.EncodeToString(sum[:])
 	if !strings.EqualFold(got, strings.TrimSpace(wantHex)) {
 		return fmt.Errorf("checksum mismatch: got %s, want %s", got, wantHex)
+	}
+	return nil
+}
+
+// VerifyEd25519 verifies a base64-encoded ed25519 signature over message using a
+// base64-encoded 32-byte public key.
+func VerifyEd25519(message []byte, sigB64, pubKeyB64 string) error {
+	pub, err := base64.StdEncoding.DecodeString(strings.TrimSpace(pubKeyB64))
+	if err != nil {
+		return fmt.Errorf("decode public key: %w", err)
+	}
+	if len(pub) != ed25519.PublicKeySize {
+		return fmt.Errorf("public key is %d bytes, want %d", len(pub), ed25519.PublicKeySize)
+	}
+	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sigB64))
+	if err != nil {
+		return fmt.Errorf("decode signature: %w", err)
+	}
+	if len(sig) != ed25519.SignatureSize {
+		return fmt.Errorf("signature is %d bytes, want %d", len(sig), ed25519.SignatureSize)
+	}
+	if !ed25519.Verify(ed25519.PublicKey(pub), message, sig) {
+		return fmt.Errorf("signature verification failed")
 	}
 	return nil
 }
@@ -129,18 +163,41 @@ func Run(repo, current, targetPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if sumsURL != "" {
-		sums, err := download(sumsURL)
+	// Checksum verification is mandatory: refuse to install a binary we can't
+	// verify rather than trusting a possibly-tampered download.
+	if sumsURL == "" {
+		return "", fmt.Errorf("release %s has no checksums.txt; refusing to install an unverified binary", rel.TagName)
+	}
+	sums, err := download(sumsURL)
+	if err != nil {
+		return "", err
+	}
+	// With a release key configured, the checksums file must carry a valid
+	// ed25519 signature — anchor trust here before trusting any hash inside it.
+	if ReleasePublicKey != "" {
+		var sigURL string
+		for _, a := range rel.Assets {
+			if a.Name == "checksums.txt.sig" {
+				sigURL = a.BrowserDownloadURL
+			}
+		}
+		if sigURL == "" {
+			return "", fmt.Errorf("release %s has no checksums.txt.sig but a release key is configured; refusing", rel.TagName)
+		}
+		sig, err := download(sigURL)
 		if err != nil {
 			return "", err
 		}
-		want, ok := checksumFor(string(sums), assetName)
-		if !ok {
-			return "", fmt.Errorf("no checksum for %s", assetName)
+		if err := VerifyEd25519(sums, string(sig), ReleasePublicKey); err != nil {
+			return "", fmt.Errorf("checksums signature: %w", err)
 		}
-		if err := VerifySHA256(archive, want); err != nil {
-			return "", err
-		}
+	}
+	want, ok := checksumFor(string(sums), assetName)
+	if !ok {
+		return "", fmt.Errorf("no checksum for %s", assetName)
+	}
+	if err := VerifySHA256(archive, want); err != nil {
+		return "", err
 	}
 
 	bin, err := extractBinary(archive, "termada")

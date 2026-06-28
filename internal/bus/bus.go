@@ -14,6 +14,7 @@ const (
 	EvAgentConnected   = "agent.connected"
 	EvSessionCreated   = "session.created"
 	EvSessionClosed    = "session.closed"
+	EvSessionReset     = "session.reset" // remote link dropped & reconnected; cwd/env lost
 	EvJobStarted       = "job.started"
 	EvJobFinished      = "job.finished"
 	EvJobKilled        = "job.killed"

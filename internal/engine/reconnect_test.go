@@ -6,7 +6,48 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/termada/termada/internal/bus"
 )
+
+// A dropped-and-reconnected remote session must emit a reset event, so the lost
+// cwd/env is observable instead of a silent footgun for the next command.
+func TestReconnectEmitsResetEvent(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash required")
+	}
+	m := NewManager(DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	b := bus.New(64)
+	m.SetBus(b)
+	ch, cancel := b.Subscribe(64)
+	defer cancel()
+
+	var rs *reconnShell
+	m.SetRemoteDialer(func(target string, cols, rows int) (ShellConn, error) {
+		r, err := newReconnShell()
+		if err == nil {
+			rs = r
+		}
+		return r, err
+	})
+	if _, err := m.CreateSession("agent", "remote", "shell"); err != nil {
+		t.Fatalf("create remote session: %v", err)
+	}
+	rs.drop()
+
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case e := <-ch:
+			if e.Type == bus.EvSessionReset {
+				return
+			}
+		case <-deadline:
+			t.Fatal("no session.reset event after a dropped connection")
+		}
+	}
+}
 
 // reconnShell is a test transport that wraps a real local bash PTY (so the
 // marker protocol genuinely runs) and supports a simulated connection drop plus

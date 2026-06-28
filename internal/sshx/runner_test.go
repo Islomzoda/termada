@@ -195,6 +195,40 @@ func TestSSHRunCommand(t *testing.T) {
 	}
 }
 
+func TestRunWithTimeout(t *testing.T) {
+	if err, to := runWithTimeout(50*time.Millisecond, func() error { return nil }, nil); err != nil || to {
+		t.Fatalf("fast fn: err=%v timedOut=%v", err, to)
+	}
+	closed := false
+	_, to := runWithTimeout(20*time.Millisecond, func() error { time.Sleep(time.Second); return nil }, func() { closed = true })
+	if !to {
+		t.Fatal("slow fn did not time out")
+	}
+	if !closed {
+		t.Fatal("onTimeout was not called")
+	}
+	if _, to := runWithTimeout(0, func() error { return nil }, nil); to {
+		t.Fatal("disabled (d=0) reported a timeout")
+	}
+}
+
+// A hung remote command is cut off at the per-command timeout instead of pinning
+// a parallelism slot forever — exercised end-to-end against the in-process SSH
+// server.
+func TestSSHCommandTimeout(t *testing.T) {
+	addr := startTestSSHServer(t, "sshpass")
+	r := newTestRunner(t, "sshpass")
+	r.SetCommandTimeout(300 * time.Millisecond)
+	start := time.Now()
+	res := r.Run(serverAt(t, addr), []string{"sleep", "5"})
+	if res.Status != "timeout" {
+		t.Fatalf("status = %s (err=%s), want timeout", res.Status, res.Error)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("timeout took %v, expected ~300ms", elapsed)
+	}
+}
+
 func TestSSHExitCode(t *testing.T) {
 	addr := startTestSSHServer(t, "sshpass")
 	r := newTestRunner(t, "sshpass")

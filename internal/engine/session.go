@@ -47,6 +47,7 @@ type Session struct {
 	cfg      SessionConfig
 	redactor *output.Redactor
 	shell    ShellConn
+	onReset  func() // called after a dropped remote link is reconnected (cwd/env lost)
 
 	// session-wide live terminal buffer: every byte the shell emits (across all
 	// jobs) is appended here so the dashboard can show one continuous terminal
@@ -226,6 +227,12 @@ func (s *Session) tryReconnect(rc interface{ Reconnect() error }) bool {
 		s.mu.Unlock()
 		if job != nil {
 			job.finalize(-1, StatusOrphaned, "connection dropped; session reconnected")
+		}
+		// Surface the reset even when the session was idle: the reconnected shell is
+		// fresh, so cwd/env from before the drop are gone — make that observable
+		// instead of a silent footgun for the next command.
+		if s.onReset != nil {
+			s.onReset()
 		}
 		go s.readLoop()
 		// re-init the new PTY (echo off, job control); fire-and-forget.

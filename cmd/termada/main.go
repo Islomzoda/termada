@@ -770,7 +770,14 @@ func cmdSignChecksums(args []string) {
 	}
 	priv := os.Getenv("TERMADA_RELEASE_PRIVKEY")
 	if priv == "" {
-		fatal(fmt.Errorf("TERMADA_RELEASE_PRIVKEY is not set"))
+		// No key provisioned yet: write an empty .sig so the release pipeline keeps
+		// working. self-update only checks the signature when a public key is
+		// embedded (also key-gated), so an empty/unverified .sig is never read.
+		fmt.Fprintln(os.Stderr, "TERMADA_RELEASE_PRIVKEY not set — writing an empty (unsigned) .sig")
+		if err := os.WriteFile(args[0]+".sig", nil, 0o644); err != nil {
+			fatal(err)
+		}
+		return
 	}
 	data, err := os.ReadFile(args[0])
 	if err != nil {

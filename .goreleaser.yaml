@@ -94,17 +94,19 @@ checksum:
 
 # Sign checksums.txt with the release ed25519 key so the in-binary self-update can
 # verify it (selfupdate.VerifyEd25519 against the embedded ReleasePublicKey).
-# Enable once the key exists: create the keypair (`termada` uses base64 ed25519),
-# set repo secrets TERMADA_RELEASE_PRIVKEY + TERMADA_RELEASE_PUBKEY, pass them
-# through in release.yml's `env:`, then uncomment. (Left disabled so releases keep
-# working until the key is provisioned.)
-# signs:
-#   - id: checksums
-#     artifacts: checksum
-#     signature: "${artifact}.sig"
-#     output: true
-#     cmd: go
-#     args: ["run", "./cmd/termada", "sign-checksums", "${artifact}"]
+# Safe whether or not the key is provisioned: with the repo secrets
+# TERMADA_RELEASE_PRIVKEY (+ TERMADA_RELEASE_PUBKEY, embedded via ldflags above)
+# set, this produces a real signature self-update enforces; without them
+# `sign-checksums` writes an empty .sig that self-update never reads (no embedded
+# pubkey), so unsigned releases keep working. To activate signing, just add the
+# two repo secrets (and pass them through in release.yml's env).
+signs:
+  - id: checksums
+    artifacts: checksum
+    signature: "${artifact}.sig"
+    output: true
+    cmd: go
+    args: ["run", "./cmd/termada", "sign-checksums", "${artifact}"]
 
 release:
   github:

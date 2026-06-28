@@ -34,3 +34,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          # Release signing (optional): add these repo secrets to make self-update
+          # require a valid ed25519 signature on checksums.txt. Empty = unsigned
+          # releases keep working (self-update verifies the checksum only).
+          TERMADA_RELEASE_PRIVKEY: ${{ secrets.TERMADA_RELEASE_PRIVKEY }}
+          TERMADA_RELEASE_PUBKEY: ${{ secrets.TERMADA_RELEASE_PUBKEY }}

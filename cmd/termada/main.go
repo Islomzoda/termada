@@ -237,7 +237,7 @@ func cmdJobs(args []string) {
 	_ = fs.Parse(args)
 	c := mustClient()
 	for {
-		jobs := c.ListJobs(*filter)
+		jobs := c.ListJobs("", *filter) // human CLI: unscoped, sees every agent's jobs
 		fmt.Print("\033[H\033[2J")
 		for _, j := range jobs {
 			fmt.Printf("%s  %-18s  %s\n", j.JobID, j.Status, strings.Join(j.Command, " "))
@@ -267,7 +267,7 @@ func cmdLogs(args []string) {
 	c := mustClient()
 	jobID, cursor := fs.Arg(0), ""
 	for {
-		res, err := c.Tail(jobID, cursor)
+		res, err := c.Tail("", jobID, cursor) // human CLI: unscoped
 		if err != nil {
 			fatal(err)
 		}
@@ -286,7 +286,7 @@ func cmdKill(args []string) {
 		os.Exit(2)
 	}
 	c := mustClient()
-	if err := c.Kill(args[0]); err != nil {
+	if err := c.Kill("", args[0]); err != nil { // human CLI: unscoped
 		fatal(err)
 	}
 	fmt.Println("killed", args[0])

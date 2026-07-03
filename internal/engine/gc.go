@@ -39,7 +39,7 @@ func (m *Manager) ReapOnce() int {
 	for _, id := range victims {
 		m.publish(bus.Event{Type: bus.EvJobKilled, JobID: id,
 			Message: "reaped: exceeded max_job_runtime_ms"})
-		_ = m.Kill(id)
+		_ = m.Kill("", id) // internal reaper: unscoped, may kill any agent's runaway job
 	}
 	return len(victims)
 }

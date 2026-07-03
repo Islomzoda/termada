@@ -79,7 +79,7 @@ func TestAutoBackgroundsDaemon(t *testing.T) {
 		t.Fatalf("status = %s, want backgrounded", res.Status)
 	}
 	// cleanup: kill the still-running tail
-	for i := 0; i < 40 && m.Kill(res.JobID) != nil; i++ {
+	for i := 0; i < 40 && m.Kill("agent", res.JobID) != nil; i++ {
 		time.Sleep(50 * time.Millisecond)
 	}
 }

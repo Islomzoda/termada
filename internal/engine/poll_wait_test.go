@@ -22,7 +22,7 @@ func TestPollWaitBlocksForOutput(t *testing.T) {
 	}
 
 	start := time.Now()
-	res, err := m.PollWait(job.ID, "", 3000)
+	res, err := m.PollWait("agent", job.ID, "", 3000)
 	if err != nil {
 		t.Fatalf("pollwait: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestPollWaitNonBlockingWhenZero(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	start := time.Now()
-	if _, err := m.PollWait(job.ID, "", 0); err != nil {
+	if _, err := m.PollWait("agent", job.ID, "", 0); err != nil {
 		t.Fatalf("pollwait: %v", err)
 	}
 	if waited := time.Since(start); waited > 500*time.Millisecond {

@@ -26,7 +26,7 @@ func waitDone(t *testing.T, job *Job, d time.Duration) {
 
 func poll(t *testing.T, m *Manager, jobID string) *PollResult {
 	t.Helper()
-	res, err := m.Poll(jobID, "")
+	res, err := m.Poll("agent", jobID, "")
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestExecWriteAnswersPrompt(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	time.Sleep(150 * time.Millisecond) // let the inner read reach the prompt
-	if err := m.Write(job.ID, "pizza", true, false, false); err != nil {
+	if err := m.Write("agent", job.ID, "pizza", true, false, false); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	waitDone(t, job, 5*time.Second)
@@ -136,7 +136,7 @@ func TestKillSleep(t *testing.T) {
 	var killed bool
 	for i := 0; i < 40; i++ {
 		time.Sleep(50 * time.Millisecond)
-		if err := m.Kill(job.ID); err == nil {
+		if err := m.Kill("agent", job.ID); err == nil {
 			killed = true
 			break
 		}
@@ -170,7 +170,7 @@ func TestSessionBusy(t *testing.T) {
 	}
 	for i := 0; i < 40; i++ {
 		time.Sleep(50 * time.Millisecond)
-		if m.Kill(j1.ID) == nil {
+		if m.Kill("agent", j1.ID) == nil {
 			break
 		}
 	}

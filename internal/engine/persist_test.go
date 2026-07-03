@@ -21,7 +21,7 @@ func TestPersistAndRecoverOrphaned(t *testing.T) {
 	// Tear down deterministically so the async persist-on-finish does not race
 	// the temp-dir cleanup: kill the job, wait for it, then let persist settle.
 	t.Cleanup(func() {
-		_ = m1.Kill(job.ID)
+		_ = m1.Kill("agent", job.ID)
 		<-job.Done()
 		m1.Shutdown()
 		time.Sleep(150 * time.Millisecond)
@@ -33,7 +33,7 @@ func TestPersistAndRecoverOrphaned(t *testing.T) {
 		t.Fatalf("recover: %v", err)
 	}
 	var found *Info
-	for _, in := range m2.ListJobs("all") {
+	for _, in := range m2.ListJobs("agent", "all") {
 		if in.JobID == job.ID {
 			cp := in
 			found = &cp
@@ -71,7 +71,7 @@ func TestRecoverKeepsTerminalStatus(t *testing.T) {
 	if err := m2.EnablePersistence(path); err != nil {
 		t.Fatal(err)
 	}
-	for _, in := range m2.ListJobs("all") {
+	for _, in := range m2.ListJobs("agent", "all") {
 		if in.JobID == job.ID {
 			if in.Status != StatusExited {
 				t.Fatalf("terminal job recovered as %s, want exited (graceful, not orphaned)", in.Status)

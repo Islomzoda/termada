@@ -21,6 +21,7 @@ const markerDelim = 0x1e
 // SessionConfig holds the per-session knobs the manager passes down.
 type SessionConfig struct {
 	OutputRetentionBytes int
+	PTYCols              int // initial PTY width for a local session (0 = default 200)
 }
 
 // SpawnConfig controls how a local agent shell is launched. The zero value runs
@@ -66,7 +67,11 @@ type Session struct {
 // (disable echo, enable job control). It blocks until init completes so the
 // session is ready for jobs on return.
 func newSession(owner, target, mode string, cfg SessionConfig, redactor *output.Redactor, sp SpawnConfig) (*Session, error) {
-	shell, err := startShell(200, 50, sp)
+	cols := cfg.PTYCols
+	if cols <= 0 {
+		cols = 200
+	}
+	shell, err := startShell(cols, 50, sp)
 	if err != nil {
 		return nil, errs.New(errs.Internal, "start shell: %v", err)
 	}

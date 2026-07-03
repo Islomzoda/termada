@@ -119,32 +119,32 @@ func (c *Client) Start(owner, session string, command []string, mode string) (en
 	return out, err
 }
 
-func (c *Client) Poll(jobID, cursor string, waitMS int) (*engine.PollResult, error) {
+func (c *Client) Poll(owner, jobID, cursor string, waitMS int) (*engine.PollResult, error) {
 	var out engine.PollResult
-	err := c.post("/api/exec/poll", execReq{JobID: jobID, Cursor: cursor, WaitMS: waitMS}, &out)
+	err := c.post("/api/exec/poll", execReq{Owner: owner, JobID: jobID, Cursor: cursor, WaitMS: waitMS}, &out)
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *Client) Write(jobID, input string, appendNewline, secret bool) error {
-	return c.post("/api/exec/write", execReq{JobID: jobID, Input: input, AppendNewline: &appendNewline, Secret: secret}, nil)
+func (c *Client) Write(owner, jobID, input string, appendNewline, secret bool) error {
+	return c.post("/api/exec/write", execReq{Owner: owner, JobID: jobID, Input: input, AppendNewline: &appendNewline, Secret: secret}, nil)
 }
 
-func (c *Client) Signal(jobID, signal string) error {
-	return c.post("/api/exec/signal", execReq{JobID: jobID, Signal: signal}, nil)
+func (c *Client) Signal(owner, jobID, signal string) error {
+	return c.post("/api/exec/signal", execReq{Owner: owner, JobID: jobID, Signal: signal}, nil)
 }
 
-func (c *Client) Kill(jobID string) error {
-	return c.post("/api/exec/kill", execReq{JobID: jobID}, nil)
+func (c *Client) Kill(owner, jobID string) error {
+	return c.post("/api/exec/kill", execReq{Owner: owner, JobID: jobID}, nil)
 }
 
-func (c *Client) ListJobs(filter string) []engine.Info {
+func (c *Client) ListJobs(owner, filter string) []engine.Info {
 	var out struct {
 		Jobs []engine.Info `json:"jobs"`
 	}
-	_ = c.get("/api/exec/list?filter="+url.QueryEscape(filter), &out)
+	_ = c.get("/api/exec/list?filter="+url.QueryEscape(filter)+"&owner="+url.QueryEscape(owner), &out)
 	return out.Jobs
 }
 
@@ -162,13 +162,13 @@ func (c *Client) ListSessions() []engine.SessionInfo {
 	return out.Sessions
 }
 
-func (c *Client) CloseSession(id string) error {
-	return c.post("/api/session/close", execReq{SessionID: id}, nil)
+func (c *Client) CloseSession(owner, id string) error {
+	return c.post("/api/session/close", execReq{Owner: owner, SessionID: id}, nil)
 }
 
-func (c *Client) Tail(jobID, cursor string) (*engine.TailResult, error) {
+func (c *Client) Tail(owner, jobID, cursor string) (*engine.TailResult, error) {
 	var out engine.TailResult
-	err := c.post("/api/logs/tail", execReq{JobID: jobID, Cursor: cursor}, &out)
+	err := c.post("/api/logs/tail", execReq{Owner: owner, JobID: jobID, Cursor: cursor}, &out)
 	if err != nil {
 		return nil, err
 	}

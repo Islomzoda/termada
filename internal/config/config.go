@@ -71,18 +71,15 @@ type TelegramConfig struct {
 }
 
 type Defaults struct {
-	TimeoutMS            int  `yaml:"timeout_ms"`
-	MaxOutputBytes       int  `yaml:"max_output_bytes"`
-	OutputRetentionBytes int  `yaml:"output_retention_bytes"`
-	StripANSI            bool `yaml:"strip_ansi"`
-	PTYCols              int  `yaml:"pty_cols"`
-	MaxForegroundJobs    int  `yaml:"max_foreground_jobs"`
-	MaxBackgroundJobs    int  `yaml:"max_background_jobs"`
-	MaxJobsPerAgent      int  `yaml:"max_jobs_per_agent"`
-	MaxJobRuntimeMS      int  `yaml:"max_job_runtime_ms"` // 0 = no cap; reap (SIGKILL) jobs running longer (runaway/hung safety net)
-	SilenceKillMS        int  `yaml:"silence_kill_ms"`
-	InputTimeoutMS       int  `yaml:"input_timeout_ms"`
-	ConfirmTimeoutMS     int  `yaml:"confirm_timeout_ms"`
+	TimeoutMS            int `yaml:"timeout_ms"`
+	MaxOutputBytes       int `yaml:"max_output_bytes"`
+	OutputRetentionBytes int `yaml:"output_retention_bytes"`
+	PTYCols              int `yaml:"pty_cols"`
+	MaxForegroundJobs    int `yaml:"max_foreground_jobs"`
+	MaxBackgroundJobs    int `yaml:"max_background_jobs"` // separate cap for background/auto-backgrounded jobs; no longer counted against max_foreground_jobs
+	MaxJobsPerAgent      int `yaml:"max_jobs_per_agent"`
+	MaxJobRuntimeMS      int `yaml:"max_job_runtime_ms"` // 0 = no cap; reap (SIGKILL) jobs running longer (runaway/hung safety net)
+	ConfirmTimeoutMS     int `yaml:"confirm_timeout_ms"`
 }
 
 type VaultConfig struct {
@@ -135,7 +132,6 @@ func Default() Config {
 			TimeoutMS:            30000,
 			MaxOutputBytes:       100000,
 			OutputRetentionBytes: 5000000,
-			StripANSI:            true,
 			PTYCols:              200,
 			MaxForegroundJobs:    8,
 			MaxBackgroundJobs:    32,

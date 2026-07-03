@@ -110,7 +110,7 @@ func (s *Server) registerTools() {
 			"wait_ms": map[string]any{"type": "integer", "description": "long-poll: block up to this many ms (capped at 30000) for new output / completion / input before returning; omit or 0 for an immediate non-blocking poll"},
 		}, "job_id"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			res, err := mgr.Poll(argString(a, "job_id"), argString(a, "cursor"), argInt(a, "wait_ms"))
+			res, err := mgr.Poll(s.agentID, argString(a, "job_id"), argString(a, "cursor"), argInt(a, "wait_ms"))
 			if err != nil {
 				return nil, asErr(err)
 			}
@@ -128,7 +128,7 @@ func (s *Server) registerTools() {
 			"secret":         boolSchema,
 		}, "job_id", "input"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			err := mgr.Write(argString(a, "job_id"), argString(a, "input"), argBoolDefault(a, "append_newline", true), argBoolDefault(a, "secret", false))
+			err := mgr.Write(s.agentID, argString(a, "job_id"), argString(a, "input"), argBoolDefault(a, "append_newline", true), argBoolDefault(a, "secret", false))
 			if err != nil {
 				return nil, asErr(err)
 			}
@@ -144,7 +144,7 @@ func (s *Server) registerTools() {
 			"signal": sigSchema,
 		}, "job_id", "signal"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			err := mgr.Signal(argString(a, "job_id"), argString(a, "signal"))
+			err := mgr.Signal(s.agentID, argString(a, "job_id"), argString(a, "signal"))
 			if err != nil {
 				return nil, asErr(err)
 			}
@@ -157,7 +157,7 @@ func (s *Server) registerTools() {
 		Description: "Force-kill a running job (SIGKILL to its process group).",
 		InputSchema: obj(map[string]any{"job_id": strSchema}, "job_id"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			if err := mgr.Kill(argString(a, "job_id")); err != nil {
+			if err := mgr.Kill(s.agentID, argString(a, "job_id")); err != nil {
 				return nil, asErr(err)
 			}
 			return map[string]any{"ok": true}, nil
@@ -187,7 +187,7 @@ func (s *Server) registerTools() {
 			if limit > 200 {
 				limit = 200
 			}
-			all := mgr.ListJobs(filter) // already newest-first
+			all := mgr.ListJobs(s.agentID, filter) // already newest-first, scoped to your jobs
 			total := len(all)
 			if len(all) > limit {
 				all = all[:limit]
@@ -234,7 +234,7 @@ func (s *Server) registerTools() {
 		Description: "Close a session and terminate its shell.",
 		InputSchema: obj(map[string]any{"session_id": strSchema}, "session_id"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			if err := mgr.CloseSession(argString(a, "session_id")); err != nil {
+			if err := mgr.CloseSession(s.agentID, argString(a, "session_id")); err != nil {
 				return nil, asErr(err)
 			}
 			return map[string]any{"ok": true}, nil
@@ -249,7 +249,7 @@ func (s *Server) registerTools() {
 			"cursor": strSchema,
 		}, "job_id"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			res, err := mgr.Tail(argString(a, "job_id"), argString(a, "cursor"))
+			res, err := mgr.Tail(s.agentID, argString(a, "job_id"), argString(a, "cursor"))
 			return res, asErr(err)
 		},
 	})

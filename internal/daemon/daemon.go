@@ -86,7 +86,10 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 
 	ec := engine.Config{
 		OutputRetentionBytes: cfg.Defaults.OutputRetentionBytes,
+		MaxOutputBytes:       cfg.Defaults.MaxOutputBytes,
+		PTYCols:              cfg.Defaults.PTYCols,
 		MaxForegroundJobs:    cfg.Defaults.MaxForegroundJobs,
+		MaxBackgroundJobs:    cfg.Defaults.MaxBackgroundJobs,
 		MaxJobsPerAgent:      cfg.Defaults.MaxJobsPerAgent,
 		MaxJobRuntimeMS:      cfg.Defaults.MaxJobRuntimeMS,
 		DefaultTimeoutMS:     cfg.Defaults.TimeoutMS,

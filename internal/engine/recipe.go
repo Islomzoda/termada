@@ -87,7 +87,7 @@ func (m *Manager) RunRecipe(owner, sessionID, name string) (*RecipeRunResult, er
 				return nil, err
 			}
 			sessionID = sess.ID
-			defer func() { _ = m.CloseSession(sessionID) }()
+			defer func() { _ = m.CloseSession(owner, sessionID) }()
 		}
 	}
 

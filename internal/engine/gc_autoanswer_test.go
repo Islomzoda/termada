@@ -21,7 +21,7 @@ func TestGCPrunesTerminalJobs(t *testing.T) {
 	}
 	// keep at most 1 terminal job
 	m.GCOnce(0, 1)
-	if n := len(m.ListJobs("all")); n > 1 {
+	if n := len(m.ListJobs("agent", "all")); n > 1 {
 		t.Fatalf("after GC(maxKeep=1) there are %d jobs, want <=1", n)
 	}
 	_ = last

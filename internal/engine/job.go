@@ -29,12 +29,12 @@ type Job struct {
 	killRequested bool
 	holdInput     bool // human has taken over input; agent writes are blocked
 	holdOutput    bool // agent's polled output is paused (human still sees the live stream)
+	background    bool // explicit mode=background, or auto-backgrounded by Run (daemon heuristic/timeout); excluded from the foreground quota, counted against MaxBackgroundJobs instead
 	createdAt     time.Time
 	startedAt     time.Time
 	endedAt       time.Time
 	lastOutput    time.Time
 
-	raw      *output.Buffer // raw-for-replay
 	clean    *output.Buffer // cleaned-for-agent (cursor indexes this)
 	cleaner  *output.Cleaner
 	redactor *output.Redactor
@@ -53,7 +53,6 @@ func newJob(sess *Session, command []string, mode string) *Job {
 		marker:    ids.Marker(),
 		status:    StatusRunning,
 		createdAt: now,
-		raw:       output.NewBuffer(0),
 		clean:     output.NewBuffer(sess.cfg.OutputRetentionBytes),
 		cleaner:   &output.Cleaner{},
 		redactor:  sess.redactor,
@@ -105,15 +104,28 @@ func (j *Job) holds() (input, output bool) {
 	return j.holdInput, j.holdOutput
 }
 
-// appendOutput stores raw output for replay and the cleaned+redacted stream for
-// the agent. Called only by the session reader for the current job.
+// markBackground flags the job as background (for the MaxBackgroundJobs quota
+// instead of MaxForegroundJobs). Idempotent.
+func (j *Job) markBackground() {
+	j.mu.Lock()
+	j.background = true
+	j.mu.Unlock()
+}
+
+func (j *Job) isBackground() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.background
+}
+
+// appendOutput stores the cleaned+redacted stream for the agent. Called only by
+// the session reader for the current job.
 func (j *Job) appendOutput(p []byte) {
 	if len(p) == 0 {
 		return
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	_, _ = j.raw.Write(p)
 	cleaned := j.cleaner.Clean(p)
 	if len(cleaned) > 0 {
 		_, _ = j.clean.Write([]byte(j.redactor.Redact(string(cleaned))))
@@ -148,7 +160,6 @@ func (j *Job) finalize(exitCode int, killStatus Status, reason string) {
 	if reason != "" {
 		j.reason = reason
 	}
-	j.raw.Close()
 	j.clean.Close()
 	close(j.done)
 	j.mu.Unlock()
@@ -170,6 +181,7 @@ func (j *Job) Done() <-chan struct{} { return j.done }
 type Info struct {
 	JobID          string   `json:"job_id"`
 	SessionID      string   `json:"session_id"`
+	Owner          string   `json:"owner,omitempty"`
 	Command        []string `json:"command"`
 	Status         Status   `json:"status"`
 	ExitCode       *int     `json:"exit_code,omitempty"`
@@ -201,6 +213,7 @@ func (j *Job) infoLocked() Info {
 	in := Info{
 		JobID:          j.ID,
 		SessionID:      j.SessionID,
+		Owner:          j.sess.Owner,
 		Command:        j.Command,
 		Status:         j.status,
 		ExitCode:       j.exitCode,

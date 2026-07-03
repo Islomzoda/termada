@@ -492,7 +492,7 @@ func TestRemoteSessionOverSSH(t *testing.T) {
 		t.Fatalf("remote pwd: %v", err)
 	}
 	wait(j2)
-	res, err := m.Poll(j2.ID, "")
+	res, err := m.Poll("agent", j2.ID, "")
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}

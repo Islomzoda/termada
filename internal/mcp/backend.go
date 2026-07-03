@@ -14,15 +14,15 @@ import (
 type Backend interface {
 	Run(owner, session string, command []string, mode string, timeoutMS int) (*engine.RunResult, error)
 	Start(owner, session string, command []string, mode string) (engine.Info, error)
-	Poll(jobID, cursor string, waitMS int) (*engine.PollResult, error)
-	Write(jobID, input string, appendNewline, secret bool) error
-	Signal(jobID, signal string) error
-	Kill(jobID string) error
-	ListJobs(filter string) []engine.Info
+	Poll(owner, jobID, cursor string, waitMS int) (*engine.PollResult, error)
+	Write(owner, jobID, input string, appendNewline, secret bool) error
+	Signal(owner, jobID, signal string) error
+	Kill(owner, jobID string) error
+	ListJobs(owner, filter string) []engine.Info
 	CreateSession(owner, target, mode string) (engine.SessionInfo, error)
 	ListSessions() []engine.SessionInfo
-	CloseSession(id string) error
-	Tail(jobID, cursor string) (*engine.TailResult, error)
+	CloseSession(owner, id string) error
+	Tail(owner, jobID, cursor string) (*engine.TailResult, error)
 	// FileRead/FileWrite are session-aware: with an empty or local session they
 	// act on the daemon host; with a remote session they refuse loudly (instead
 	// of silently touching the local FS while the agent believes it is remote).
@@ -63,19 +63,21 @@ func (b *LocalBackend) Start(owner, session string, command []string, mode strin
 	return job.Snapshot(), nil
 }
 
-func (b *LocalBackend) Poll(jobID, cursor string, waitMS int) (*engine.PollResult, error) {
-	return b.m.PollWait(jobID, cursor, waitMS)
+func (b *LocalBackend) Poll(owner, jobID, cursor string, waitMS int) (*engine.PollResult, error) {
+	return b.m.PollWait(owner, jobID, cursor, waitMS)
 }
 
-func (b *LocalBackend) Write(jobID, input string, appendNewline, secret bool) error {
+func (b *LocalBackend) Write(owner, jobID, input string, appendNewline, secret bool) error {
 	// Agent-originated input (human=false): rejected while a human holds input.
-	return b.m.Write(jobID, input, appendNewline, secret, false)
+	return b.m.Write(owner, jobID, input, appendNewline, secret, false)
 }
 
-func (b *LocalBackend) Signal(jobID, signal string) error { return b.m.Signal(jobID, signal) }
-func (b *LocalBackend) Kill(jobID string) error           { return b.m.Kill(jobID) }
-func (b *LocalBackend) ListJobs(filter string) []engine.Info {
-	return b.m.ListJobs(filter)
+func (b *LocalBackend) Signal(owner, jobID, signal string) error {
+	return b.m.Signal(owner, jobID, signal)
+}
+func (b *LocalBackend) Kill(owner, jobID string) error { return b.m.Kill(owner, jobID) }
+func (b *LocalBackend) ListJobs(owner, filter string) []engine.Info {
+	return b.m.ListJobs(owner, filter)
 }
 
 func (b *LocalBackend) CreateSession(owner, target, mode string) (engine.SessionInfo, error) {
@@ -94,9 +96,12 @@ func (b *LocalBackend) CreateSession(owner, target, mode string) (engine.Session
 }
 
 func (b *LocalBackend) ListSessions() []engine.SessionInfo { return b.m.ListSessions() }
-func (b *LocalBackend) CloseSession(id string) error       { return b.m.CloseSession(id) }
-func (b *LocalBackend) Tail(jobID, cursor string) (*engine.TailResult, error) {
-	return b.m.Tail(jobID, cursor)
+func (b *LocalBackend) CloseSession(owner, id string) error {
+	return b.m.CloseSession(owner, id)
+}
+func (b *LocalBackend) Tail(owner, jobID, cursor string) (*engine.TailResult, error) {
+	// Agent-originated (human=false): honors an output hold like exec_poll.
+	return b.m.Tail(owner, jobID, cursor, false)
 }
 
 func (b *LocalBackend) FileRead(session, path string, maxBytes int) (*engine.FileReadResult, error) {

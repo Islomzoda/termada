@@ -17,12 +17,12 @@ func TestHoldInputBlocksAgentAllowsHuman(t *testing.T) {
 		t.Fatalf("hold: %v", err)
 	}
 	// Agent input must be rejected while a human holds the terminal.
-	if err := m.Write(job.ID, "agent-typed", true, false, false); err == nil {
+	if err := m.Write("agent", job.ID, "agent-typed", true, false, false); err == nil {
 		t.Fatal("agent write should be blocked while input is held")
 	}
 	// Human input goes through.
 	time.Sleep(150 * time.Millisecond)
-	if err := m.Write(job.ID, "human-typed", true, false, true); err != nil {
+	if err := m.Write("agent", job.ID, "human-typed", true, false, true); err != nil {
 		t.Fatalf("human write: %v", err)
 	}
 	waitDone(t, job, 5*time.Second)
@@ -66,7 +66,7 @@ func TestHoldOutputPausesAgentOnly(t *testing.T) {
 		t.Fatalf("hold: %v", err)
 	}
 	// Agent poll sees no new bytes and the held flag, even as output is produced.
-	res, err := m.Poll(job.ID, "")
+	res, err := m.Poll("agent", job.ID, "")
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestHoldOutputPausesAgentOnly(t *testing.T) {
 	}
 	// The human stream (human=true) still sees output.
 	waitDone(t, job, 5*time.Second)
-	hres, _ := m.PollFor(job.ID, "", true)
+	hres, _ := m.PollFor("agent", job.ID, "", true)
 	if !strings.Contains(hres.StdoutChunk, "first") {
 		t.Fatalf("human stream = %q, want it to contain output", hres.StdoutChunk)
 	}

@@ -522,7 +522,7 @@ func (s *Server) hSessionList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hSessionClose(w http.ResponseWriter, r *http.Request) {
 	var req execReq
 	_ = decode(r, &req)
-	if err := s.mgr.CloseSession(req.SessionID); err != nil {
+	if err := s.mgr.CloseSession(s.ownerFor(r, req.Owner), req.SessionID); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -554,7 +554,7 @@ func (s *Server) hExecStart(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hExecPoll(w http.ResponseWriter, r *http.Request) {
 	var req execReq
 	_ = decode(r, &req)
-	res, err := s.mgr.PollWait(req.JobID, req.Cursor, req.WaitMS)
+	res, err := s.mgr.PollWait(s.ownerFor(r, req.Owner), req.JobID, req.Cursor, req.WaitMS)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -569,7 +569,13 @@ func (s *Server) hExecWrite(w http.ResponseWriter, r *http.Request) {
 	if req.AppendNewline != nil {
 		appendNL = *req.AppendNewline
 	}
-	if err := s.mgr.Write(req.JobID, req.Input, appendNL, req.Secret, req.Human); err != nil {
+	// human:true (the dashboard's takeover input) bypasses owner scoping, same as
+	// it already bypasses the output/input hold.
+	owner := ""
+	if !req.Human {
+		owner = s.ownerFor(r, req.Owner)
+	}
+	if err := s.mgr.Write(owner, req.JobID, req.Input, appendNL, req.Secret, req.Human); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -672,7 +678,7 @@ func (s *Server) hExecStream(w http.ResponseWriter, r *http.Request) {
 			return
 		default:
 		}
-		res, err := s.mgr.PollFor(jobID, cursor, true)
+		res, err := s.mgr.PollFor("", jobID, cursor, true) // dashboard live view: unscoped, always streams
 		if err != nil {
 			send(map[string]any{"error": err.Error()})
 			return
@@ -692,7 +698,7 @@ func (s *Server) hExecStream(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hExecSignal(w http.ResponseWriter, r *http.Request) {
 	var req execReq
 	_ = decode(r, &req)
-	if err := s.mgr.Signal(req.JobID, req.Signal); err != nil {
+	if err := s.mgr.Signal(s.ownerFor(r, req.Owner), req.JobID, req.Signal); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -702,7 +708,11 @@ func (s *Server) hExecSignal(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hExecKill(w http.ResponseWriter, r *http.Request) {
 	var req execReq
 	_ = decode(r, &req)
-	if err := s.mgr.Kill(req.JobID); err != nil {
+	// The dashboard's killJob() sends neither an agent token nor req.Owner, so
+	// ownerFor naturally resolves to "" (unscoped) for it — it can kill any
+	// agent's job, same as hStopAll below. An MCP-shim call carries its agent
+	// identity (token or self-asserted Owner) and is scoped to its own jobs.
+	if err := s.mgr.Kill(s.ownerFor(r, req.Owner), req.JobID); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -714,13 +724,14 @@ func (s *Server) hExecList(w http.ResponseWriter, r *http.Request) {
 	if filter == "" {
 		filter = "all"
 	}
-	writeJSON(w, map[string]any{"jobs": s.mgr.ListJobs(filter)})
+	owner := s.ownerFor(r, r.URL.Query().Get("owner"))
+	writeJSON(w, map[string]any{"jobs": s.mgr.ListJobs(owner, filter)})
 }
 
 func (s *Server) hLogsTail(w http.ResponseWriter, r *http.Request) {
 	var req execReq
 	_ = decode(r, &req)
-	res, err := s.mgr.Tail(req.JobID, req.Cursor)
+	res, err := s.mgr.Tail(s.ownerFor(r, req.Owner), req.JobID, req.Cursor, false)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -762,7 +773,7 @@ func (s *Server) hDeny(w http.ResponseWriter, r *http.Request) {
 
 // hMetrics exposes Prometheus metrics (spec §8.6).
 func (s *Server) hMetrics(w http.ResponseWriter, r *http.Request) {
-	jobs := s.mgr.ListJobs("all")
+	jobs := s.mgr.ListJobs("", "all")
 	active := 0
 	for _, j := range jobs {
 		if !j.Status.Terminal() {
@@ -803,7 +814,7 @@ func (s *Server) hStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"version":  s.version,
 		"sessions": s.mgr.ListSessions(),
-		"jobs":     s.mgr.ListJobs("active"),
+		"jobs":     s.mgr.ListJobs("", "active"),
 		"pending":  s.mgr.ListPending(),
 		"servers":  servers,
 		"agents":   s.mgr.Agents(),
@@ -812,9 +823,9 @@ func (s *Server) hStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hStopAll(w http.ResponseWriter, r *http.Request) {
 	n := 0
-	for _, j := range s.mgr.ListJobs("active") {
+	for _, j := range s.mgr.ListJobs("", "active") {
 		if !j.Status.Terminal() {
-			if s.mgr.Kill(j.JobID) == nil {
+			if s.mgr.Kill("", j.JobID) == nil {
 				n++
 			}
 		}

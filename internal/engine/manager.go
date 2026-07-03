@@ -16,7 +16,10 @@ import (
 // Config configures the engine (a subset of spec §24 defaults).
 type Config struct {
 	OutputRetentionBytes int
+	MaxOutputBytes       int // per-call cap on stdout returned by exec_run/exec_poll/logs_tail (0 = use OutputRetentionBytes)
+	PTYCols              int // initial PTY width for new sessions (0 = default 200)
 	MaxForegroundJobs    int
+	MaxBackgroundJobs    int // separate cap for background/auto-backgrounded jobs (0 = unlimited); these no longer count against MaxForegroundJobs
 	MaxJobsPerAgent      int // per-agent concurrent-job quota (0 = unlimited, MA-3)
 	MaxJobRuntimeMS      int // 0 = no cap; reaper SIGKILLs jobs running longer (runaway/hung safety net)
 	DefaultTimeoutMS     int
@@ -28,10 +31,20 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		OutputRetentionBytes: 5_000_000,
+		MaxOutputBytes:       100_000,
+		PTYCols:              200,
 		MaxForegroundJobs:    8,
 		DefaultTimeoutMS:     30_000,
 		ConfirmTimeoutMS:     120_000,
 	}
+}
+
+// maxOutputBytes returns the effective per-call output cap.
+func (m *Manager) maxOutputBytes() int {
+	if m.cfg.MaxOutputBytes > 0 {
+		return m.cfg.MaxOutputBytes
+	}
+	return m.cfg.OutputRetentionBytes
 }
 
 // Manager owns all sessions and the global job registry (spec §9/§10).
@@ -219,7 +232,7 @@ func (m *Manager) CreateSession(owner, target, mode string) (*Session, error) {
 	if mode == "" {
 		mode = "shell"
 	}
-	scfg := SessionConfig{OutputRetentionBytes: m.cfg.OutputRetentionBytes}
+	scfg := SessionConfig{OutputRetentionBytes: m.cfg.OutputRetentionBytes, PTYCols: m.cfg.PTYCols}
 	var sess *Session
 	var err error
 	if target == "local" {
@@ -279,10 +292,26 @@ func (m *Manager) resolveSession(owner, id string) (*Session, error) {
 	return sess, nil
 }
 
+// activeForeground counts sessions whose current job holds a foreground slot —
+// i.e. everything except jobs marked background, which are gated by
+// MaxBackgroundJobs instead so a handful of long-lived dev servers can't block
+// every other exec on the daemon (spec-adjacent to LR-1's "dev servers are
+// first-class" stance).
 func (m *Manager) activeForeground() int {
 	n := 0
 	for _, s := range m.sessions {
-		if s.currentJob() != nil {
+		if j := s.currentJob(); j != nil && !j.isBackground() {
+			n++
+		}
+	}
+	return n
+}
+
+// activeBackground counts sessions whose current job is marked background.
+func (m *Manager) activeBackground() int {
+	n := 0
+	for _, s := range m.sessions {
+		if j := s.currentJob(); j != nil && j.isBackground() {
 			n++
 		}
 	}
@@ -348,7 +377,18 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 		return nil, errs.New(errs.ParallelismExceeded, "agent %q reached its concurrent-job quota (%d)", owner, m.cfg.MaxJobsPerAgent)
 	}
 	m.mu.Lock()
-	if m.cfg.MaxForegroundJobs > 0 && m.activeForeground() >= m.cfg.MaxForegroundJobs {
+	// An explicitly background-mode command is gated by MaxBackgroundJobs, not
+	// MaxForegroundJobs: it doesn't occupy a foreground slot once classified (see
+	// activeForeground). A command that only LATER gets auto-backgrounded by Run
+	// (daemon heuristic / timeout) can't be classified yet at Start time, so it is
+	// still checked against MaxForegroundJobs here — same as any other command —
+	// and only counts against MaxBackgroundJobs from the moment Run reclassifies
+	// it, same non-authoritative soft-check pattern as the rest of this gate.
+	if mode == ModeBackground && m.cfg.MaxBackgroundJobs > 0 && m.activeBackground() >= m.cfg.MaxBackgroundJobs {
+		m.mu.Unlock()
+		return nil, errs.New(errs.ParallelismExceeded, "max background jobs (%d) reached", m.cfg.MaxBackgroundJobs)
+	}
+	if mode != ModeBackground && m.cfg.MaxForegroundJobs > 0 && m.activeForeground() >= m.cfg.MaxForegroundJobs {
 		m.mu.Unlock()
 		return nil, errs.New(errs.ParallelismExceeded, "max foreground jobs (%d) reached", m.cfg.MaxForegroundJobs)
 	}
@@ -357,6 +397,9 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 	job, err := sess.exec(command, mode)
 	if job == nil {
 		return nil, err
+	}
+	if mode == ModeBackground {
+		job.markBackground()
 	}
 	if err != nil {
 		// exec failed before the command ran (e.g. session busy/closed, pty write):
@@ -578,6 +621,19 @@ func (m *Manager) ListPending() []PendingInfo {
 	return out
 }
 
+// capChunk trims chunk to at most n bytes, keeping the most recent (tail)
+// portion so a single exec_run/exec_poll/logs_tail call can't dump an unbounded
+// amount of output into the caller's context. n <= 0 disables the cap. The
+// skipped head bytes are still physically retained in the buffer (not evicted,
+// as a retention-cap drop would be) and can be re-read by polling with an
+// earlier cursor; they are just not auto-delivered by this call.
+func capChunk(chunk []byte, n int) ([]byte, bool) {
+	if n <= 0 || len(chunk) <= n {
+		return chunk, false
+	}
+	return chunk[len(chunk)-n:], true
+}
+
 // RunResult is the result of a blocking exec_run.
 type RunResult struct {
 	Info
@@ -628,23 +684,54 @@ func (m *Manager) Run(owner, sessionID string, command []string, mode string, ti
 		reason = "still running after timeout; left running in background"
 	}
 	waitStart := time.Now()
-	select {
-	case <-job.Done():
-	case <-time.After(wait):
+	// Don't burn the wait budget once the job is parked for human/agent action:
+	// a confirm-gated command is already awaiting_confirmation the instant Start
+	// returns, and a running command can flip to awaiting_input mid-wait once it
+	// hits an interactive prompt. Either way, hand control back immediately with
+	// the TRUE status instead of blocking out the full timeout and then reporting
+	// "backgrounded" — which would hide that a human needs to approve it, or that
+	// exec_write is needed to answer a prompt (spec IN-1/§18a).
+	parked := func() bool {
+		s := job.info().Status
+		return s == StatusAwaitingConfirmation || s == StatusAwaitingInput
+	}
+	if !parked() {
+		deadline := time.NewTimer(wait)
+		tick := time.NewTicker(150 * time.Millisecond)
+	waitLoop:
+		for {
+			select {
+			case <-job.Done():
+				break waitLoop
+			case <-deadline.C:
+				break waitLoop
+			case <-tick.C:
+				if parked() {
+					break waitLoop
+				}
+			}
+		}
+		deadline.Stop()
+		tick.Stop()
 	}
 	chunk, next, gap := job.clean.ReadFrom(0)
+	chunk, capped := capChunk(chunk, m.maxOutputBytes())
 	info := job.info()
-	if !info.Status.Terminal() {
+	if !info.Status.Terminal() && info.Status != StatusAwaitingConfirmation && info.Status != StatusAwaitingInput {
 		info.Status = StatusBackgrounded
 		if info.Reason == "" {
 			info.Reason = reason
 		}
+		// Reclassify off the foreground quota from this point on (mirrors the
+		// explicit mode=background case in Start): a daemon-heuristic or
+		// timed-out-but-left-running job no longer occupies a foreground slot.
+		job.markBackground()
 	}
 	return &RunResult{
 		Info:       info,
 		Stdout:     string(chunk),
 		NextCursor: output.EncodeCursor(next),
-		Truncated:  gap,
+		Truncated:  gap || capped,
 		WaitedMS:   time.Since(waitStart).Milliseconds(),
 		TimeoutMS:  wait.Milliseconds(),
 	}, nil
@@ -656,12 +743,14 @@ type PollResult struct {
 	StdoutChunk string `json:"stdout_chunk"`
 	NextCursor  string `json:"next_cursor"`
 	Gap         bool   `json:"gap,omitempty"`
+	Truncated   bool   `json:"truncated,omitempty"`
 	OutputHeld  bool   `json:"output_held,omitempty"`
 }
 
 // Poll returns incremental output for the agent (respects an output hold).
-func (m *Manager) Poll(jobID, cursor string) (*PollResult, error) {
-	return m.PollFor(jobID, cursor, false)
+// owner scopes the lookup (MA-2); pass "" for the trusted/human path.
+func (m *Manager) Poll(owner, jobID, cursor string) (*PollResult, error) {
+	return m.PollFor(owner, jobID, cursor, false)
 }
 
 // PollWait is Poll with an optional long-poll: if there is nothing new yet and
@@ -669,8 +758,8 @@ func (m *Manager) Poll(jobID, cursor string) (*PollResult, error) {
 // terminal, it starts awaiting input, or the budget elapses — then returns the
 // latest. This replaces the agent's busy poll-sleep-poll loop (which the model
 // often gets wrong) with one call. waitMS <= 0 is the old non-blocking behavior.
-func (m *Manager) PollWait(jobID, cursor string, waitMS int) (*PollResult, error) {
-	res, err := m.PollFor(jobID, cursor, false)
+func (m *Manager) PollWait(owner, jobID, cursor string, waitMS int) (*PollResult, error) {
+	res, err := m.PollFor(owner, jobID, cursor, false)
 	if err != nil || waitMS <= 0 {
 		return res, err
 	}
@@ -680,7 +769,7 @@ func (m *Manager) PollWait(jobID, cursor string, waitMS int) (*PollResult, error
 	if waitMS > 30_000 {
 		waitMS = 30_000
 	}
-	job, err := m.getJob(jobID)
+	job, err := m.getJob(owner, jobID)
 	if err != nil {
 		return res, nil
 	}
@@ -691,11 +780,11 @@ func (m *Manager) PollWait(jobID, cursor string, waitMS int) (*PollResult, error
 	for {
 		select {
 		case <-deadline.C:
-			return m.PollFor(jobID, cursor, false)
+			return m.PollFor(owner, jobID, cursor, false)
 		case <-job.Done():
-			return m.PollFor(jobID, cursor, false)
+			return m.PollFor(owner, jobID, cursor, false)
 		case <-tick.C:
-			r, e := m.PollFor(jobID, cursor, false)
+			r, e := m.PollFor(owner, jobID, cursor, false)
 			if e != nil {
 				return r, e
 			}
@@ -708,9 +797,13 @@ func (m *Manager) PollWait(jobID, cursor string, waitMS int) (*PollResult, error
 
 // PollFor returns incremental output from the cursor onward plus current status.
 // When human is false and the job's output is held, no new bytes are returned
-// (the agent is paused); the human dashboard passes human=true to always stream.
-func (m *Manager) PollFor(jobID, cursor string, human bool) (*PollResult, error) {
-	job, err := m.getJob(jobID)
+// (the agent is paused); the human dashboard passes human=true to always stream
+// and owner="" to see any agent's job. The returned chunk is capped at
+// maxOutputBytes per call (keeping the freshest bytes) so one poll can't dump an
+// unbounded amount into the caller's context; Truncated reports either a cursor
+// gap or this per-call cap.
+func (m *Manager) PollFor(owner, jobID, cursor string, human bool) (*PollResult, error) {
+	job, err := m.getJob(owner, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -722,11 +815,13 @@ func (m *Manager) PollFor(jobID, cursor string, human bool) (*PollResult, error)
 		return &PollResult{Info: job.info(), StdoutChunk: "", NextCursor: cursor, OutputHeld: true}, nil
 	}
 	chunk, next, gap := job.clean.ReadFrom(off)
+	chunk, capped := capChunk(chunk, m.maxOutputBytes())
 	return &PollResult{
 		Info:        job.info(),
 		StdoutChunk: string(chunk),
 		NextCursor:  output.EncodeCursor(next),
 		Gap:         gap,
+		Truncated:   capped,
 	}, nil
 }
 
@@ -735,11 +830,16 @@ type TailResult struct {
 	Lines      string `json:"lines"`
 	NextCursor string `json:"next_cursor"`
 	Gap        bool   `json:"gap,omitempty"`
+	Truncated  bool   `json:"truncated,omitempty"`
+	OutputHeld bool   `json:"output_held,omitempty"`
 }
 
-// Tail returns output from the cursor (or, if empty, the whole retained stream).
-func (m *Manager) Tail(jobID, cursor string) (*TailResult, error) {
-	job, err := m.getJob(jobID)
+// Tail returns output from the cursor (or, if empty, the whole retained
+// stream). It honors an output hold exactly like PollFor (human bypasses it,
+// same as the dashboard's live view) so a human-paused agent can't read the
+// withheld stream through this tool instead of exec_poll.
+func (m *Manager) Tail(owner, jobID, cursor string, human bool) (*TailResult, error) {
+	job, err := m.getJob(owner, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -747,22 +847,37 @@ func (m *Manager) Tail(jobID, cursor string) (*TailResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if _, ho := job.holds(); ho && !human {
+		return &TailResult{NextCursor: cursor, OutputHeld: true}, nil
+	}
 	chunk, next, gap := job.clean.ReadFrom(off)
+	chunk, capped := capChunk(chunk, m.maxOutputBytes())
 	return &TailResult{
 		Lines:      string(chunk),
 		NextCursor: output.EncodeCursor(next),
 		Gap:        gap,
+		Truncated:  capped,
 	}, nil
 }
 
 // Write sends input to a job's PTY. If secret is true the value is registered
 // for redaction and is never echoed/logged (spec IN-3/§3a). human=true marks
 // input typed by a person at the dashboard/TUI; when a job's input is held
-// (human takeover), agent writes (human=false) are rejected.
-func (m *Manager) Write(jobID, input string, appendNewline, secret, human bool) error {
-	job, err := m.getJob(jobID)
+// (human takeover), agent writes (human=false) are rejected. owner scopes the
+// job lookup (MA-2); pass "" for the trusted/human path.
+//
+// The job must still be the session's CURRENT command: once a job exits, its id
+// stays valid (for polling history) but the session shell has moved on to an
+// idle prompt, so writing to it any longer would type the input directly into
+// that idle shell — executed as a command, unaudited and unchecked by policy —
+// instead of answering the (now-gone) prompt it was meant for.
+func (m *Manager) Write(owner, jobID, input string, appendNewline, secret, human bool) error {
+	job, err := m.getJob(owner, jobID)
 	if err != nil {
 		return err
+	}
+	if job.sess.currentJob() != job {
+		return errs.New(errs.NotFound, "job %s is not currently running", jobID)
 	}
 	if hi, _ := job.holds(); hi && !human {
 		return errs.New(errs.DeniedByPolicy, "input is held by a human operator")
@@ -779,9 +894,10 @@ func (m *Manager) Write(jobID, input string, appendNewline, secret, human bool) 
 
 // Hold sets the human-intervention flags for a job (nil = unchanged). Used by
 // the dashboard/CLI so a person can take over input and/or pause the output the
-// agent receives, while still watching the live stream themselves.
+// agent receives, while still watching the live stream themselves. Dashboard-
+// only (not exposed as an MCP tool), so it sees any agent's job.
 func (m *Manager) Hold(jobID string, input, output *bool) error {
-	job, err := m.getJob(jobID)
+	job, err := m.getJob("", jobID)
 	if err != nil {
 		return err
 	}
@@ -795,8 +911,9 @@ func (m *Manager) Hold(jobID string, input, output *bool) error {
 }
 
 // Signal sends a signal to the running command's process group (spec EX-5/§18b).
-func (m *Manager) Signal(jobID, signal string) error {
-	job, err := m.getJob(jobID)
+// owner scopes the job lookup (MA-2); pass "" for the trusted/human path.
+func (m *Manager) Signal(owner, jobID, signal string) error {
+	job, err := m.getJob(owner, jobID)
 	if err != nil {
 		return err
 	}
@@ -809,12 +926,15 @@ func (m *Manager) Signal(jobID, signal string) error {
 }
 
 // Kill force-terminates a job (SIGKILL to its process group).
-func (m *Manager) Kill(jobID string) error {
-	return m.Signal(jobID, "SIGKILL")
+func (m *Manager) Kill(owner, jobID string) error {
+	return m.Signal(owner, jobID, "SIGKILL")
 }
 
-// ListJobs returns job snapshots filtered by active|recent|all.
-func (m *Manager) ListJobs(filter string) []Info {
+// ListJobs returns job snapshots filtered by active|recent|all, scoped to owner
+// (MA-2): a non-empty owner sees only its own jobs (including its own recovered
+// jobs across a daemon restart). owner == "" is the trusted/human path and sees
+// every agent's jobs, as the dashboard needs.
+func (m *Manager) ListJobs(owner, filter string) []Info {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	type row struct {
@@ -823,6 +943,9 @@ func (m *Manager) ListJobs(filter string) []Info {
 	}
 	rows := []row{}
 	keep := func(at time.Time, info Info) {
+		if owner != "" && info.Owner != owner {
+			return
+		}
 		if filter == "active" && info.Status.Terminal() {
 			return
 		}
@@ -865,11 +988,13 @@ func (m *Manager) ListSessions() []SessionInfo {
 	return out
 }
 
-// CloseSession closes and removes a session.
-func (m *Manager) CloseSession(id string) error {
+// CloseSession closes and removes a session, scoped to owner (MA-2): a
+// non-empty owner can only close its own session. owner == "" is the trusted/
+// human path (dashboard/CLI/internal callers).
+func (m *Manager) CloseSession(owner, id string) error {
 	m.mu.Lock()
 	sess := m.sessions[id]
-	if sess == nil {
+	if sess == nil || (owner != "" && sess.Owner != owner) {
 		m.mu.Unlock()
 		return errs.New(errs.NotFound, "session %s not found", id)
 	}
@@ -976,11 +1101,19 @@ func (m *Manager) SessionWriteInput(sessionID, input string, appendNewline, huma
 	return s.writeInput(data)
 }
 
-func (m *Manager) getJob(id string) (*Job, error) {
+// getJob resolves a job by id, scoped to owner (MA-2 job isolation): when owner
+// is non-empty, a job belonging to a different agent is reported as not-found
+// (not a permission error) so its existence isn't leaked. owner == "" is the
+// trusted/human path (dashboard, CLI, internal callers like the GC reaper) and
+// sees every job.
+func (m *Manager) getJob(owner, id string) (*Job, error) {
 	m.mu.Lock()
 	job := m.jobs[id]
 	m.mu.Unlock()
 	if job == nil {
+		return nil, errs.New(errs.NotFound, "job %s not found", id)
+	}
+	if owner != "" && job.sess.Owner != owner {
 		return nil, errs.New(errs.NotFound, "job %s not found", id)
 	}
 	return job, nil

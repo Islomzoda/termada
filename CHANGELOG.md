@@ -74,10 +74,11 @@ All notable changes to this project are documented here. The format is based on
 - Serialize vault passphrase checks so concurrent failures cannot bypass the
   five-attempt lockout.
 - Treat plugins as trusted, non-sandboxed executables and harden their boundary:
-  policy/audit all calls, reject unsafe files, detect stable path/same-inode
-  content changes with file identity and SHA-256 checks, validate described
-  tools, bound executable/I/O/tool counts/time, and attempt best-effort
-  descendant cleanup after timeout.
+  policy/audit all calls, reject unsafe files, pin discovered executable
+  identities so unlink/recreate cannot hide behind inode reuse, detect in-place
+  content changes with SHA-256, validate described tools, bound
+  executable/I/O/tool counts/time, and attempt best-effort descendant cleanup
+  after timeout.
 - Bound snapshots to 200 MiB cumulatively, reject symlinks/devices/special files
   anywhere in a source, validate restore ids, and stage restores with
   rollback instead of deleting the original first.
@@ -121,6 +122,8 @@ All notable changes to this project are documented here. The format is based on
 - Reap session transports exactly once on EOF, replace closed default sessions,
   prevent failed starts from leaving phantom running jobs, drain job-finished
   audit events before daemon shutdown, and preserve terminal confirmation state.
+- Fence every command with a begin marker so delayed interactive-shell/readline
+  control bytes cannot leak into job output, advance cursors or wake long-polls.
 - Keep new and old daemon/shim pairs interoperable through a data-free legacy
   UDS health response while retaining operator-only access to full status.
 

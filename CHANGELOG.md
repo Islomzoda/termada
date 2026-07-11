@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-07-11
+
+### Fixed
+- Show interactive prompts before input is submitted in both job and session
+  terminals, including common `[y/N] ` prompts with trailing whitespace.
+- Keep only the current question visible when programs ask several prompts
+  without newlines or redraw them with carriage returns.
+- Preserve terminal output across command completion, disconnects and SSE
+  reconnects, with explicit output-gap reporting when retained history expired.
+- Serialize dashboard keystrokes so characters and Enter cannot arrive out of
+  order, and keep input delivery failures visible until the operator retries.
+
+### Security
+- Redact detected prompt metadata before it reaches dashboard or API clients.
+
 ## [0.8.0] — 2026-07-11
 
 ### Added

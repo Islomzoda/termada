@@ -6,11 +6,11 @@
     "url": "https://github.com/Islomzoda/termada",
     "source": "github"
   },
-  "version": "0.8.0",
+  "version": "0.8.1",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/islomzoda/termada:0.8.0",
+      "identifier": "ghcr.io/islomzoda/termada:0.8.1",
       "transport": { "type": "stdio" },
       "packageArguments": [
         { "type": "positional", "value": "serve" },

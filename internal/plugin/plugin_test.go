@@ -126,14 +126,37 @@ func TestPluginExecutableReplacementRequiresReload(t *testing.T) {
 	if err := m.Load(); err != nil {
 		t.Fatal(err)
 	}
+	loaded := m.List()
+	if len(loaded) != 1 {
+		t.Fatalf("loaded plugins = %d, want 1", len(loaded))
+	}
+	oldExecutable := loaded[0].executable
+	oldInfo, err := oldExecutable.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(testPlugin), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Match the loaded executable's observable timestamps as well as its bytes and
+	// size. Replacement detection must rely on a stable file identity, not time.
+	if err := os.Chtimes(path, oldInfo.ModTime(), oldInfo.ModTime()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := m.Call("demo.greet", nil); err == nil || !strings.Contains(err.Error(), "changed since discovery") {
 		t.Fatalf("replaced executable call error = %v", err)
+	}
+	if err := m.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldExecutable.Stat(); err == nil {
+		t.Fatal("reload did not close the previous executable handle")
+	}
+	if _, err := m.Call("demo.greet", nil); err != nil {
+		t.Fatalf("call after reload: %v", err)
 	}
 }
 

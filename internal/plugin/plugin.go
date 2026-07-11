@@ -54,9 +54,10 @@ type Plugin struct {
 	Path  string
 	Tools []ToolSpec
 
-	file      os.FileInfo
-	digest    [sha256.Size]byte
-	toolNames map[string]struct{}
+	file       os.FileInfo
+	executable *os.File
+	digest     [sha256.Size]byte
+	toolNames  map[string]struct{}
 }
 
 // Manager discovers and invokes plugins in a directory.
@@ -98,67 +99,85 @@ func (m *Manager) Load() error {
 	loaded := map[string]*Plugin{}
 	duplicates := map[string]bool{}
 	for _, e := range entries {
-		if e.IsDir() || e.Type()&os.ModeSymlink != 0 {
-			continue
-		}
-		path := filepath.Join(m.dir, e.Name())
-		info, err := safePluginFile(path)
-		if err != nil {
-			continue
-		}
-		beforeDigest, err := pluginDigest(path, info)
-		if err != nil {
-			continue
-		}
-		name := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
-		if !validName(name) || duplicates[name] {
-			continue
-		}
-		if _, exists := loaded[name]; exists {
-			delete(loaded, name)
-			duplicates[name] = true
-			continue
-		}
-		out, err := run(path, []string{"describe"}, nil, m.describeTimeout)
-		if err != nil {
-			continue
-		}
-		var d describeOut
-		if json.Unmarshal(out, &d) != nil || len(d.Tools) == 0 || len(d.Tools) > maxPluginTools {
-			continue
-		}
-		toolNames := make(map[string]struct{}, len(d.Tools))
-		valid := true
-		for i := range d.Tools {
-			localName := d.Tools[i].Name
-			if !validName(localName) || len(d.Tools[i].Description) > maxPluginOutputBytes || !validInputSchema(d.Tools[i].InputSchema) {
-				valid = false
-				break
+		func() {
+			if e.IsDir() || e.Type()&os.ModeSymlink != 0 {
+				return
 			}
-			if _, duplicate := toolNames[localName]; duplicate {
-				valid = false
-				break
+			path := filepath.Join(m.dir, e.Name())
+			info, err := safePluginFile(path)
+			if err != nil {
+				return
 			}
-			toolNames[localName] = struct{}{}
-			d.Tools[i].Name = name + "." + localName
-		}
-		if !valid {
-			continue
-		}
-		// Refuse a plugin that was replaced while describe was running. Calls also
-		// repeat this identity check, so replacing a loaded executable requires Load.
-		current, err := safePluginFile(path)
-		if err != nil || !os.SameFile(info, current) {
-			continue
-		}
-		afterDigest, err := pluginDigest(path, current)
-		if err != nil || beforeDigest != afterDigest {
-			continue
-		}
-		loaded[name] = &Plugin{Name: name, Path: path, Tools: d.Tools, file: current, digest: afterDigest, toolNames: toolNames}
+			executable, opened, err := pinPluginFile(path, info)
+			if err != nil {
+				return
+			}
+			keepExecutable := false
+			defer func() {
+				if !keepExecutable {
+					_ = executable.Close()
+				}
+			}()
+			beforeDigest, err := pluginDigestFile(executable, opened)
+			if err != nil {
+				return
+			}
+			name := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+			if !validName(name) || duplicates[name] {
+				return
+			}
+			if _, exists := loaded[name]; exists {
+				_ = loaded[name].executable.Close()
+				delete(loaded, name)
+				duplicates[name] = true
+				return
+			}
+			out, err := run(path, []string{"describe"}, nil, m.describeTimeout)
+			if err != nil {
+				return
+			}
+			var d describeOut
+			if json.Unmarshal(out, &d) != nil || len(d.Tools) == 0 || len(d.Tools) > maxPluginTools {
+				return
+			}
+			toolNames := make(map[string]struct{}, len(d.Tools))
+			valid := true
+			for i := range d.Tools {
+				localName := d.Tools[i].Name
+				if !validName(localName) || len(d.Tools[i].Description) > maxPluginOutputBytes || !validInputSchema(d.Tools[i].InputSchema) {
+					valid = false
+					break
+				}
+				if _, duplicate := toolNames[localName]; duplicate {
+					valid = false
+					break
+				}
+				toolNames[localName] = struct{}{}
+				d.Tools[i].Name = name + "." + localName
+			}
+			if !valid {
+				return
+			}
+			// Keep the discovered file open so an unlink cannot recycle its file ID
+			// and make a byte-for-byte replacement look like the loaded executable.
+			current, err := safePluginFile(path)
+			if err != nil || !os.SameFile(opened, current) {
+				return
+			}
+			afterDigest, err := pluginDigest(path, current)
+			if err != nil || beforeDigest != afterDigest {
+				return
+			}
+			loaded[name] = &Plugin{Name: name, Path: path, Tools: d.Tools, file: opened, executable: executable, digest: afterDigest, toolNames: toolNames}
+			keepExecutable = true
+		}()
 	}
 	m.mu.Lock()
+	previous := m.plugins
 	m.plugins = loaded
+	for _, p := range previous {
+		_ = p.executable.Close()
+	}
 	m.mu.Unlock()
 	return nil
 }
@@ -193,10 +212,13 @@ func (m *Manager) Call(name string, args map[string]any) (any, error) {
 	}
 	m.mu.RLock()
 	p := m.plugins[plug]
-	m.mu.RUnlock()
 	if p == nil {
+		m.mu.RUnlock()
 		return nil, fmt.Errorf("no such plugin %q", plug)
 	}
+	// Load closes the pinned executable handles while swapping plugin sets. Keep
+	// the read lock until this invocation finishes so its identity remains pinned.
+	defer m.mu.RUnlock()
 	if _, described := p.toolNames[tool]; !described {
 		return nil, fmt.Errorf("plugin %q did not describe tool %q", plug, tool)
 	}
@@ -285,15 +307,36 @@ func safePluginFile(path string) (os.FileInfo, error) {
 }
 
 func pluginDigest(path string, expected os.FileInfo) ([sha256.Size]byte, error) {
+	f, err := openPinnedPlugin(path)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	defer f.Close()
+	return pluginDigestFile(f, expected)
+}
+
+func pinPluginFile(path string, expected os.FileInfo) (*os.File, os.FileInfo, error) {
+	f, err := openPinnedPlugin(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	opened, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(expected, opened) {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("plugin executable changed while opening")
+	}
+	return f, opened, nil
+}
+
+func pluginDigestFile(f *os.File, expected os.FileInfo) ([sha256.Size]byte, error) {
 	var digest [sha256.Size]byte
 	if expected.Size() < 0 || expected.Size() > maxPluginExecutableBytes {
 		return digest, fmt.Errorf("plugin executable exceeds %d byte limit", maxPluginExecutableBytes)
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return digest, err
-	}
-	defer f.Close()
 	opened, err := f.Stat()
 	if err != nil {
 		return digest, err
@@ -302,7 +345,7 @@ func pluginDigest(path string, expected os.FileInfo) ([sha256.Size]byte, error) 
 		return digest, fmt.Errorf("plugin executable changed while opening")
 	}
 	h := sha256.New()
-	n, err := io.Copy(h, io.LimitReader(f, maxPluginExecutableBytes+1))
+	n, err := io.Copy(h, io.NewSectionReader(f, 0, maxPluginExecutableBytes+1))
 	if err != nil {
 		return digest, err
 	}

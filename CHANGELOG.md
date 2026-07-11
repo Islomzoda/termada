@@ -17,6 +17,8 @@ All notable changes to this project are documented here. The format is based on
   reconnects, with explicit output-gap reporting when retained history expired.
 - Serialize dashboard keystrokes so characters and Enter cannot arrive out of
   order, and keep input delivery failures visible until the operator retries.
+- Allow unsigned releases when both signing keys are absent, while rejecting a
+  partially configured signing key pair.
 
 ### Security
 - Redact detected prompt metadata before it reaches dashboard or API clients.

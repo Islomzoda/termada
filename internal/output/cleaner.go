@@ -17,19 +17,45 @@ import "bytes"
 // applications (vim/htop) are out of scope for the text representation and are
 // surfaced via the live dashboard stream instead.
 type Cleaner struct {
-	escCarry  []byte // a partial escape sequence awaiting more bytes
-	lineCarry []byte // the in-progress final line (after CR resolution), not yet terminated
+	escCarry       []byte // a partial escape sequence awaiting more bytes
+	escDiscard     byte   // oversized CSI/OSC sequence being discarded until its terminator
+	escDiscardPrev bool   // previous discarded OSC byte was ESC (for split ST)
+	lineCarry      []byte // the in-progress final line (after CR resolution), not yet terminated
 }
 
 const escByte = 0x1b
+
+const (
+	maxLineCarryBytes = 64 << 10
+	maxEscCarryBytes  = 4 << 10
+)
 
 // Clean consumes p and returns the cleaned text that is now complete. Bytes that
 // belong to an unterminated escape sequence or to the still-open final line are
 // retained internally and emitted on a later call or by Flush.
 func (c *Cleaner) Clean(p []byte) []byte {
+	if c.escDiscard != 0 {
+		var complete bool
+		p, complete, c.escDiscardPrev = discardEscapeRemainder(p, c.escDiscard, c.escDiscardPrev)
+		if !complete {
+			return nil
+		}
+		c.escDiscard = 0
+	}
+
 	// First, strip escape sequences, joining any carried partial sequence.
 	stripped, carry := stripEscapes(append(c.escCarry, p...))
-	c.escCarry = carry
+	if len(carry) > maxEscCarryBytes {
+		// A malformed or adversarial escape sequence must not retain unbounded
+		// bytes. Keep discarding it across chunks until its real terminator.
+		if len(carry) >= 2 && (carry[1] == '[' || carry[1] == ']') {
+			c.escDiscard = carry[1]
+			c.escDiscardPrev = carry[1] == ']' && carry[len(carry)-1] == escByte
+		}
+		c.escCarry = nil
+	} else {
+		c.escCarry = append(c.escCarry[:0], carry...)
+	}
 
 	// Resolve carriage returns line by line. A CR returns the cursor to the start
 	// of the current line; following text overwrites it. We keep only the final
@@ -50,7 +76,15 @@ func (c *Cleaner) Clean(p []byte) []byte {
 	// The remainder is the still-open final line; resolve CRs within it so the
 	// agent sees the latest progress-bar frame, but keep it carried (not yet
 	// newline-terminated).
-	c.lineCarry = resolveCR(work[start:])
+	pending := resolveCR(work[start:])
+	if len(pending) > maxLineCarryBytes {
+		// Stream the immutable prefix instead of retaining an unbounded line. If a
+		// later CR arrives it can only rewrite the bounded retained tail.
+		cut := len(pending) - maxLineCarryBytes
+		out.Write(pending[:cut])
+		pending = pending[cut:]
+	}
+	c.lineCarry = append(c.lineCarry[:0], pending...)
 	return out.Bytes()
 }
 
@@ -69,7 +103,28 @@ func (c *Cleaner) Flush() []byte {
 	// A dangling partial escape sequence at EOF is discarded (it was incomplete
 	// and cannot be rendered).
 	c.escCarry = nil
+	c.escDiscard = 0
+	c.escDiscardPrev = false
 	return out
+}
+
+// discardEscapeRemainder drops bytes belonging to an oversized CSI or OSC
+// sequence. It returns the first bytes after the terminator, if one was found.
+func discardEscapeRemainder(p []byte, kind byte, prevEsc bool) (rest []byte, complete bool, trailingEsc bool) {
+	for i, b := range p {
+		switch kind {
+		case '[':
+			if b >= 0x40 && b <= 0x7e {
+				return p[i+1:], true, false
+			}
+		case ']':
+			if b == 0x07 || (prevEsc && b == '\\') {
+				return p[i+1:], true, false
+			}
+			prevEsc = b == escByte
+		}
+	}
+	return nil, false, prevEsc
 }
 
 // resolveCR collapses carriage returns within a single line (no newlines

@@ -3,6 +3,7 @@ package vault
 import (
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -23,6 +24,42 @@ func TestUnlockThrottle(t *testing.T) {
 	err := v.Unlock("correct")
 	if err == nil || !strings.Contains(err.Error(), "too many") {
 		t.Fatalf("expected throttle after %d failures, got %v", unlockAttemptLimit, err)
+	}
+}
+
+func TestInitRejectsEmptyPassphrase(t *testing.T) {
+	v := New(filepath.Join(t.TempDir(), "v.age"))
+	if err := v.Init(""); err == nil {
+		t.Fatal("vault initialized with an empty passphrase")
+	}
+	if v.Exists() {
+		t.Fatal("empty-passphrase initialization created a vault file")
+	}
+}
+
+func TestConcurrentUnlockAttemptsCannotBypassThrottle(t *testing.T) {
+	v := New(filepath.Join(t.TempDir(), "v.age"))
+	if err := v.Init("correct"); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	v.Lock()
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < unlockAttemptLimit; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = v.Unlock("wrong")
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	err := v.Unlock("correct")
+	if err == nil || !strings.Contains(err.Error(), "too many") {
+		t.Fatalf("expected lockout after concurrent failures, got %v", err)
 	}
 }
 

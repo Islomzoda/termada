@@ -21,6 +21,7 @@ func TestRunRecipeHonorsTarget(t *testing.T) {
 	})
 	m.SetRecipes(map[string]Recipe{
 		"deploy": {Name: "deploy", Target: "prod", Steps: [][]string{{"true"}}},
+		"local":  {Name: "local", Target: "local", Steps: [][]string{{"true"}}},
 	})
 
 	// A local session passed to a prod-targeted recipe → fail loud.
@@ -34,6 +35,20 @@ func TestRunRecipeHonorsTarget(t *testing.T) {
 	}
 	if e, ok := err.(*errs.Error); !ok || e.Code != errs.InvalidArgument {
 		t.Fatalf("want invalid_argument, got %v", err)
+	}
+
+	remote, err := m.CreateSession("agent", "prod", "shell")
+	if err != nil {
+		t.Fatalf("create remote session: %v", err)
+	}
+	if _, err := m.RunRecipe("agent", remote.ID, "local"); err == nil {
+		t.Fatal("local-target recipe accepted a remote session")
+	}
+	if _, err := m.RunRecipe("other", remote.ID, "deploy"); err == nil {
+		t.Fatal("recipe accepted another owner's session")
+	}
+	if err := m.CloseSession("agent", remote.ID); err != nil {
+		t.Fatal(err)
 	}
 
 	// No session + target → an ad-hoc remote session is opened, used, and closed.

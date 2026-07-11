@@ -1,14 +1,17 @@
 // Package controlplane is the daemon's HTTP/JSON API (spec R4/§8). The daemon
-// serves it over a Unix socket (for the stdio shim, CLI and TUI — local trust)
-// and over loopback TCP with a token (for the browser dashboard).
+// serves it over a Unix socket (transport-derived agent/operator principals)
+// and over token-gated TCP for the browser dashboard.
 package controlplane
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/termada/termada/internal/audit"
@@ -21,6 +24,30 @@ import (
 	"github.com/termada/termada/internal/vault"
 )
 
+type principalRole uint8
+
+const (
+	roleAnonymous principalRole = iota
+	roleOperator
+)
+
+type requestPrincipal struct {
+	role principalRole
+}
+
+type principalContextKey struct{}
+
+// WithOperatorPrincipal marks a request as authenticated by the transport's
+// operator credential. Request JSON and ordinary headers can never set this.
+func WithOperatorPrincipal(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), principalContextKey{}, requestPrincipal{role: roleOperator}))
+}
+
+func isOperator(r *http.Request) bool {
+	p, _ := r.Context().Value(principalContextKey{}).(requestPrincipal)
+	return p.role == roleOperator
+}
+
 // Server exposes the engine over HTTP/JSON.
 type Server struct {
 	mgr     *engine.Manager
@@ -30,6 +57,9 @@ type Server struct {
 	vault   *vault.Vault
 	plugins *plugin.Manager
 	version string
+
+	runtimeMu    sync.RWMutex
+	dashboardURL string
 }
 
 // New builds a control-plane server.
@@ -37,16 +67,32 @@ func New(mgr *engine.Manager, b *bus.Bus, a *audit.Logger, fl *fleet.Manager, v 
 	return &Server{mgr: mgr, bus: b, audit: a, fleet: fl, vault: v, plugins: pl, version: version}
 }
 
+// SetDashboardURL publishes the actual browseable address selected by the
+// daemon. It may differ from config when serve --bind or port 0 is used.
+func (s *Server) SetDashboardURL(value string) {
+	s.runtimeMu.Lock()
+	s.dashboardURL = value
+	s.runtimeMu.Unlock()
+}
+
+func (s *Server) getDashboardURL() string {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	return s.dashboardURL
+}
+
 // publish emits an observability/audit event if a bus is wired (no-op otherwise).
-func (s *Server) publish(e bus.Event) {
+func (s *Server) publish(e bus.Event) error {
 	if s.bus != nil {
-		s.bus.Publish(e)
+		return s.bus.Publish(e)
 	}
+	return nil
 }
 
 // Mux returns the HTTP handler for the API and (later) the dashboard.
 func (s *Server) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ping", s.hPing)
 	mux.HandleFunc("/api/session/create", s.hSessionCreate)
 	mux.HandleFunc("/api/session/list", s.hSessionList)
 	mux.HandleFunc("/api/session/close", s.hSessionClose)
@@ -96,6 +142,10 @@ func (s *Server) Mux() *http.ServeMux {
 	return mux
 }
 
+func (s *Server) hPing(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"ok": true})
+}
+
 func (s *Server) hPluginTools(w http.ResponseWriter, r *http.Request) {
 	if s.plugins == nil {
 		writeJSON(w, map[string]any{"tools": []any{}})
@@ -114,8 +164,21 @@ func (s *Server) hPluginCall(w http.ResponseWriter, r *http.Request) {
 		Name  string         `json:"name"`
 		Args  map[string]any `json:"args"`
 	}
-	_ = decode(r, &req)
-	owner := s.ownerFor(r, req.Owner)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	if len(req.Name) == 0 || len(req.Name) > 129 || strings.Count(req.Name, ".") != 1 ||
+		strings.IndexFunc(req.Name, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.')
+		}) >= 0 {
+		writeErr(w, errs.New(errs.InvalidArgument, "invalid plugin tool name"))
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	// A plugin is an arbitrary executable the agent can invoke, so it must pass
 	// the same policy gate and leave the same audit trail as exec/fleet — without
 	// this it was an untraced, ungated execution vector. Model the call as the
@@ -139,13 +202,17 @@ func (s *Server) hPluginCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.publish(bus.Event{Type: bus.EvPluginStarted, AgentID: owner, Message: cmdline,
-		Data: map[string]any{"plugin": req.Name}})
+	if err := s.publish(bus.Event{Type: bus.EvPluginStarted, AgentID: owner, Message: cmdline,
+		Data: map[string]any{"plugin": req.Name}}); err != nil {
+		writeErr(w, errs.New(errs.Internal, "audit log unavailable - refusing plugin call: %v", err))
+		return
+	}
 	res, err := s.plugins.Call(req.Name, req.Args)
 	if err != nil {
+		redactedErr := s.mgr.Redactor().Redact(err.Error())
 		s.publish(bus.Event{Type: bus.EvPluginFinished, AgentID: owner, Message: cmdline,
-			Data: map[string]any{"plugin": req.Name, "error": err.Error()}})
-		writeErr(w, errs.New(errs.Internal, "%v", err))
+			Data: map[string]any{"plugin": req.Name, "error": redactedErr}})
+		writeErr(w, errs.New(errs.Internal, "%s", redactedErr))
 		return
 	}
 	s.publish(bus.Event{Type: bus.EvPluginFinished, AgentID: owner, Message: cmdline,
@@ -154,8 +221,13 @@ func (s *Server) hPluginCall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hSnapshotCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	var req execReq
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	res, err := s.mgr.SnapshotCreate(req.Path)
 	if err != nil {
 		writeErr(w, err)
@@ -165,8 +237,13 @@ func (s *Server) hSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hSnapshotRestore(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	var req execReq
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	if err := s.mgr.SnapshotRestore(req.Name); err != nil {
 		writeErr(w, err)
 		return
@@ -175,6 +252,9 @@ func (s *Server) hSnapshotRestore(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hSnapshotList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	writeJSON(w, map[string]any{"snapshots": s.mgr.SnapshotList()})
 }
 
@@ -190,6 +270,9 @@ func (s *Server) hServers(w http.ResponseWriter, r *http.Request) {
 // per SEC-7). The credential is stored in the vault; only the reference is kept
 // in the server inventory. Requires the vault unlocked.
 func (s *Server) hServerAdd(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	if s.fleet == nil {
 		writeErr(w, errs.New(errs.NotSupported, "fleet not available"))
 		return
@@ -203,7 +286,9 @@ func (s *Server) hServerAdd(w http.ResponseWriter, r *http.Request) {
 		Secret string   `json:"secret"` // optional: SSH key or password to store now
 		Tags   []string `json:"tags"`
 	}
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	if req.Name == "" || req.Host == "" || req.User == "" {
 		writeErr(w, errs.New(errs.InvalidArgument, "name, host and user are required"))
 		return
@@ -214,11 +299,14 @@ func (s *Server) hServerAdd(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, errs.New(errs.VaultLocked, "unlock the vault first to store the credential"))
 			return
 		}
+		if err := s.mgr.Redactor().AddLiteral(req.Secret); err != nil {
+			writeErr(w, errs.New(errs.Internal, "cannot safely register credential for redaction: %v", err))
+			return
+		}
 		if err := s.vault.Set(req.Name, req.Secret); err != nil {
 			writeErr(w, errs.New(errs.Internal, "store credential: %v", err))
 			return
 		}
-		s.mgr.Redactor().AddLiteral(req.Secret)
 		auth = req.Name
 	}
 	// auth may be empty: the SSH runner then uses the operator's own ssh-agent /
@@ -232,6 +320,9 @@ func (s *Server) hServerAdd(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hServerRemove(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	if s.fleet == nil {
 		writeErr(w, errs.New(errs.NotSupported, "fleet not available"))
 		return
@@ -239,7 +330,9 @@ func (s *Server) hServerRemove(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string `json:"name"`
 	}
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	if err := s.fleet.RemoveServer(req.Name); err != nil {
 		writeErr(w, err)
 		return
@@ -253,6 +346,9 @@ func (s *Server) hServerRemove(w http.ResponseWriter, r *http.Request) {
 // hServerTest checks connectivity by running `true` over SSH and reporting the
 // per-server status (ok / unreachable / timeout / denied / conn_lost).
 func (s *Server) hServerTest(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	if s.fleet == nil {
 		writeErr(w, errs.New(errs.NotSupported, "fleet not available"))
 		return
@@ -260,7 +356,9 @@ func (s *Server) hServerTest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string `json:"name"`
 	}
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	res, err := s.fleet.Run([]string{"true"}, []string{req.Name}, 1)
 	if err != nil {
 		writeErr(w, err)
@@ -286,14 +384,20 @@ func (s *Server) hFleetRun(w http.ResponseWriter, r *http.Request) {
 		Tags        []string `json:"tags"`
 		Parallelism int      `json:"parallelism"`
 	}
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	selector := append(append([]string{}, req.Servers...), req.Tags...)
 	// Attribute to the acting agent and make the run observable: fleet runs bypass
 	// the per-job engine path, so without these events they'd be invisible in the
 	// dashboard and the audit log (which is fed from the bus). We record the
 	// command + per-server outcome — not stdout/stderr (too large, may carry
 	// secrets; the live result still returns those to the caller).
-	owner := s.ownerFor(r, req.Owner)
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	cmdline := strings.Join(req.Command, " ")
 	// Fleet commands must pass the agent's policy too. The per-job engine path
 	// gates local commands (allow/deny/confirm); fleet_run bypassed it, so an agent
@@ -316,8 +420,11 @@ func (s *Server) hFleetRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.publish(bus.Event{Type: bus.EvFleetStarted, AgentID: owner, Message: cmdline,
-		Data: map[string]any{"command": req.Command, "servers": selector}})
+	if err := s.publish(bus.Event{Type: bus.EvFleetStarted, AgentID: owner, Message: cmdline,
+		Data: map[string]any{"command": req.Command, "servers": selector}}); err != nil {
+		writeErr(w, errs.New(errs.Internal, "audit log unavailable - refusing fleet run: %v", err))
+		return
+	}
 	res, err := s.fleet.Run(req.Command, selector, req.Parallelism)
 	if err != nil {
 		s.publish(bus.Event{Type: bus.EvFleetFinished, AgentID: owner, Message: cmdline,
@@ -325,6 +432,14 @@ func (s *Server) hFleetRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Fleet bypasses the engine's per-job output buffers, so redact its returned
+	// streams explicitly before either the agent response or outcome audit data.
+	for i := range res.Results {
+		res.Results[i].Stdout = s.mgr.Redactor().Redact(res.Results[i].Stdout)
+		res.Results[i].Stderr = s.mgr.Redactor().Redact(res.Results[i].Stderr)
+		res.Results[i].Error = s.mgr.Redactor().Redact(res.Results[i].Error)
+	}
+	fleet.BoundRunOutput(res)
 	outcomes := make([]map[string]any, 0, len(res.Results))
 	for _, rr := range res.Results {
 		o := map[string]any{"server": rr.Server, "status": rr.Status, "exit_code": rr.ExitCode, "duration_ms": rr.DurationMS}
@@ -339,6 +454,9 @@ func (s *Server) hFleetRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hVaultUnlock(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	if s.vault == nil {
 		writeErr(w, errs.New(errs.NotSupported, "no vault configured"))
 		return
@@ -346,7 +464,9 @@ func (s *Server) hVaultUnlock(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Passphrase string `json:"passphrase"`
 	}
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	// First use: if no vault file exists yet, create it with this passphrase;
 	// otherwise unlock the existing one. Lets a non-technical user set up
 	// credentials entirely from the dashboard.
@@ -362,12 +482,19 @@ func (s *Server) hVaultUnlock(w http.ResponseWriter, r *http.Request) {
 	}
 	// Register secrets with the redactor so they can never echo back to agents.
 	for _, val := range s.vault.Values() {
-		s.mgr.Redactor().AddLiteral(val)
+		if err := s.mgr.Redactor().AddLiteral(val); err != nil {
+			s.vault.Lock()
+			writeErr(w, errs.New(errs.Internal, "cannot safely register vault secrets for redaction: %v", err))
+			return
+		}
 	}
 	writeJSON(w, map[string]any{"ok": true, "secrets": len(s.vault.List())})
 }
 
 func (s *Server) hVaultStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	locked := true
 	exists := false
 	if s.vault != nil {
@@ -379,13 +506,21 @@ func (s *Server) hVaultStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hForwardStart(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		Owner      string `json:"owner"`
 		Server     string `json:"server"`
 		RemoteHost string `json:"remote_host"`
 		RemotePort int    `json:"remote_port"`
 		LocalBind  string `json:"local_bind"`
 	}
-	_ = decode(r, &req)
-	res, err := s.mgr.PortForward(req.Server, req.RemoteHost, req.RemotePort, req.LocalBind)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	res, err := s.mgr.PortForward(owner, req.Server, req.RemoteHost, req.RemotePort, req.LocalBind)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -394,15 +529,32 @@ func (s *Server) hForwardStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hForwardList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"forwards": s.mgr.PortForwardList()})
+	var req execReq
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"forwards": s.mgr.PortForwardList(owner)})
 }
 
 func (s *Server) hForwardClose(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID string `json:"id"`
+		Owner string `json:"owner"`
+		ID    string `json:"id"`
 	}
-	_ = decode(r, &req)
-	if err := s.mgr.PortForwardClose(req.ID); err != nil {
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := s.mgr.PortForwardClose(owner, req.ID); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -411,8 +563,15 @@ func (s *Server) hForwardClose(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hFileRead(w http.ResponseWriter, r *http.Request) {
 	var req execReq
-	_ = decode(r, &req)
-	res, err := s.mgr.FileReadAt(req.Session, req.Path, req.MaxBytes)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	res, err := s.mgr.FileReadFor(owner, req.Session, req.Path, req.MaxBytes)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -422,8 +581,15 @@ func (s *Server) hFileRead(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hFileWrite(w http.ResponseWriter, r *http.Request) {
 	var req execReq
-	_ = decode(r, &req)
-	res, err := s.mgr.FileWriteAt(req.Session, req.Path, req.Content, req.FileMode)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	res, err := s.mgr.FileWriteFor(owner, req.Session, req.Path, req.Content, req.FileMode)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -437,8 +603,15 @@ func (s *Server) hRecipeList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hRecipeRun(w http.ResponseWriter, r *http.Request) {
 	var req execReq
-	_ = decode(r, &req)
-	res, err := s.mgr.RunRecipe(req.Owner, req.Session, req.Name)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	res, err := s.mgr.RunRecipe(owner, req.Session, req.Name)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -466,15 +639,52 @@ func writeErr(w http.ResponseWriter, err error) {
 // ownerFor resolves the acting agent: a configured agent token (header) wins
 // over the self-asserted owner, making identity non-spoofable when tokens are
 // configured (MA-2). Falls back to the asserted owner in local/dev mode.
-func (s *Server) ownerFor(r *http.Request, asserted string) string {
-	return s.mgr.ResolveAgent(r.Header.Get("X-Termada-Agent-Token"), asserted)
+func (s *Server) ownerFor(r *http.Request, asserted string) (string, error) {
+	if isOperator(r) {
+		return "", nil
+	}
+	return s.mgr.AuthenticateAgent(r.Header.Get("X-Termada-Agent-Token"), asserted)
+}
+
+func (s *Server) requireOperator(w http.ResponseWriter, r *http.Request) bool {
+	if isOperator(r) {
+		return true
+	}
+	writeErr(w, errs.New(errs.DeniedByPolicy, "authenticated human operator required"))
+	return false
 }
 
 func decode(r *http.Request, v any) error {
 	if r.Body == nil {
 		return nil
 	}
-	return json.NewDecoder(r.Body).Decode(v)
+	limited := &io.LimitedReader{R: r.Body, N: maxRequestBodyBytes + 1}
+	dec := json.NewDecoder(limited)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("request body must contain one JSON value")
+		}
+		return err
+	}
+	if limited.N <= 0 {
+		return fmt.Errorf("request body exceeds %d byte limit", maxRequestBodyBytes)
+	}
+	return nil
+}
+
+const maxRequestBodyBytes = 8 << 20
+
+func decodeRequest(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := decode(r, v); err != nil {
+		writeErr(w, errs.New(errs.InvalidArgument, "invalid request body: %v", err))
+		return false
+	}
+	return true
 }
 
 type execReq struct {
@@ -506,8 +716,15 @@ type execReq struct {
 
 func (s *Server) hSessionCreate(w http.ResponseWriter, r *http.Request) {
 	var req execReq
-	_ = decode(r, &req)
-	sess, err := s.mgr.CreateSession(s.ownerFor(r, req.Owner), req.Target, req.Mode)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	sess, err := s.mgr.CreateSession(owner, req.Target, req.Mode)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -516,13 +733,25 @@ func (s *Server) hSessionCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hSessionList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"sessions": s.mgr.ListSessions()})
+	owner, err := s.ownerFor(r, r.URL.Query().Get("owner"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"sessions": s.mgr.ListSessionsFor(owner)})
 }
 
 func (s *Server) hSessionClose(w http.ResponseWriter, r *http.Request) {
 	var req execReq
-	_ = decode(r, &req)
-	if err := s.mgr.CloseSession(s.ownerFor(r, req.Owner), req.SessionID); err != nil {
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := s.mgr.CloseSession(owner, req.SessionID); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -531,8 +760,15 @@ func (s *Server) hSessionClose(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hExecRun(w http.ResponseWriter, r *http.Request) {
 	var req execReq
-	_ = decode(r, &req)
-	res, err := s.mgr.Run(s.ownerFor(r, req.Owner), req.Session, req.Command, req.Mode, req.TimeoutMS)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	res, err := s.mgr.Run(owner, req.Session, req.Command, req.Mode, req.TimeoutMS)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -542,8 +778,15 @@ func (s *Server) hExecRun(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hExecStart(w http.ResponseWriter, r *http.Request) {
 	var req execReq
-	_ = decode(r, &req)
-	job, err := s.mgr.Start(s.ownerFor(r, req.Owner), req.Session, req.Command, req.Mode)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	job, err := s.mgr.Start(owner, req.Session, req.Command, req.Mode)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -553,8 +796,15 @@ func (s *Server) hExecStart(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hExecPoll(w http.ResponseWriter, r *http.Request) {
 	var req execReq
-	_ = decode(r, &req)
-	res, err := s.mgr.PollWait(s.ownerFor(r, req.Owner), req.JobID, req.Cursor, req.WaitMS)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	res, err := s.mgr.PollWait(owner, req.JobID, req.Cursor, req.WaitMS)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -564,18 +814,20 @@ func (s *Server) hExecPoll(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hExecWrite(w http.ResponseWriter, r *http.Request) {
 	var req execReq
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	appendNL := true
 	if req.AppendNewline != nil {
 		appendNL = *req.AppendNewline
 	}
-	// human:true (the dashboard's takeover input) bypasses owner scoping, same as
-	// it already bypasses the output/input hold.
-	owner := ""
-	if !req.Human {
-		owner = s.ownerFor(r, req.Owner)
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
 	}
-	if err := s.mgr.Write(owner, req.JobID, req.Input, appendNL, req.Secret, req.Human); err != nil {
+	human := isOperator(r)
+	if err := s.mgr.Write(owner, req.JobID, req.Input, appendNL, req.Secret, human); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -585,6 +837,9 @@ func (s *Server) hExecWrite(w http.ResponseWriter, r *http.Request) {
 // hSessionStream streams a session's continuous terminal output (the whole
 // shell, across jobs) as SSE — the live "session terminal" in the dashboard.
 func (s *Server) hSessionStream(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -609,7 +864,7 @@ func (s *Server) hSessionStream(w http.ResponseWriter, r *http.Request) {
 			return
 		default:
 		}
-		res, err := s.mgr.SessionTail(sessionID, cursor)
+		res, err := s.mgr.SessionTailFor("", sessionID, cursor)
 		if err != nil {
 			send(map[string]any{"error": err.Error()})
 			return
@@ -627,13 +882,24 @@ func (s *Server) hSessionStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hSessionWrite(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	var req execReq
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	appendNL := true
 	if req.AppendNewline != nil {
 		appendNL = *req.AppendNewline
 	}
-	if err := s.mgr.SessionWriteInput(req.SessionID, req.Input, appendNL, req.Human); err != nil {
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	human := isOperator(r)
+	if err := s.mgr.SessionWriteInputFor(owner, req.SessionID, req.Input, appendNL, human); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -641,8 +907,13 @@ func (s *Server) hSessionWrite(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hExecHold(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	var req execReq
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	if err := s.mgr.Hold(req.JobID, req.HoldInput, req.HoldOutput); err != nil {
 		writeErr(w, err)
 		return
@@ -654,6 +925,9 @@ func (s *Server) hExecHold(w http.ResponseWriter, r *http.Request) {
 // live terminal in the dashboard. It uses human=true so it always sees output,
 // even when the agent's output is held.
 func (s *Server) hExecStream(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -687,7 +961,7 @@ func (s *Server) hExecStream(w http.ResponseWriter, r *http.Request) {
 			send(map[string]any{"chunk": res.StdoutChunk, "status": res.Status})
 		}
 		cursor = res.NextCursor
-		if res.Status.Terminal() {
+		if res.Status.Terminal() && !res.HasMore {
 			send(map[string]any{"status": res.Status, "done": true})
 			return
 		}
@@ -697,8 +971,15 @@ func (s *Server) hExecStream(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hExecSignal(w http.ResponseWriter, r *http.Request) {
 	var req execReq
-	_ = decode(r, &req)
-	if err := s.mgr.Signal(s.ownerFor(r, req.Owner), req.JobID, req.Signal); err != nil {
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := s.mgr.Signal(owner, req.JobID, req.Signal); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -707,12 +988,18 @@ func (s *Server) hExecSignal(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hExecKill(w http.ResponseWriter, r *http.Request) {
 	var req execReq
-	_ = decode(r, &req)
-	// The dashboard's killJob() sends neither an agent token nor req.Owner, so
-	// ownerFor naturally resolves to "" (unscoped) for it — it can kill any
-	// agent's job, same as hStopAll below. An MCP-shim call carries its agent
-	// identity (token or self-asserted Owner) and is scoped to its own jobs.
-	if err := s.mgr.Kill(s.ownerFor(r, req.Owner), req.JobID); err != nil {
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	// The authenticated dashboard carries the operator principal and can kill any
+	// job. An MCP shim resolves to an agent principal and stays owner-scoped;
+	// request JSON alone can grant neither role.
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := s.mgr.Kill(owner, req.JobID); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -724,14 +1011,25 @@ func (s *Server) hExecList(w http.ResponseWriter, r *http.Request) {
 	if filter == "" {
 		filter = "all"
 	}
-	owner := s.ownerFor(r, r.URL.Query().Get("owner"))
+	owner, err := s.ownerFor(r, r.URL.Query().Get("owner"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	writeJSON(w, map[string]any{"jobs": s.mgr.ListJobs(owner, filter)})
 }
 
 func (s *Server) hLogsTail(w http.ResponseWriter, r *http.Request) {
 	var req execReq
-	_ = decode(r, &req)
-	res, err := s.mgr.Tail(s.ownerFor(r, req.Owner), req.JobID, req.Cursor, false)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	res, err := s.mgr.Tail(owner, req.JobID, req.Cursor, isOperator(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -740,12 +1038,20 @@ func (s *Server) hLogsTail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hPending(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	writeJSON(w, map[string]any{"pending": s.mgr.ListPending()})
 }
 
 func (s *Server) hApprove(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	var req execReq
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	by := req.By
 	if by == "" {
 		by = "dashboard"
@@ -758,8 +1064,13 @@ func (s *Server) hApprove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hDeny(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	var req execReq
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	by := req.By
 	if by == "" {
 		by = "dashboard"
@@ -773,6 +1084,9 @@ func (s *Server) hDeny(w http.ResponseWriter, r *http.Request) {
 
 // hMetrics exposes Prometheus metrics (spec §8.6).
 func (s *Server) hMetrics(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	jobs := s.mgr.ListJobs("", "all")
 	active := 0
 	for _, j := range jobs {
@@ -791,7 +1105,7 @@ func (s *Server) hMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	out("termada_jobs_total", "Jobs known to the registry.", "gauge", len(jobs))
 	out("termada_jobs_active", "Jobs currently running/awaiting.", "gauge", active)
-	out("termada_sessions", "Open sessions.", "gauge", len(s.mgr.ListSessions()))
+	out("termada_sessions", "Open sessions.", "gauge", len(s.mgr.ListSessionsFor("")))
 	out("termada_pending_approvals", "Commands awaiting human approval.", "gauge", len(s.mgr.ListPending()))
 	out("termada_agents", "Distinct agents seen.", "gauge", len(agents))
 	out("termada_agent_connections_total", "Total agent connections.", "counter", conns)
@@ -801,27 +1115,42 @@ func (s *Server) hAgentConnect(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Agent string `json:"agent"`
 	}
-	_ = decode(r, &req)
-	s.mgr.RecordConnect(s.ownerFor(r, req.Agent))
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Agent)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	s.mgr.RecordConnect(owner)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) hStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	servers := []fleet.ServerInfo{}
 	if s.fleet != nil {
 		servers = s.fleet.ServerList()
 	}
 	writeJSON(w, map[string]any{
-		"version":  s.version,
-		"sessions": s.mgr.ListSessions(),
-		"jobs":     s.mgr.ListJobs("", "active"),
-		"pending":  s.mgr.ListPending(),
-		"servers":  servers,
-		"agents":   s.mgr.Agents(),
+		"version":       s.version,
+		"dashboard_url": s.getDashboardURL(),
+		"sessions":      s.mgr.ListSessionsFor(""),
+		"jobs":          s.mgr.ListJobs("", "active"),
+		"pending":       s.mgr.ListPending(),
+		"servers":       servers,
+		"agents":        s.mgr.Agents(),
+		"persistence":   s.mgr.PersistenceStatus(),
 	})
 }
 
 func (s *Server) hStopAll(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	n := 0
 	for _, j := range s.mgr.ListJobs("", "active") {
 		if !j.Status.Terminal() {
@@ -837,6 +1166,9 @@ func (s *Server) hStopAll(w http.ResponseWriter, r *http.Request) {
 // dashboard-managed (editable) policy names. Policies defined in config.yaml are
 // returned but flagged as not managed, so the dashboard shows them read-only.
 func (s *Server) hPolicies(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	out := map[string]any{"agents": s.mgr.AgentPolicies(), "policies": map[string]any{}, "managed": map[string]bool{}}
 	if p := s.mgr.Policy(); p != nil {
 		out["policies"] = p.Policies()
@@ -850,6 +1182,9 @@ func (s *Server) hPolicies(w http.ResponseWriter, r *http.Request) {
 // defined in config.yaml is read-only here. The change takes effect immediately
 // and is persisted across restarts.
 func (s *Server) hPolicySet(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	p := s.mgr.Policy()
 	if p == nil {
 		writeErr(w, errs.New(errs.NotSupported, "policy engine not available"))
@@ -861,7 +1196,9 @@ func (s *Server) hPolicySet(w http.ResponseWriter, r *http.Request) {
 		Deny    []string `json:"deny"`
 		Confirm []string `json:"confirm"`
 	}
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	// The dashboard form doesn't edit auto-answer rules, so a plain edit must
 	// preserve any the policy already carries rather than silently dropping them.
 	var auto []policy.AutoAnswer
@@ -884,6 +1221,9 @@ func (s *Server) hPolicySet(w http.ResponseWriter, r *http.Request) {
 // delete a policy still assigned to an agent — otherwise that agent would
 // silently fall back to allow-all (Evaluate treats an unknown policy as Allow).
 func (s *Server) hPolicyRemove(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	p := s.mgr.Policy()
 	if p == nil {
 		writeErr(w, errs.New(errs.NotSupported, "policy engine not available"))
@@ -892,7 +1232,9 @@ func (s *Server) hPolicyRemove(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string `json:"name"`
 	}
-	_ = decode(r, &req)
+	if !decodeRequest(w, r, &req) {
+		return
+	}
 	for agentID, polName := range s.mgr.AgentPolicies() {
 		if polName == req.Name {
 			writeErr(w, errs.New(errs.DeniedByPolicy, "policy %q is assigned to agent %q — reassign that agent in config.yaml before deleting it", req.Name, agentID))
@@ -918,11 +1260,17 @@ func cleanList(in []string) []string {
 }
 
 func (s *Server) hAudit(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	n := 100
 	if v := r.URL.Query().Get("n"); v != "" {
-		if x, err := strconv.Atoi(v); err == nil {
-			n = x
+		x, err := strconv.Atoi(v)
+		if err != nil || x < 1 || x > 1000 {
+			writeErr(w, errs.New(errs.InvalidArgument, "audit n must be in 1..1000"))
+			return
 		}
+		n = x
 	}
 	if s.audit == nil {
 		writeJSON(w, map[string]any{"records": []any{}})
@@ -938,6 +1286,9 @@ func (s *Server) hAudit(w http.ResponseWriter, r *http.Request) {
 
 // hEvents streams bus events as Server-Sent Events.
 func (s *Server) hEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok || s.bus == nil {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)

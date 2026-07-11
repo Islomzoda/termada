@@ -3,6 +3,7 @@ package sshx
 import (
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"time"
 
@@ -17,24 +18,80 @@ import (
 // goroutine is still writing to it — the x/crypto/ssh write path is not safe
 // against a concurrent close (use-after-close + a -race-flagged channel race).
 type sshConn struct {
-	client *ssh.Client
-	sess   *ssh.Session
-	stdin  io.WriteCloser
-	stdout io.Reader
+	client       *ssh.Client
+	sess         *ssh.Session
+	stdin        io.WriteCloser
+	stdout       io.Reader
+	transport    net.Conn
+	writeTimeout time.Duration
 
-	mu     sync.RWMutex // R during write, W during close
-	closed bool
+	writeMu sync.Mutex   // preserves byte ordering across concurrent callers
+	mu      sync.RWMutex // R during write, W during close
+	closed  bool
 }
 
-// write sends to the connection's stdin, blocking a concurrent close until it
-// returns; once closed it fails fast instead of touching a torn-down channel.
+type writeResult struct {
+	n   int
+	err error
+}
+
+// write sends to the connection's stdin. The explicit timer is required in
+// addition to a TCP write deadline: an SSH channel can block locally waiting
+// for a remote window adjustment without performing any socket write.
 func (c *sshConn) write(p []byte) (int, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.closed {
-		return 0, io.ErrClosedPipe
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	write := func(payload []byte) writeResult {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		if c.closed {
+			return writeResult{err: io.ErrClosedPipe}
+		}
+		if c.transport != nil && c.writeTimeout > 0 {
+			if err := c.transport.SetWriteDeadline(time.Now().Add(c.writeTimeout)); err != nil {
+				return writeResult{err: err}
+			}
+		}
+		n, err := c.stdin.Write(payload)
+		if c.transport != nil && c.writeTimeout > 0 {
+			if clearErr := c.transport.SetWriteDeadline(time.Time{}); err == nil {
+				err = clearErr
+			}
+		}
+		return writeResult{n: n, err: err}
 	}
-	return c.stdin.Write(p)
+	if c.writeTimeout <= 0 {
+		result := write(p)
+		return result.n, result.err
+	}
+
+	// Own the bytes until the worker returns; callers may reuse their buffer as
+	// soon as this method times out.
+	payload := append([]byte(nil), p...)
+	done := make(chan writeResult, 1)
+	go func() { done <- write(payload) }()
+	timer := time.NewTimer(c.writeTimeout)
+	defer timer.Stop()
+	select {
+	case result := <-done:
+		if result.err != nil && c.transport != nil {
+			_ = c.transport.Close()
+		}
+		return result.n, result.err
+	case <-timer.C:
+		if c.transport != nil {
+			// Closing net.Conn is concurrency-safe and wakes the SSH mux, including
+			// writers blocked waiting for remote channel-window credit.
+			_ = c.transport.Close()
+		}
+		select {
+		case result := <-done:
+			return result.n, fmt.Errorf("SSH write timed out after %s", c.writeTimeout)
+		case <-time.After(time.Second):
+			return 0, fmt.Errorf("SSH write timed out after %s", c.writeTimeout)
+		}
+	}
 }
 
 // sshShell is a persistent interactive shell over an SSH PTY. It satisfies
@@ -44,13 +101,17 @@ func (c *sshConn) write(p []byte) (int, error) {
 type sshShell struct {
 	open func() (*sshConn, error) // (re)establish a connection + tmux re-attach
 
-	mu   sync.Mutex
-	conn *sshConn
+	mu     sync.Mutex
+	conn   *sshConn
+	closed bool
 }
 
 func (s *sshShell) current() *sshConn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
 	return s.conn
 }
 
@@ -72,6 +133,11 @@ func (s *sshShell) Write(p []byte) (int, error) {
 
 func (s *sshShell) Close() error {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
 	c := s.conn
 	s.conn = nil
 	s.mu.Unlock()
@@ -104,6 +170,11 @@ func (s *sshShell) Reconnect() error {
 		return err
 	}
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = closeConn(c)
+		return io.ErrClosedPipe
+	}
 	old := s.conn
 	s.conn = c
 	s.mu.Unlock()
@@ -140,6 +211,9 @@ func keepalive(c *sshConn, interval time.Duration) {
 				return
 			}
 		case <-time.After(interval):
+			if c.transport != nil {
+				_ = c.transport.Close()
+			}
 			_ = closeConn(c)
 			return
 		}
@@ -149,6 +223,12 @@ func keepalive(c *sshConn, interval time.Duration) {
 func closeConn(c *sshConn) error {
 	if c == nil {
 		return nil
+	}
+	// Break a channel writer that is waiting for remote window credit before
+	// waiting on its read lock. net.Conn.Close is concurrency-safe and wakes the
+	// SSH mux; the channel/session close below remains serialized with writes.
+	if c.transport != nil {
+		_ = c.transport.Close()
 	}
 	// Take the write lock so we wait for any in-flight write() to finish and
 	// block new ones (they'll see closed==true and bail) before tearing down.
@@ -181,9 +261,13 @@ func (r *Runner) OpenShell(server fleet.Server, cols, rows int) (engine.ShellCon
 		rows = 50
 	}
 	open := func() (*sshConn, error) {
-		client, err := r.dial(server)
+		client, transport, err := r.dialTransport(server)
 		if err != nil {
 			return nil, err
+		}
+		if err := setDeadline(transport, r.ioTimeout); err != nil {
+			_ = client.Close()
+			return nil, fmt.Errorf("set SSH shell setup deadline: %w", err)
 		}
 		sess, err := client.NewSession()
 		if err != nil {
@@ -213,7 +297,12 @@ func (r *Runner) OpenShell(server fleet.Server, cols, rows int) (engine.ShellCon
 			_ = client.Close()
 			return nil, err
 		}
-		c := &sshConn{client: client, sess: sess, stdin: stdin, stdout: stdout}
+		if err := transport.SetDeadline(time.Time{}); err != nil {
+			_ = sess.Close()
+			_ = client.Close()
+			return nil, fmt.Errorf("clear SSH shell setup deadline: %w", err)
+		}
+		c := &sshConn{client: client, sess: sess, stdin: stdin, stdout: stdout, transport: transport, writeTimeout: r.ioTimeout}
 		go keepalive(c, r.keepalive) // detect a silently-dropped link → reconnect
 		return c, nil
 	}

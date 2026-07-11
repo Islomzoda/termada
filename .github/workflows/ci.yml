@@ -15,10 +15,36 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.26.5'
+      - name: formatting
+        shell: bash
+        run: test -z "$(gofmt -l $(git ls-files '*.go'))"
+      - name: verify modules
+        run: go mod verify
+      - name: validate installer
+        if: runner.os != 'Windows'
+        run: sh -n install.sh
       - name: vet
         run: go vet ./...
       - name: test
         run: go test -race -p 1 ./...   # serialize packages: avoids cross-package CPU contention flaking PTY tests
       - name: build
         run: go build -o bin/termada ./cmd/termada
+
+  cross-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.5'
+      - name: cross-build
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -o /tmp/termada-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/termada

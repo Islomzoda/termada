@@ -12,7 +12,7 @@
       "registryType": "oci",
       "identifier": "ghcr.io/islomzoda/termada:0.7.5",
       "transport": { "type": "stdio" },
-      "runtimeArguments": [
+      "packageArguments": [
         { "type": "positional", "value": "serve" },
         { "type": "positional", "value": "--stdio" }
       ]

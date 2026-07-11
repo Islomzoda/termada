@@ -56,7 +56,7 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "exec_run",
-		Description: "Run a command and wait for it, returning {status, exit_code, stdout} (empty/false fields are omitted to stay light). `stdout` is the COMBINED stdout+stderr stream (the command runs on a PTY, so the two can't be separated) — if you need them apart, redirect inside the command, e.g. [\"bash\",\"-lc\",\"cmd 2>/tmp/err\"]. cwd and env PERSIST across calls in the same session — omit `session` to use your own per-agent default session (state still persists). NOTE: `command` is an argv array, not a shell line; $VARS, |, &&, >, globs and `cd x && y` are literal — for shell features use [\"bash\",\"-lc\",\"<line>\"]. A command still going past timeout_ms returns status=running/backgrounded with a job_id (plus waited_ms/timeout_ms so you can tell slow from hung) — stream it with exec_poll.",
+		Description: "Run a command and wait for it, returning {status, exit_code, stdout} (empty/false fields are omitted to stay light). `stdout` is the COMBINED stdout+stderr stream (the command runs on a PTY, so the two can't be separated) — if you need them apart, redirect inside the command, e.g. [\"bash\",\"-lc\",\"cmd 2>/tmp/err\"]. cwd and env PERSIST across calls in the same session — omit `session` to use your own per-agent default session (state still persists). NOTE: `command` is an argv array, not a shell line; $VARS, |, &&, >, globs and `cd x && y` are literal — for shell features use [\"bash\",\"-lc\",\"<line>\"]. A command still going past timeout_ms returns status=running/backgrounded with a job_id (plus waited_ms/timeout_ms so you can tell slow from hung) — stream it with exec_poll. A running/backgrounded job still occupies its session; create another session for parallel work.",
 		InputSchema: obj(map[string]any{
 			"command":    argvSchema,
 			"session":    sessionSchema,
@@ -78,7 +78,7 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "exec_start",
-		Description: "Start a command asynchronously; returns {job_id, status} immediately. Stream output with exec_poll(job_id, cursor). Same argv/session rules as exec_run. (exec_run with mode=\"background\" does the same thing — use whichever reads clearer.)",
+		Description: "Start a command asynchronously; returns {job_id, status} immediately. Stream output with exec_poll(job_id, cursor). Same argv/session rules as exec_run. (exec_run with mode=\"background\" does the same thing — use whichever reads clearer.) A background job still occupies its session; create another session for parallel work.",
 		InputSchema: obj(map[string]any{
 			"command": argvSchema,
 			"session": sessionSchema,
@@ -103,7 +103,7 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "exec_poll",
-		Description: "Fetch new output for a job since `cursor` (omit cursor to read from the start), plus status. Pass the returned next_cursor on your next poll. Set `wait_ms` to long-poll: the call then blocks (up to 30s) until there's new output, the job ends, or it needs input — so you can follow a job without a manual poll-sleep loop. status=awaiting_input means the command is blocked on stdin — answer it with exec_write. When status is terminal (exited/killed/…), there is no next_cursor and nothing more to poll.",
+		Description: "Fetch new output for a job since `cursor` (omit cursor to read from the start), plus status. Pass the returned next_cursor on your next poll. Set `wait_ms` to long-poll: the call then blocks (up to 30s) until there's new output, the job ends, or it needs input — so you can follow a job without a manual poll-sleep loop. status=awaiting_input means the command is blocked on stdin — answer it with exec_write. A terminal result can still have has_more=true when output was page-capped; keep polling its next_cursor until has_more is absent/false.",
 		InputSchema: obj(map[string]any{
 			"job_id":  strSchema,
 			"cursor":  map[string]any{"type": "string", "description": "the next_cursor from your previous poll; omit to read from the start of retained output"},
@@ -120,7 +120,7 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "exec_write",
-		Description: "Answer a job blocked on stdin (use when a poll shows status=awaiting_input): sends `input` to the job's PTY. append_newline defaults true (presses Enter). Set secret=true for passwords so the value is redacted and never logged.",
+		Description: "Answer a job blocked on stdin (use when a poll shows status=awaiting_input): sends `input` to the job's PTY. append_newline defaults true (presses Enter). For passwords, secret=true registers the exact input as a redaction literal and omits it from normal input logging; transformed or split echoes remain best-effort redaction.",
 		InputSchema: obj(map[string]any{
 			"job_id":         strSchema,
 			"input":          strSchema,
@@ -138,7 +138,7 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "exec_signal",
-		Description: "Send a signal (SIGTERM/SIGKILL/SIGINT/SIGHUP) to a running job's process group.",
+		Description: "Signal a running job. Local PTY sessions send the requested SIGTERM/SIGKILL/SIGINT/SIGHUP to the command's real process group. Remote SSH PTYs cannot deliver named POSIX signals: SIGTERM, SIGKILL and SIGINT degrade to a best-effort Ctrl-C interrupt, while unsupported names such as SIGHUP return an error.",
 		InputSchema: obj(map[string]any{
 			"job_id": strSchema,
 			"signal": sigSchema,
@@ -154,7 +154,7 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "exec_kill",
-		Description: "Force-kill a running job (SIGKILL to its process group).",
+		Description: "Stop a running job. Local PTY sessions force-kill the command process group with SIGKILL. Remote SSH PTYs only receive a best-effort Ctrl-C interrupt, which is not a guaranteed force-kill.",
 		InputSchema: obj(map[string]any{"job_id": strSchema}, "job_id"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
 			if err := mgr.Kill(s.agentID, argString(a, "job_id")); err != nil {
@@ -206,7 +206,7 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "session_create",
-		Description: "Create a named persistent-shell session that preserves cwd/env between commands. Optional — if you just want persistence you can skip this and let exec_run use your per-agent default session. Create one explicitly when you want a SECOND independent shell (e.g. a separate cwd/venv) or a remote one: target=local (default) or a configured server name for a persistent remote SSH session.",
+		Description: "Create a named persistent-shell session that preserves cwd/env between commands. Optional — if you just want persistence you can skip this and let exec_run use your per-agent default session. Create one explicitly when you want a SECOND independent shell (e.g. a separate cwd/venv) or a remote one: target=local (default) or a configured server name for a persistent remote SSH session. Session creation is capped at 32 sessions per owner and 128 total; exceeding either limit returns parallelism_exceeded.",
 		InputSchema: obj(map[string]any{
 			"target": map[string]any{"type": "string", "description": "\"local\" (default) or a configured server name for a remote SSH session"},
 			"mode":   map[string]any{"type": "string", "enum": []string{"shell"}},
@@ -225,7 +225,7 @@ func (s *Server) registerTools() {
 		Description: "List active sessions.",
 		InputSchema: emptySchema,
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			return map[string]any{"sessions": mgr.ListSessions()}, nil
+			return map[string]any{"sessions": mgr.ListSessions(s.agentID)}, nil
 		},
 	})
 
@@ -256,14 +256,14 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "file_read",
-		Description: "Read a file (secrets best-effort redacted). Returns {content, size}. Session-aware but NOT cwd-relative — pass an absolute path: with no/local `session` it reads the daemon host; with a remote `session` it reads that server's file over SFTP (binary-safe). Large files are capped (set max_bytes); a `truncated:true` flag appears only when content was cut.",
+		Description: "Read up to 1 MiB of a UTF-8 text file (secrets best-effort redacted). Returns {content, size}. Session-aware but NOT cwd-relative — pass an absolute path. Omit `session` to use the default local target, or pass a session_id whose target is local; local file tools are disabled on Windows and when security.run_as is enabled. With run_as, use exec_run in the dropped-uid local session instead. Pass a session_id whose target is remote to transfer text over SFTP without invoking a shell. The literal string `local` is not a session_id. This is not an arbitrary-binary API. Set max_bytes to a smaller prefix/read limit. `truncated:true` means the remainder was not returned; file_read has no cursor, so use a session command such as sed or dd to inspect later ranges.",
 		InputSchema: obj(map[string]any{
-			"path":      map[string]any{"type": "string", "description": "absolute path on the daemon host (not relative to any session's cwd)"},
+			"path":      map[string]any{"type": "string", "description": "absolute path on the target host (not relative to any session's cwd)"},
 			"session":   sessionSchema,
-			"max_bytes": intSchema,
+			"max_bytes": map[string]any{"type": "integer", "minimum": 1, "maximum": 1048576},
 		}, "path"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			res, err := mgr.FileRead(argString(a, "session"), argString(a, "path"), argInt(a, "max_bytes"))
+			res, err := mgr.FileRead(s.agentID, argString(a, "session"), argString(a, "path"), argInt(a, "max_bytes"))
 			if err != nil {
 				return nil, asErr(err)
 			}
@@ -273,7 +273,7 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "file_write",
-		Description: "Write content to a file. mode 'append' appends, otherwise truncates. Session-aware, NOT cwd-relative — pass an absolute path: with no/local `session` it writes the daemon host; with a remote `session` it writes that server's file over SFTP (binary-safe; new files created 0600).",
+		Description: "Write UTF-8 text content to a file. mode 'append' appends, otherwise truncates. Session-aware but NOT cwd-relative — pass an absolute path. Omit `session` to use the default local target, or pass a session_id whose target is local; local file tools are disabled on Windows and when security.run_as is enabled. With run_as, use exec_run in the dropped-uid local session instead. Pass a session_id whose target is remote to transfer text over SFTP without invoking a shell (new files created 0600). The literal string `local` is not a session_id. This is not an arbitrary-binary API.",
 		InputSchema: obj(map[string]any{
 			"path":    strSchema,
 			"content": strSchema,
@@ -281,7 +281,7 @@ func (s *Server) registerTools() {
 			"mode":    map[string]any{"type": "string", "enum": []string{"truncate", "append"}},
 		}, "path", "content"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			res, err := mgr.FileWrite(argString(a, "session"), argString(a, "path"), argString(a, "content"), argString(a, "mode"))
+			res, err := mgr.FileWrite(s.agentID, argString(a, "session"), argString(a, "path"), argString(a, "content"), argString(a, "mode"))
 			return res, asErr(err)
 		},
 	})
@@ -310,7 +310,7 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "server_list",
-		Description: "List configured remote servers (names/hosts/tags only — no secrets).",
+		Description: "List secret-free remote server inventory metadata: name, host, user, tags, managed flag, last status and checked_unix timestamp. Credential values and auth references are not returned.",
 		InputSchema: emptySchema,
 		Handler: func(a map[string]any) (any, *errs.Error) {
 			return map[string]any{"servers": mgr.ServerList()}, nil
@@ -319,7 +319,7 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "fleet_run",
-		Description: "Run a command across servers selected by name and/or tag, returning per-server results. Not atomic.",
+		Description: "Run a non-empty argv command across at most 256 servers selected by name and/or tag, returning per-server results with stdout/stderr/errors best-effort redacted and a truncated flag when the 2 MiB aggregate text budget is reached. Fleet work shares a manager-wide concurrency ceiling across simultaneous fleet calls (production ceiling 5); requested parallelism can only lower this call's concurrency. Not atomic.",
 		InputSchema: obj(map[string]any{
 			"command":     argvSchema,
 			"servers":     map[string]any{"type": "array", "items": strSchema},
@@ -332,7 +332,7 @@ func (s *Server) registerTools() {
 				return nil, e
 			}
 			selector := append(argStrings(a, "servers"), argStrings(a, "tags")...)
-			res, err := mgr.FleetRun(argv, selector, argInt(a, "parallelism"))
+			res, err := mgr.FleetRun(s.agentID, argv, selector, argInt(a, "parallelism"))
 			return res, asErr(err)
 		},
 	})
@@ -359,15 +359,15 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "port_forward",
-		Description: "Open a local→remote TCP tunnel through a configured server (like `ssh -L`): the returned local_addr on the daemon host forwards to remote_host:remote_port reached FROM that server — e.g. to reach a DB bound to a remote box's localhost. Stays open until port_forward_close. The remote sshd must allow TCP forwarding.",
+		Description: "Open a local→remote TCP tunnel through a configured server (like `ssh -L`): the returned local_addr on the daemon host forwards to remote_host:remote_port reached FROM that server — e.g. to reach a DB bound to a remote box's localhost. Stays open until port_forward_close; live forwards are capped at 16 per owner and 64 total. The remote sshd must allow TCP forwarding.",
 		InputSchema: obj(map[string]any{
 			"server":      map[string]any{"type": "string", "description": "configured server name to tunnel through"},
 			"remote_host": map[string]any{"type": "string", "description": "host to reach FROM the server (often 127.0.0.1)"},
 			"remote_port": intSchema,
-			"local_bind":  map[string]any{"type": "string", "description": "local listen address; default 127.0.0.1:0 (auto loopback port)"},
+			"local_bind":  map[string]any{"type": "string", "description": "loopback listen address only; default 127.0.0.1:0 (auto port); non-loopback binds are refused"},
 		}, "server", "remote_host", "remote_port"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			res, err := mgr.PortForward(argString(a, "server"), argString(a, "remote_host"), argInt(a, "remote_port"), argString(a, "local_bind"))
+			res, err := mgr.PortForward(s.agentID, argString(a, "server"), argString(a, "remote_host"), argInt(a, "remote_port"), argString(a, "local_bind"))
 			return res, asErr(err)
 		},
 	})
@@ -377,7 +377,7 @@ func (s *Server) registerTools() {
 		Description: "List the live port forwards (id, server, remote target, local_addr).",
 		InputSchema: emptySchema,
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			return map[string]any{"forwards": mgr.PortForwardList()}, nil
+			return map[string]any{"forwards": mgr.PortForwardList(s.agentID)}, nil
 		},
 	})
 
@@ -386,7 +386,7 @@ func (s *Server) registerTools() {
 		Description: "Close a port forward by its id (from port_forward / port_forward_list).",
 		InputSchema: obj(map[string]any{"id": strSchema}, "id"),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			if err := mgr.PortForwardClose(argString(a, "id")); err != nil {
+			if err := mgr.PortForwardClose(s.agentID, argString(a, "id")); err != nil {
 				return nil, asErr(err)
 			}
 			return map[string]any{"ok": true}, nil
@@ -395,15 +395,15 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "capabilities",
-		Description: "Report this agent's identity, the API version, available tools and execution modes.",
+		Description: "Report the asserted MCP client id, API version, available tools and execution modes. agent_id is client-reported, not proof of daemon ownership; when configured, the transport token is authoritative.",
 		InputSchema: emptySchema,
 		Handler: func(a map[string]any) (any, *errs.Error) {
 			remote := mgr.RemoteAvailable()
 			execMode := "in-process"
-			notes := "in-process fallback (no daemon): remote SSH sessions, fleet, vault and plugins are UNAVAILABLE — session_create accepts target=local only. Start the daemon (`termada serve`) to enable remote targets."
+			notes := "internal local backend: remote SSH sessions, fleet, vault and plugins are unavailable; session_create accepts target=local only. Production MCP startup requires the daemon."
 			if remote {
 				execMode = "daemon"
-				notes = "daemon-backed: local + remote persistent shells (session_create target=<server>), fleet_run, vault and plugins are available. Configure servers with server_list / the dashboard before targeting them."
+				notes = "daemon-backed: local + remote persistent shells (session_create target=<server>), fleet_run, vault and plugins are available. Inspect inventory with server_list; configure servers in the dashboard or config file. agent_id is asserted client metadata; a configured transport token is authoritative for daemon ownership."
 			}
 			return map[string]any{
 				"agent_id":    s.agentID,
@@ -415,7 +415,7 @@ func (s *Server) registerTools() {
 				// meant to reach a server.
 				"remote":     remote,
 				"exec_mode":  execMode,
-				"quickstart": "commands are argv arrays, not shell lines ($VAR/pipes/&&/globs are literal — use [\"bash\",\"-lc\",\"...\"] for shell features). cwd & env persist across calls in a session; omit `session` to use your per-agent default session (always LOCAL). To act on a server, session_create target=<server> and pass the returned session_id to exec_run. exec_run waits and returns stdout; exec_start returns a job_id you stream with exec_poll(job_id, next_cursor). When status=awaiting_input, reply with exec_write. Responses omit empty/false fields to stay light; errors carry a `hint`.",
+				"quickstart": "commands are argv arrays, not shell lines ($VAR/pipes/&&/globs are literal — use [\"bash\",\"-lc\",\"...\"] for shell features). cwd & env persist across calls in a session; omit `session` to use your per-agent default session (always LOCAL). To act on a server, session_create target=<server> and pass the returned session_id to exec_run. exec_run waits and returns stdout; exec_start returns a job_id you stream with exec_poll(job_id, next_cursor). Keep following next_cursor while has_more=true, even after terminal status. When status=awaiting_input, reply with exec_write. Responses omit empty/false fields to stay light; errors carry a `hint`.",
 				"notes":      notes,
 			}, nil
 		},

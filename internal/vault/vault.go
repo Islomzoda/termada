@@ -32,6 +32,7 @@ const (
 type Vault struct {
 	path string
 
+	unlockMu sync.Mutex // serializes initialization, passphrase checks and lockout accounting
 	mu       sync.RWMutex
 	pass     string // held after unlock so writes can re-encrypt
 	secrets  map[string]string
@@ -65,6 +66,11 @@ func (v *Vault) Locked() bool {
 
 // Init creates a new empty vault encrypted with pass. Fails if one exists.
 func (v *Vault) Init(pass string) error {
+	v.unlockMu.Lock()
+	defer v.unlockMu.Unlock()
+	if pass == "" {
+		return fmt.Errorf("vault passphrase must not be empty")
+	}
 	if v.Exists() {
 		return fmt.Errorf("vault already exists at %s", v.path)
 	}
@@ -80,6 +86,9 @@ func (v *Vault) Init(pass string) error {
 // Unlock decrypts the vault file into memory. Repeated wrong passphrases trip a
 // lockout window so a reachable control socket can't be brute-forced.
 func (v *Vault) Unlock(pass string) error {
+	v.unlockMu.Lock()
+	defer v.unlockMu.Unlock()
+
 	v.mu.Lock()
 	if !v.lockedUntil.IsZero() && time.Now().Before(v.lockedUntil) {
 		wait := time.Until(v.lockedUntil).Round(time.Second)
@@ -248,17 +257,22 @@ func (v *Vault) saveLocked() error {
 		return err
 	}
 
-	tmp := v.path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.CreateTemp(filepath.Dir(v.path), "."+filepath.Base(v.path)+".tmp-*")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return err
+	}
 	if _, err := f.Write(buf.Bytes()); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {

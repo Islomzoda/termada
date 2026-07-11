@@ -1,14 +1,17 @@
-# termada config — copy to ~/.config/termada/config.yaml
-# Credentials live in the encrypted vault (termada vault ...), never here.
+# Termada config: copy to ~/.config/termada/config.yaml
+#
+# The schema is strict: unknown fields and unsupported values stop startup.
+# Environment references use the ${NAME} form and are expanded as YAML scalar
+# values; every active reference must be set, even when the surrounding feature
+# is otherwise disabled. Commented examples are ignored, so keep optional
+# credentials commented until use.
+# Credentials belong in the age-encrypted vault (`termada vault`), not here,
+# except for transport/notification tokens that must bootstrap those channels.
 
 dashboard:
   enabled: true
   open_browser: false
-  # local_trust (default true): on your own machine, opening http://127.0.0.1:7717
-  # just works — no token. The loopback Host/Origin checks already block websites
-  # and remote hosts. Set false on a SHARED/multi-user box to require the token
-  # even on loopback (other local users could otherwise reach the dashboard).
-  local_trust: true
+
 http:
   bind: 127.0.0.1:7717
 
@@ -16,51 +19,82 @@ notifications:
   desktop: true
   telegram:
     enabled: false
-    bot_token: ${TG_TOKEN}
-    chat_id: ${TG_CHAT}
-    allowed_user_ids: []
+    # Telegram is outbound-only. Set both variables before uncommenting/enabling.
+    # bot_token: ${TG_TOKEN}
+    # chat_id: ${TG_CHAT}
 
 defaults:
   timeout_ms: 30000
-  output_retention_bytes: 5000000
+  max_output_bytes: 100000       # max sequential output bytes per call (hard max 1 MiB)
+  output_retention_bytes: 5000000 # hard max 16 MiB per buffer
+  pty_cols: 200
   max_foreground_jobs: 8
-  max_jobs_per_agent: 0          # per-agent concurrent-job cap (0 = unlimited)
+  max_background_jobs: 32
+  max_jobs_per_agent: 0          # 0 = no configured quota; hard registries still apply
+  max_job_runtime_ms: 0          # 0 = no forced runtime cap
   confirm_timeout_ms: 120000
 
+timeout_classes:
+  build: 1800000
+  install: 600000
+  test: 1800000
+  network: 120000
+  db: 0                          # 0 = fall back to defaults.timeout_ms
+  default: 30000
+
 vault:
-  backend: encrypted_file        # encrypted_file (age, default) | keychain
+  backend: encrypted_file        # the only supported backend (age, CGO-free)
   file: ~/.config/termada/vault.age
+  idle_relock_ms: 0              # 0 = keep unlocked until daemon exit
+
+security:
+  # Extra file-tool deny roots, in addition to Termada runtime files and the
+  # built-in ~/.ssh, ~/.aws and ~/.gnupg protections.
+  protected_paths: []
+  # Optional OS isolation for local agent shells. The daemon must run as root;
+  # startup fails rather than silently ignoring an invalid separation request.
+  # In this mode local file_read/file_write fail closed; use exec in the dropped
+  # session for local files. The dropped shell gets a minimal environment, not
+  # daemon tokens/credentials. Remote SFTP file operations remain available.
+  # run_as: termada-agent
 
 agents:
   - id: claude-code
     policy: prod-safe
-    # Optional: bind this id to a secret token so `owner` can't be spoofed.
-    # The shim presents it via `serve --stdio --token <t>` (or $TERMADA_AGENT_TOKEN);
-    # the daemon resolves the token to this id and ignores any asserted owner.
-    token: ${CLAUDE_AGENT_TOKEN}
+    # Launch this client's shim with `serve --stdio --agent claude-code` so the
+    # policy mapping applies when no identity token is configured.
+    # Optional but required for a strong identity boundary. Use a unique value
+    # of at least 16 characters and pass the same token to the MCP shim with
+    # `--token` or TERMADA_AGENT_TOKEN; a valid token resolves this id even if
+    # the asserted `--agent` differs. Once bound, this id cannot be claimed
+    # tokenlessly. Without it the id is self-asserted local/dev mode.
+    # token: ${CLAUDE_AGENT_TOKEN}
   - id: cursor
     policy: read-only
+    # Launch this client's shim with `serve --stdio --agent cursor`.
 
 policies:
   prod-safe:
     deny: ["rm -rf /", "DROP DATABASE"]
     confirm: ["rm -rf*", "DROP*", "systemctl stop*"]
     auto_answer:
-      - { match: "[Y/n]", send: "y" }     # safe prompts only; host-key is NOT auto-answered
+      - { match: "[Y/n]", send: "y" }  # never auto-answer host-key prompts
   read-only:
     allow: ["ls", "cat", "tail", "git status", "docker ps"]
     deny: ["*"]
 
+# Extra redaction regexes are compiled at startup; an invalid pattern is fatal.
 redaction:
   - "(?i)api[_-]?key\\s*=\\s*\\S+"
 
 servers:
   - name: prod
     host: prod.example.com
+    port: 22
     user: deploy
-    # auth is OPTIONAL: a vault entry name to use a Termada-stored credential.
-    # Omit it to connect with your own ssh-agent / ~/.ssh key (no vault needed) —
-    # if you can already `ssh deploy@prod`, so can Termada.
+    # Optional vault entry. If omitted, Termada tries SSH_AUTH_SOCK, then the
+    # unencrypted ~/.ssh/id_ed25519, id_ecdsa and id_rsa files. It does not parse
+    # arbitrary ssh config or prompt for encrypted-key passphrases.
     auth: prod-ssh-key
     tags: [web, prod]
 

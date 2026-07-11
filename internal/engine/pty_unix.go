@@ -5,6 +5,9 @@ package engine
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/creack/pty"
@@ -45,10 +48,7 @@ const shellPath = "/bin/bash"
 // inherited, so the dropped child can still use the PTY.
 func startShell(cols, rows int, sp SpawnConfig) (*ptyShell, error) {
 	cmd := exec.Command(shellPath)
-	cmd.Env = append(os.Environ(),
-		"PS1=", "PS2=", // suppress any prompts
-		"TERM=xterm-256color",
-	)
+	cmd.Env = shellEnvironment(sp)
 	if sp.SeparateUID {
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			Credential: &syscall.Credential{
@@ -72,4 +72,35 @@ func startShell(cols, rows int, sp SpawnConfig) (*ptyShell, error) {
 	}
 	_ = pty.Setsize(f, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	return &ptyShell{f: f, cmd: cmd}, nil
+}
+
+// shellEnvironment deliberately does not inherit the daemon environment for a
+// dropped-uid shell. The daemon commonly receives vault/config tokens via env;
+// passing os.Environ through setuid would hand those values straight back to an
+// untrusted agent via `env`, defeating the security.run_as boundary.
+func shellEnvironment(sp SpawnConfig) []string {
+	base := []string{
+		"PS1=", "PS2=", // suppress interactive prompts
+		"TERM=xterm-256color",
+	}
+	if !sp.SeparateUID {
+		return append(os.Environ(), base...)
+	}
+	username := sp.Username
+	if username == "" || strings.ContainsAny(username, "=\x00") {
+		username = strconv.Itoa(sp.UID)
+	}
+	home := sp.HomeDir
+	if !filepath.IsAbs(home) || strings.ContainsRune(home, 0) {
+		home = "/"
+	}
+	return append(base,
+		"HOME="+home,
+		"USER="+username,
+		"LOGNAME="+username,
+		"SHELL="+shellPath,
+		"PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+		"LANG=C",
+		"LC_ALL=C",
+	)
 }

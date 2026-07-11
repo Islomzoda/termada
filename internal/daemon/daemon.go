@@ -1,7 +1,7 @@
 // Package daemon is the long-lived termada process (spec R4): it owns the
 // engine, event bus, audit log and vault, and serves the control-plane over a
-// Unix socket (local trust, for the stdio shim/CLI/TUI) and the dashboard over
-// loopback TCP with a token.
+// Unix socket (for the stdio shim/CLI/TUI) and the dashboard over token-gated
+// TCP.
 package daemon
 
 import (
@@ -11,12 +11,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -78,11 +82,25 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	if err := os.MkdirAll(RuntimeDir(), 0o700); err != nil {
 		return nil, err
 	}
+	if err := os.Chmod(RuntimeDir(), 0o700); err != nil {
+		return nil, fmt.Errorf("secure runtime directory: %w", err)
+	}
 	b := bus.New(500)
 	aud, err := audit.Open(AuditPath(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("open audit: %w", err)
 	}
+	var mgr *engine.Manager
+	initialized := false
+	defer func() {
+		if initialized {
+			return
+		}
+		if mgr != nil {
+			mgr.Shutdown()
+		}
+		_ = aud.Close()
+	}()
 
 	ec := engine.Config{
 		OutputRetentionBytes: cfg.Defaults.OutputRetentionBytes,
@@ -96,7 +114,7 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 		ConfirmTimeoutMS:     cfg.Defaults.ConfirmTimeoutMS,
 		RedactionPatterns:    cfg.Redaction,
 	}
-	mgr := engine.NewManager(ec)
+	mgr = engine.NewManager(ec)
 	mgr.SetBus(b)
 	pol := policy.NewEngine(buildPolicies(cfg))
 	pol.LoadStore(filepath.Join(RuntimeDir(), "policies.json"))
@@ -171,26 +189,36 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 		return nil, err
 	}
 
-	return &Daemon{cfg: cfg, version: version, logger: logger, mgr: mgr, bus: b, audit: aud,
-		vault: v, fleet: fl, plugins: plugins, token: token, cliToken: cliToken}, nil
+	d := &Daemon{cfg: cfg, version: version, logger: logger, mgr: mgr, bus: b, audit: aud,
+		vault: v, fleet: fl, plugins: plugins, token: token, cliToken: cliToken}
+	initialized = true
+	return d, nil
 }
 
 // Run starts the listeners and blocks until ctx is cancelled.
 func (d *Daemon) Run(ctx context.Context) error {
+	ownsSocket := false
+	cancelAudit := func() {}
+	defer func() {
+		d.shutdownServices(cancelAudit)
+		if ownsSocket {
+			_ = os.Remove(SocketPath())
+		}
+	}()
+	unlockDaemon, err := acquireDaemonLock(filepath.Join(RuntimeDir(), "daemon.lock"))
+	if err != nil {
+		return fmt.Errorf("acquire daemon lock: %w", err)
+	}
+	defer unlockDaemon()
 	// Refuse to start a second daemon.
 	if pingSocket(SocketPath()) {
 		return errors.New("a termada daemon is already running")
 	}
 	_ = os.Remove(SocketPath())
 
-	// Pipe bus events into the audit log.
-	ch, cancelSub := d.bus.Subscribe(512)
-	go func() {
-		for e := range ch {
-			d.audit.FromBus(e)
-		}
-	}()
-	defer cancelSub()
+	// Audit is a synchronous reliable sink: Publish does not return until the
+	// record is appended and fsynced, and delivery errors latch audit unhealthy.
+	cancelAudit = d.bus.SubscribeReliable(d.audit.FromBus)
 
 	// Notifications (desktop + optional Telegram) on key events.
 	notifier := notify.New(d.cfg.Notifications.Desktop, notify.TelegramConfig{
@@ -228,7 +256,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				d.mgr.GCOnce(3_600_000, 500) // drop terminal jobs >1h old; keep last 500
+				d.mgr.GCOnce(3_600_000, 200) // drop terminal jobs >1h old; keep last 200
 				d.mgr.ReapOnce()             // SIGKILL runaway/hung jobs (no-op unless max_job_runtime_ms is set)
 				if ms := d.cfg.Vault.IdleRelockMS; ms > 0 {
 					d.vault.RelockIfIdle(time.Duration(ms) * time.Millisecond) // auto-lock an idle vault
@@ -238,26 +266,24 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}()
 
 	cp := controlplane.New(d.mgr, d.bus, d.audit, d.fleet, d.vault, d.plugins, d.version)
-	root := http.NewServeMux()
-	root.Handle("/api/", cp.Mux())
-	root.Handle("/", dashboard.Handler())
+	root := daemonRootHandler(cp.Mux(), dashboard.Handler())
 
-	// Unix socket: local trust, no token.
+	// Unix socket: agent operations are owner-scoped; operator operations require
+	// the separate CLI token.
 	uds, err := net.Listen("unix", SocketPath())
 	if err != nil {
 		return fmt.Errorf("listen unix: %w", err)
 	}
-	_ = os.Chmod(SocketPath(), 0o600)
-	// The UDS carries BOTH the human CLI and the agent's MCP shim, and an agent
-	// can also reach the socket by shelling out (curl --unix-socket …). So the
-	// genuinely human-only mutating routes are refused here and served only over
-	// the TCP dashboard — otherwise the SEC-7 "an agent cannot change its own
-	// policy or add servers" guarantee would be tool-surface-only, not enforced.
-	// The human approval routes (approve/deny/stop_all) must STAY reachable here
-	// because the CLI uses them over the socket, so they are gated by a CLI auth
-	// token instead — a tokenless curl from an agent is refused.
-	udsSrv := &http.Server{Handler: udsGuard(d.cliToken, root)}
-	go func() { _ = udsSrv.Serve(uds) }()
+	ownsSocket = true
+	if err := os.Chmod(SocketPath(), 0o600); err != nil {
+		_ = uds.Close()
+		_ = os.Remove(SocketPath())
+		return fmt.Errorf("secure control socket: %w", err)
+	}
+	// An agent can also curl the socket, so socket possession alone never grants
+	// the global operator role.
+	udsSrv := hardenedHTTPServer(udsGuard(d.cliToken, d.mgr, root))
+	go func() { _ = udsSrv.Serve(newLimitedListener(uds, 256)) }()
 	d.logger.Printf("control-plane on unix:%s", SocketPath())
 
 	// TCP: dashboard, token + anti-rebinding auth.
@@ -268,76 +294,171 @@ func (d *Daemon) Run(ctx context.Context) error {
 			// Fatal, not a warning: a failed bind almost always means another
 			// daemon already holds the port. Half-running (UDS only, no dashboard)
 			// causes confusing split-brain state.
+			_ = udsSrv.Close()
 			_ = os.Remove(SocketPath())
 			return fmt.Errorf("dashboard bind %s failed (another daemon already running?): %w", d.cfg.HTTP.Bind, err)
 		}
 		{
-			// local-trust defaults ON (absent config field == nil == trusted).
-			localTrust := d.cfg.Dashboard.LocalTrust == nil || *d.cfg.Dashboard.LocalTrust
-			tcpSrv = &http.Server{Handler: tokenAuth(d.token, localTrust, root)}
-			go func() { _ = tcpSrv.Serve(ln) }()
-			if localTrust {
-				d.logger.Printf("dashboard:  http://%s/   (viewing needs no token on this machine; approving/managing needs it — `termada dashboard` opens the dashboard with the token)", ln.Addr().String())
-			} else {
-				d.logger.Printf("dashboard:  http://%s/?token=%s", ln.Addr().String(), d.token)
+			tcpSrv = hardenedHTTPServer(tokenAuth(d.token, root))
+			cp.SetDashboardURL(dashboardBaseURL(ln.Addr()))
+			go func() { _ = tcpSrv.Serve(newLimitedListener(ln, 256)) }()
+			dashboardURL := tokenizedDashboardURL(ln.Addr(), d.token)
+			d.logger.Printf("dashboard:  %s", dashboardURL)
+			if d.cfg.Dashboard.OpenBrowser {
+				if err := openDashboardBrowser(dashboardURL); err != nil {
+					d.logger.Printf("open dashboard browser: %v", err)
+				}
 			}
 		}
 	}
 
 	<-ctx.Done()
 	d.logger.Println("shutting down…")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = udsSrv.Shutdown(shutdownCtx)
+	servers := []*http.Server{udsSrv}
 	if tcpSrv != nil {
-		_ = tcpSrv.Shutdown(shutdownCtx)
+		servers = append(servers, tcpSrv)
 	}
-	d.mgr.Shutdown()
-	_ = d.audit.Close()
-	_ = os.Remove(SocketPath())
+	var shutdownWG sync.WaitGroup
+	for _, server := range servers {
+		shutdownWG.Add(1)
+		go func(server *http.Server) {
+			defer shutdownWG.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := server.Shutdown(shutdownCtx); err != nil {
+				_ = server.Close()
+			}
+		}(server)
+	}
+	shutdownWG.Wait()
 	return nil
 }
 
-// humanOnlyRoutes mutate security-sensitive state and are reachable only from
-// the TCP dashboard (token / local-trust). The CLI does not use them (it has no
-// policy- or server-add commands), so refusing them on the UDS costs nothing and
-// closes the agent self-escalation path (an agent could otherwise curl the
-// socket to rewrite its own policy or add a server).
-var humanOnlyRoutes = map[string]bool{
-	"/api/policies/set":    true,
-	"/api/policies/remove": true,
-	"/api/servers/add":     true,
-	"/api/servers/remove":  true,
+// shutdownServices keeps the reliable audit sink installed until the engine has
+// closed sessions and drained every tracked job watcher. Only then is delivery
+// cancelled and the audit file closed.
+func (d *Daemon) shutdownServices(cancelAudit func()) {
+	d.mgr.Shutdown()
+	if cancelAudit != nil {
+		cancelAudit()
+	}
+	_ = d.audit.Close()
 }
 
-// cliAuthRoutes are the human approval/stop actions the CLI invokes over the UDS
-// (`termada approve|deny|stop`). They cannot be refused outright like the routes
-// above because the CLI genuinely needs them, but an agent shelling out to curl
-// the socket is otherwise indistinguishable from the CLI and could self-approve a
-// command it parked under a `confirm` policy. So we require the CLI auth token on
-// these routes: the CLI reads it from the 0600 cli.token file and sends it; a
-// tokenless agent curl is refused. The TCP dashboard reaches the same handlers
-// over its own token/local-trust path, which this guard does not touch.
-var cliAuthRoutes = map[string]bool{
-	"/api/approve":  true,
-	"/api/deny":     true,
-	"/api/stop_all": true,
+func daemonRootHandler(controlPlane, dashboardHandler http.Handler) *http.ServeMux {
+	root := http.NewServeMux()
+	root.Handle("/api/", controlPlane)
+	root.Handle("/metrics", controlPlane)
+	root.Handle("/", dashboardHandler)
+	return root
 }
 
-// udsGuard wraps the UDS handler: it refuses the human-only mutating routes
-// outright and requires the CLI auth token on the human approval routes.
-func udsGuard(cliToken string, h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if humanOnlyRoutes[r.URL.Path] {
-			denyUDS(w, "this action is available only from the dashboard, not over the local control socket")
-			return
+func hardenedHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 << 10,
+	}
+}
+
+type limitedListener struct {
+	net.Listener
+	slots chan struct{}
+}
+
+func newLimitedListener(listener net.Listener, max int) net.Listener {
+	return &limitedListener{Listener: listener, slots: make(chan struct{}, max)}
+}
+
+func (l *limitedListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
 		}
-		if cliAuthRoutes[r.URL.Path] {
-			got := r.Header.Get("X-Termada-CLI-Token")
-			if cliToken == "" || subtle.ConstantTimeCompare([]byte(got), []byte(cliToken)) != 1 {
-				denyUDS(w, "this action requires the human CLI auth token; agents cannot approve, deny or stop over the local control socket")
+		select {
+		case l.slots <- struct{}{}:
+			return &limitedConn{Conn: conn, release: func() { <-l.slots }}, nil
+		default:
+			_ = conn.Close()
+		}
+	}
+}
+
+type limitedConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *limitedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
+}
+
+// operatorOnlyRoutes expose global state or mutate operator-managed security
+// configuration. UDS callers receive the operator role only by presenting the
+// separate CLI token; filesystem access to the socket alone is not sufficient.
+var operatorOnlyRoutes = map[string]bool{
+	"/api/approve":          true,
+	"/api/deny":             true,
+	"/api/stop_all":         true,
+	"/api/status":           true,
+	"/api/pending":          true,
+	"/api/audit":            true,
+	"/api/events":           true,
+	"/api/policies":         true,
+	"/api/policies/set":     true,
+	"/api/policies/remove":  true,
+	"/api/servers/add":      true,
+	"/api/servers/remove":   true,
+	"/api/servers/test":     true,
+	"/api/vault/unlock":     true,
+	"/api/vault/status":     true,
+	"/api/snapshot/create":  true,
+	"/api/snapshot/restore": true,
+	"/api/snapshot/list":    true,
+	"/api/exec/hold":        true,
+	"/api/exec/stream":      true,
+	"/api/session/stream":   true,
+	"/api/session/write":    true,
+	"/metrics":              true,
+}
+
+// udsGuard authenticates operator-only UDS routes with the CLI token and injects
+// the resulting role into request context. Ordinary agent routes remain open to
+// the shim and are identity-scoped by the control-plane server.
+func udsGuard(cliToken string, mgr *engine.Manager, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if agentToken := r.Header.Get("X-Termada-Agent-Token"); agentToken != "" {
+			if mgr == nil {
+				denyUDS(w, "agent token authentication is unavailable")
 				return
 			}
+			if _, err := mgr.AuthenticateAgent(agentToken, ""); err != nil {
+				denyUDS(w, "invalid agent token")
+				return
+			}
+		}
+		got := r.Header.Get("X-Termada-CLI-Token")
+		operator := cliToken != "" && subtle.ConstantTimeCompare([]byte(got), []byte(cliToken)) == 1
+		// Daemons before /api/ping used GET /api/status as their liveness probe.
+		// Preserve that probe for old stdio shims without exposing the operator
+		// overview: an authenticated CLI still reaches the full status handler,
+		// while anonymous and valid agent callers receive only data-free health.
+		if r.Method == http.MethodGet && r.URL.Path == "/api/status" && got == "" && !operator {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, "{\"ok\":true}\n")
+			return
+		}
+		if operatorOnlyRoutes[r.URL.Path] && !operator {
+			denyUDS(w, "this action requires the authenticated human CLI token")
+			return
+		}
+		if operator {
+			r = controlplane.WithOperatorPrincipal(r)
 		}
 		h.ServeHTTP(w, r)
 	})
@@ -347,27 +468,6 @@ func denyUDS(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)
 	_, _ = w.Write([]byte(`{"error":{"code":"denied_by_policy","message":"` + msg + `"}}`))
-}
-
-// streamReadRoutes are server-sent-event endpoints exposing live terminal output
-// and the global activity feed. They stay open on the UDS (the CLI/TUI tail them)
-// but must require the dashboard token on TCP even in local-trust: otherwise any
-// local process — including a rogue agent on the same loopback — could connect to
-// the dashboard port and tail another agent's session token-lessly. The SPA
-// already appends ?token= to these URLs, so the human dashboard keeps working.
-var streamReadRoutes = map[string]bool{
-	"/api/events":         true,
-	"/api/exec/stream":    true,
-	"/api/session/stream": true,
-}
-
-// sensitiveRoute reports whether a route mutates security-sensitive state or
-// exposes another agent's output, and so must require the dashboard token on TCP
-// even in local-trust mode — an agent runs on the same loopback/uid and would
-// otherwise reach it tokenless. It is the union of the routes refused / CLI-token
-// gated on the UDS plus the live-stream read routes.
-func sensitiveRoute(path string) bool {
-	return humanOnlyRoutes[path] || cliAuthRoutes[path] || streamReadRoutes[path]
 }
 
 // remoteFileOps implements engine.RemoteFileOps: file_read/file_write against a
@@ -398,10 +498,13 @@ func (o remoteFileOps) WriteFile(target, path, content, mode string) (int, error
 // local→remote SSH tunnels. The OS reclaims listeners/sockets on daemon exit, so
 // there is no explicit shutdown sweep.
 type forwardManager struct {
-	fl     *fleet.Manager
-	runner *sshx.Runner
-	mu     sync.Mutex
-	fwds   map[string]*forwardEntry
+	fl              *fleet.Manager
+	runner          *sshx.Runner
+	mu              sync.Mutex
+	fwds            map[string]*forwardEntry
+	reserved        int
+	reservedByOwner map[string]int
+	closed          bool
 }
 
 type forwardEntry struct {
@@ -410,40 +513,104 @@ type forwardEntry struct {
 }
 
 func newForwardManager(fl *fleet.Manager, runner *sshx.Runner) *forwardManager {
-	return &forwardManager{fl: fl, runner: runner, fwds: map[string]*forwardEntry{}}
+	return &forwardManager{fl: fl, runner: runner, fwds: map[string]*forwardEntry{}, reservedByOwner: map[string]int{}}
 }
 
-func (m *forwardManager) Start(server, remoteHost string, remotePort int, localBind string) (engine.ForwardInfo, error) {
+func (m *forwardManager) Start(owner, server, remoteHost string, remotePort int, localBind string) (engine.ForwardInfo, error) {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return engine.ForwardInfo{}, fmt.Errorf("forward manager is shutting down")
+	}
+	if len(m.fwds)+m.reserved >= 64 || m.countOwnerLocked(owner)+m.reservedByOwner[owner] >= 16 {
+		m.mu.Unlock()
+		return engine.ForwardInfo{}, fmt.Errorf("port-forward limit reached")
+	}
+	m.reserved++
+	m.reservedByOwner[owner]++
+	m.mu.Unlock()
+	releaseReservation := func() {
+		m.reserved--
+		if m.reservedByOwner[owner] <= 1 {
+			delete(m.reservedByOwner, owner)
+		} else {
+			m.reservedByOwner[owner]--
+		}
+	}
 	srv, ok := m.fl.Get(server)
 	if !ok {
+		m.mu.Lock()
+		releaseReservation()
+		m.mu.Unlock()
 		return engine.ForwardInfo{}, fmt.Errorf("no server named %q", server)
 	}
 	f, err := m.runner.OpenForward(srv, localBind, remoteHost, remotePort)
 	if err != nil {
+		m.mu.Lock()
+		releaseReservation()
+		m.mu.Unlock()
 		return engine.ForwardInfo{}, err
 	}
-	info := engine.ForwardInfo{ID: ids.New("fwd"), Server: server, RemoteHost: remoteHost, RemotePort: remotePort, LocalAddr: f.Addr()}
+	info := engine.ForwardInfo{ID: ids.New("fwd"), Server: server, RemoteHost: remoteHost, RemotePort: remotePort, LocalAddr: f.Addr(), Owner: owner}
 	m.mu.Lock()
+	releaseReservation()
+	if m.closed {
+		m.mu.Unlock()
+		_ = f.Close()
+		return engine.ForwardInfo{}, fmt.Errorf("forward manager is shutting down")
+	}
 	m.fwds[info.ID] = &forwardEntry{info: info, fwd: f}
 	m.mu.Unlock()
 	return info, nil
 }
 
-func (m *forwardManager) List() []engine.ForwardInfo {
+func (m *forwardManager) countOwnerLocked(owner string) int {
+	count := 0
+	for _, entry := range m.fwds {
+		if entry.info.Owner == owner {
+			count++
+		}
+	}
+	return count
+}
+
+func (m *forwardManager) Shutdown() {
+	m.mu.Lock()
+	m.closed = true
+	entries := make([]*forwardEntry, 0, len(m.fwds))
+	for _, entry := range m.fwds {
+		entries = append(entries, entry)
+	}
+	m.fwds = map[string]*forwardEntry{}
+	m.mu.Unlock()
+	for _, entry := range entries {
+		_ = entry.fwd.Close()
+	}
+}
+
+func (m *forwardManager) List(owner string) []engine.ForwardInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]engine.ForwardInfo, 0, len(m.fwds))
 	for _, e := range m.fwds {
+		if owner != "" && e.info.Owner != owner {
+			continue
+		}
 		out = append(out, e.info)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
-func (m *forwardManager) Close(id string) error {
+func (m *forwardManager) Close(owner, id string) error {
 	m.mu.Lock()
 	e := m.fwds[id]
-	delete(m.fwds, id)
+	if e != nil && owner != "" && e.info.Owner != owner {
+		e = nil
+	}
+	if e != nil {
+		delete(m.fwds, id)
+	}
 	m.mu.Unlock()
 	if e == nil {
 		return fmt.Errorf("forward %q not found", id)
@@ -537,10 +704,17 @@ func resolveSpawn(spec string) (engine.SpawnConfig, error) {
 	if err != nil {
 		return engine.SpawnConfig{}, fmt.Errorf("security.run_as: %w", err)
 	}
-	if uid == 0 {
-		return engine.SpawnConfig{}, fmt.Errorf("security.run_as=%q resolves to uid 0 — that defeats the purpose; use a dedicated unprivileged user", spec)
+	username := strconv.Itoa(uid)
+	home := "/"
+	if usr, lookupErr := user.LookupId(strconv.Itoa(uid)); lookupErr == nil {
+		if usr.Username != "" {
+			username = usr.Username
+		}
+		if filepath.IsAbs(usr.HomeDir) {
+			home = usr.HomeDir
+		}
 	}
-	return engine.SpawnConfig{SeparateUID: true, UID: uid, GID: gid}, nil
+	return engine.SpawnConfig{SeparateUID: true, UID: uid, GID: gid, Username: username, HomeDir: home}, nil
 }
 
 // resolveRunAs parses a run_as spec: an explicit numeric "uid:gid", a bare
@@ -552,6 +726,9 @@ func resolveRunAs(spec string) (uid, gid int, err error) {
 		g, e2 := strconv.Atoi(strings.TrimSpace(spec[i+1:]))
 		if e1 != nil || e2 != nil {
 			return 0, 0, fmt.Errorf("invalid numeric uid:gid %q", spec)
+		}
+		if err := validateRunAsIDs(u, g); err != nil {
+			return 0, 0, err
 		}
 		return u, g, nil
 	}
@@ -569,21 +746,101 @@ func resolveRunAs(spec string) (uid, gid int, err error) {
 	if e1 != nil || e2 != nil {
 		return 0, 0, fmt.Errorf("user %q has non-numeric uid/gid", spec)
 	}
+	if err := validateRunAsIDs(u, g); err != nil {
+		return 0, 0, fmt.Errorf("user %q: %w", spec, err)
+	}
 	return u, g, nil
 }
 
+// uid_t/gid_t are uint32 on the supported Unix targets. Refuse root identities,
+// negative values, and the all-ones sentinel before the later syscall.Credential
+// conversion; otherwise a large int such as 2^32 would wrap to root.
+func validateRunAsIDs(uid, gid int) error {
+	const maxCredentialID = uint64(1<<32 - 2)
+	if uid <= 0 || uint64(uid) > maxCredentialID {
+		return fmt.Errorf("uid %d is outside the unprivileged credential range 1..%d", uid, maxCredentialID)
+	}
+	if gid <= 0 || uint64(gid) > maxCredentialID {
+		return fmt.Errorf("gid %d is outside the unprivileged credential range 1..%d", gid, maxCredentialID)
+	}
+	return nil
+}
+
 func loadOrCreateTokenAt(p string) (string, error) {
-	if b, err := os.ReadFile(p); err == nil && len(b) >= 16 {
-		return strings.TrimSpace(string(b)), nil
+	readExisting := func() (string, error) {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return "", err
+		}
+		if !fi.Mode().IsRegular() {
+			return "", fmt.Errorf("token file %s is not a regular file", p)
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+		actual, err := f.Stat()
+		if err != nil || !actual.Mode().IsRegular() || !os.SameFile(fi, actual) {
+			return "", fmt.Errorf("token file %s changed while opening", p)
+		}
+		if fi.Mode().Perm() != 0o600 {
+			if err := f.Chmod(0o600); err != nil {
+				return "", fmt.Errorf("secure token file %s: %w", p, err)
+			}
+		}
+		b, err := io.ReadAll(io.LimitReader(f, 4097))
+		if err != nil {
+			return "", err
+		}
+		if len(b) > 4096 {
+			return "", fmt.Errorf("token file %s exceeds 4096 byte limit", p)
+		}
+		tok := strings.TrimSpace(string(b))
+		if len(tok) < 16 {
+			return "", fmt.Errorf("token file %s is empty or too short", p)
+		}
+		for _, r := range tok {
+			if r < 0x21 || r > 0x7e {
+				return "", fmt.Errorf("token file %s contains invalid characters", p)
+			}
+		}
+		return tok, nil
+	}
+	if tok, err := readExisting(); err == nil {
+		return tok, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
 	tok := hex.EncodeToString(raw)
-	if err := os.WriteFile(p, []byte(tok), 0o600); err != nil {
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return readExisting()
+		}
 		return "", err
 	}
+	ok := false
+	defer func() {
+		_ = f.Close()
+		if !ok {
+			_ = os.Remove(p)
+		}
+	}()
+	if _, err := f.WriteString(tok); err != nil {
+		return "", err
+	}
+	if err := f.Sync(); err != nil {
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	ok = true
 	return tok, nil
 }
 
@@ -597,9 +854,10 @@ func pingSocket(path string) bool {
 	return true
 }
 
-// tokenAuth enforces the dashboard token and guards against DNS-rebinding by
-// requiring a loopback Host/Origin (spec M12).
-func tokenAuth(token string, localTrust bool, h http.Handler) http.Handler {
+// tokenAuth enforces the dashboard token for the complete TCP API. A spoofed
+// Host header can never grant an API principal, including when the listener is
+// bound to a wildcard address.
+func tokenAuth(token string, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !hostLoopback(r.Host) {
 			http.Error(w, "forbidden host", http.StatusForbidden)
@@ -612,32 +870,50 @@ func tokenAuth(token string, localTrust bool, h http.Handler) http.Handler {
 		// The token gates the API (the privileged surface). Static dashboard
 		// assets (the SPA, vendored xterm, css) are served freely on loopback.
 		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/metrics" {
-			// The Host + Origin checks above already reject every cross-site and
-			// DNS-rebinding request, so anything reaching here is a genuine
-			// same-machine client. In local-trust mode (the default) that's enough
-			// for read/observe routes — no token, so http://127.0.0.1:7717 just
-			// works on your own machine.
-			//
-			// BUT a malicious agent runs on the SAME loopback and uid, so "local =
-			// trusted" doesn't hold for the security-sensitive mutating routes
-			// (approve/deny/stop_all, policy/server management). Those require the
-			// token EVEN in local-trust — otherwise an agent could `curl` the TCP
-			// dashboard and self-approve, bypassing the socket guard. The SPA
-			// already sends the token (and shows its gate on a 401), so the human
-			// dashboard keeps working; only a tokenless caller is refused.
-			if !localTrust || sensitiveRoute(r.URL.Path) {
-				got := bearer(r)
-				if got == "" {
-					got = r.URL.Query().Get("token")
-				}
-				if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
-					http.Error(w, "unauthorized", http.StatusUnauthorized)
-					return
-				}
+			got := bearer(r)
+			if got == "" {
+				got = r.URL.Query().Get("token")
 			}
+			if token == "" || subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			r = controlplane.WithOperatorPrincipal(r)
 		}
 		h.ServeHTTP(w, r)
 	})
+}
+
+func tokenizedDashboardURL(addr net.Addr, token string) string {
+	return dashboardBaseURL(addr) + "?token=" + url.QueryEscape(token)
+}
+
+func dashboardBaseURL(addr net.Addr) string {
+	host, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		host, port = "127.0.0.1", "7717"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/"
+}
+
+func openDashboardBrowser(target string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", target)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
+	default:
+		cmd = exec.Command("xdg-open", target)
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 func bearer(r *http.Request) string {

@@ -23,7 +23,7 @@ func TestInitializeReturnsInstructions(t *testing.T) {
 	if !ok || instr == "" {
 		t.Fatalf("instructions missing/empty: %v", m["instructions"])
 	}
-	for _, want := range []string{"exec_run", "ssh", "awaiting_confirmation", "self-approve", "capabilities()"} {
+	for _, want := range []string{"exec_run", "ssh", "awaiting_confirmation", "self-approve", "capabilities()", "asserted client id", "transport token", "remote process may continue", "not a session_id"} {
 		if !strings.Contains(instr, want) {
 			t.Fatalf("instructions missing %q", want)
 		}

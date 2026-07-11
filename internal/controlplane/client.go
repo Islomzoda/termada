@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/errs"
@@ -46,8 +47,14 @@ func NewUnixClient(socketPath string) *Client {
 }
 
 func (c *Client) post(path string, req, out any) error {
-	body, _ := json.Marshal(req)
-	r, _ := http.NewRequest(http.MethodPost, c.base+path, bytes.NewReader(body))
+	body, err := json.Marshal(req)
+	if err != nil {
+		return errs.New(errs.InvalidArgument, "encode request: %v", err)
+	}
+	r, err := http.NewRequest(http.MethodPost, c.base+path, bytes.NewReader(body))
+	if err != nil {
+		return errs.New(errs.InvalidArgument, "build request: %v", err)
+	}
 	r.Header.Set("Content-Type", "application/json")
 	c.auth(r)
 	resp, err := c.http.Do(r)
@@ -59,7 +66,11 @@ func (c *Client) post(path string, req, out any) error {
 }
 
 func (c *Client) get(path string, out any) error {
-	r, _ := http.NewRequest(http.MethodGet, c.base+path, nil)
+	return c.getContext(context.Background(), path, out)
+}
+
+func (c *Client) getContext(ctx context.Context, path string, out any) error {
+	r, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	c.auth(r)
 	resp, err := c.http.Do(r)
 	if err != nil {
@@ -99,7 +110,30 @@ func decodeResp(resp *http.Response, out any) error {
 
 // Ping checks whether the daemon is reachable.
 func (c *Client) Ping() error {
-	return c.get("/api/status", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	status, err := c.pingContext(ctx, "/api/ping")
+	if status == http.StatusNotFound {
+		// Daemons predating /api/ping used the operator overview as their health
+		// endpoint. Share the original deadline so compatibility cannot double the
+		// bounded health-check wait during an upgrade.
+		_, err = c.pingContext(ctx, "/api/status")
+	}
+	return err
+}
+
+func (c *Client) pingContext(ctx context.Context, path string) (int, error) {
+	r, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+	if err != nil {
+		return 0, errs.New(errs.InvalidArgument, "build request: %v", err)
+	}
+	c.auth(r)
+	resp, err := c.http.Do(r)
+	if err != nil {
+		return 0, errs.New(errs.ServerUnreachable, "daemon unreachable: %v", err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, decodeResp(resp, nil)
 }
 
 // ---- mcp.Backend implementation ----
@@ -154,11 +188,11 @@ func (c *Client) CreateSession(owner, target, mode string) (engine.SessionInfo, 
 	return out, err
 }
 
-func (c *Client) ListSessions() []engine.SessionInfo {
+func (c *Client) ListSessions(owner string) []engine.SessionInfo {
 	var out struct {
 		Sessions []engine.SessionInfo `json:"sessions"`
 	}
-	_ = c.get("/api/session/list", &out)
+	_ = c.get("/api/session/list?owner="+url.QueryEscape(owner), &out)
 	return out.Sessions
 }
 
@@ -175,18 +209,18 @@ func (c *Client) Tail(owner, jobID, cursor string) (*engine.TailResult, error) {
 	return &out, nil
 }
 
-func (c *Client) FileRead(session, path string, maxBytes int) (*engine.FileReadResult, error) {
+func (c *Client) FileRead(owner, session, path string, maxBytes int) (*engine.FileReadResult, error) {
 	var out engine.FileReadResult
-	err := c.post("/api/file/read", execReq{Session: session, Path: path, MaxBytes: maxBytes}, &out)
+	err := c.post("/api/file/read", execReq{Owner: owner, Session: session, Path: path, MaxBytes: maxBytes}, &out)
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *Client) FileWrite(session, path, content, mode string) (*engine.FileWriteResult, error) {
+func (c *Client) FileWrite(owner, session, path, content, mode string) (*engine.FileWriteResult, error) {
 	var out engine.FileWriteResult
-	err := c.post("/api/file/write", execReq{Session: session, Path: path, Content: content, FileMode: mode}, &out)
+	err := c.post("/api/file/write", execReq{Owner: owner, Session: session, Path: path, Content: content, FileMode: mode}, &out)
 	if err != nil {
 		return nil, err
 	}
@@ -223,8 +257,8 @@ func (c *Client) ServerList() []fleet.ServerInfo {
 // vault). Contrast with the in-process LocalBackend.
 func (c *Client) RemoteAvailable() bool { return true }
 
-func (c *Client) FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error) {
-	body := map[string]any{"command": command, "servers": selector, "parallelism": parallelism}
+func (c *Client) FleetRun(owner string, command []string, selector []string, parallelism int) (*fleet.RunResult, error) {
+	body := map[string]any{"owner": owner, "command": command, "servers": selector, "parallelism": parallelism}
 	var out fleet.RunResult
 	if err := c.post("/api/fleet/run", body, &out); err != nil {
 		return nil, err
@@ -232,8 +266,8 @@ func (c *Client) FleetRun(command []string, selector []string, parallelism int) 
 	return &out, nil
 }
 
-func (c *Client) PortForward(server, remoteHost string, remotePort int, localBind string) (*engine.ForwardInfo, error) {
-	body := map[string]any{"server": server, "remote_host": remoteHost, "remote_port": remotePort, "local_bind": localBind}
+func (c *Client) PortForward(owner, server, remoteHost string, remotePort int, localBind string) (*engine.ForwardInfo, error) {
+	body := map[string]any{"owner": owner, "server": server, "remote_host": remoteHost, "remote_port": remotePort, "local_bind": localBind}
 	var out engine.ForwardInfo
 	if err := c.post("/api/forward/start", body, &out); err != nil {
 		return nil, err
@@ -241,16 +275,16 @@ func (c *Client) PortForward(server, remoteHost string, remotePort int, localBin
 	return &out, nil
 }
 
-func (c *Client) PortForwardList() []engine.ForwardInfo {
+func (c *Client) PortForwardList(owner string) []engine.ForwardInfo {
 	var out struct {
 		Forwards []engine.ForwardInfo `json:"forwards"`
 	}
-	_ = c.post("/api/forward/list", map[string]any{}, &out)
+	_ = c.post("/api/forward/list", map[string]any{"owner": owner}, &out)
 	return out.Forwards
 }
 
-func (c *Client) PortForwardClose(id string) error {
-	return c.post("/api/forward/close", map[string]any{"id": id}, nil)
+func (c *Client) PortForwardClose(owner, id string) error {
+	return c.post("/api/forward/close", map[string]any{"owner": owner, "id": id}, nil)
 }
 
 func (c *Client) PluginTools() []plugin.ToolSpec {
@@ -285,10 +319,12 @@ func (c *Client) Unlock(passphrase string) (int, error) {
 
 // Status is the daemon overview.
 type Status struct {
-	Version  string               `json:"version"`
-	Sessions []engine.SessionInfo `json:"sessions"`
-	Jobs     []engine.Info        `json:"jobs"`
-	Pending  []engine.PendingInfo `json:"pending"`
+	Version      string                   `json:"version"`
+	DashboardURL string                   `json:"dashboard_url"`
+	Sessions     []engine.SessionInfo     `json:"sessions"`
+	Jobs         []engine.Info            `json:"jobs"`
+	Pending      []engine.PendingInfo     `json:"pending"`
+	Persistence  engine.PersistenceStatus `json:"persistence"`
 }
 
 func (c *Client) Status() (*Status, error) {

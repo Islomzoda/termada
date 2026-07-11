@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -25,7 +26,6 @@ import (
 	"github.com/termada/termada/internal/config"
 	"github.com/termada/termada/internal/controlplane"
 	"github.com/termada/termada/internal/daemon"
-	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/mcp"
 	"github.com/termada/termada/internal/selfupdate"
 	"github.com/termada/termada/internal/tui"
@@ -73,8 +73,10 @@ func main() {
 		cmdUnlock()
 	case "servers":
 		cmdServers()
-	case "dashboard", "ui", "open":
+	case "dashboard", "ui":
 		cmdDashboard(os.Args[2:])
+	case "open":
+		cmdDashboard(append([]string{"--open"}, os.Args[2:]...))
 	case "snapshot":
 		cmdSnapshot(os.Args[2:])
 	case "setup":
@@ -109,7 +111,9 @@ func cmdServe(args []string) {
 	bind := fs.String("bind", os.Getenv("TERMADA_BIND"), "dashboard bind address (or $TERMADA_BIND); e.g. 0.0.0.0:7717 in a container — map it to host loopback (-p 127.0.0.1:7717:7717)")
 	_ = fs.Parse(args)
 	if *stdio {
-		runShim(*agent, *token)
+		if err := runShim(*agent, *token); err != nil {
+			fatal(err)
+		}
 		return
 	}
 	runDaemon(*cfgPath, *bind)
@@ -138,32 +142,20 @@ func runDaemon(cfgPath, bind string) {
 	}
 }
 
-func runShim(agent, token string) {
+func runShim(agent, token string) error {
 	logger := log.New(os.Stderr, "termada-shim ", log.LstdFlags|log.Lmsgprefix)
 	client := controlplane.NewUnixClient(daemon.SocketPath())
 	client.SetToken(token)
-	var backend mcp.Backend
-	var cleanup func()
 
 	if client.Ping() == nil {
-		backend = client
 		logger.Printf("connected to daemon (agent=%s)", agent)
 	} else if spawnDaemon(logger) && waitDaemon(client) {
-		backend = client
 		logger.Printf("started daemon; connected (agent=%s)", agent)
 	} else {
-		logger.Printf("no daemon available — running in-process (dashboard disabled)")
-		mgr := engine.NewManager(engine.DefaultConfig())
-		backend = mcp.NewLocalBackend(mgr)
-		cleanup = mgr.Shutdown
+		return fmt.Errorf("termada daemon is unavailable and could not be started; refusing insecure in-process fallback (see %s)", filepath.Join(daemon.RuntimeDir(), "daemon.log"))
 	}
-	srv := mcp.NewServer(backend, agent, version, logger)
-	if err := srv.ServeStdio(os.Stdin, os.Stdout); err != nil {
-		logger.Printf("serve: %v", err)
-	}
-	if cleanup != nil {
-		cleanup()
-	}
+	srv := mcp.NewServer(client, agent, version, logger)
+	return srv.ServeStdio(os.Stdin, os.Stdout)
 }
 
 func spawnDaemon(logger *log.Logger) bool {
@@ -174,6 +166,9 @@ func spawnDaemon(logger *log.Logger) bool {
 	_ = os.MkdirAll(daemon.RuntimeDir(), 0o700)
 	logf, _ := os.OpenFile(filepath.Join(daemon.RuntimeDir(), "daemon.log"),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if logf != nil {
+		defer logf.Close()
+	}
 	cmd := exec.Command(exe, "serve")
 	cmd.SysProcAttr = detachAttr()
 	cmd.Stdin = nil
@@ -182,6 +177,9 @@ func spawnDaemon(logger *log.Logger) bool {
 	if err := cmd.Start(); err != nil {
 		logger.Printf("spawn daemon: %v", err)
 		return false
+	}
+	if err := cmd.Process.Release(); err != nil {
+		logger.Printf("release daemon process handle: %v", err)
 	}
 	return true
 }
@@ -251,21 +249,21 @@ func cmdJobs(args []string) {
 
 func cmdSessions() {
 	c := mustClient()
-	for _, s := range c.ListSessions() {
+	for _, s := range c.ListSessions("") {
 		fmt.Printf("%s  owner=%s  %s  active=%d\n", s.SessionID, s.Owner, s.Target, s.ActiveJobs)
 	}
 }
 
 func cmdLogs(args []string) {
-	fs := flag.NewFlagSet("logs", flag.ExitOnError)
-	follow := fs.Bool("f", false, "follow")
-	_ = fs.Parse(args)
-	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: termada logs <job_id> [-f]")
+	// Accept both `logs -f <job>` and the documented `logs <job> -f`. The
+	// standard flag package stops at the first positional argument.
+	jobID, follow, err := parseLogsArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 	c := mustClient()
-	jobID, cursor := fs.Arg(0), ""
+	cursor := ""
 	for {
 		res, err := c.Tail("", jobID, cursor) // human CLI: unscoped
 		if err != nil {
@@ -273,11 +271,33 @@ func cmdLogs(args []string) {
 		}
 		fmt.Print(res.Lines)
 		cursor = res.NextCursor
-		if !*follow {
+		if res.HasMore {
+			continue
+		}
+		if !follow {
 			return
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+func parseLogsArgs(args []string) (jobID string, follow bool, err error) {
+	positional := make([]string, 0, 1)
+	for _, arg := range args {
+		switch arg {
+		case "-f", "--follow":
+			follow = true
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return "", false, fmt.Errorf("unknown logs option: %s", arg)
+			}
+			positional = append(positional, arg)
+		}
+	}
+	if len(positional) != 1 {
+		return "", false, fmt.Errorf("usage: termada logs <job_id> [-f]")
+	}
+	return positional[0], follow, nil
 }
 
 func cmdKill(args []string) {
@@ -336,7 +356,7 @@ func cmdResolve(kind string, args []string) {
 
 func cmdAudit(args []string) {
 	if len(args) > 0 && args[0] == "verify" {
-		n, err := audit.Verify(daemon.AuditPath())
+		n, err := audit.VerifyAll(daemon.AuditPath())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "audit chain INVALID: %v\n", err)
 			os.Exit(1)
@@ -368,7 +388,10 @@ func cmdVault(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: termada vault <init|set|list|rm|reset> ...")
 		os.Exit(2)
 	}
-	cfg, _ := config.Load(config.DefaultPath())
+	cfg, err := config.Load(config.DefaultPath())
+	if err != nil {
+		fatal(fmt.Errorf("config: %w", err))
+	}
 	v := vault.New(config.ExpandPath(cfg.Vault.File))
 	switch args[0] {
 	case "init":
@@ -601,6 +624,14 @@ func cmdDoctor() {
 	}
 
 	c := controlplane.NewUnixClient(daemon.SocketPath())
+	dashboardBind := cfg.HTTP.Bind
+	if dashboardBind == "" {
+		dashboardBind = "127.0.0.1:7717"
+	}
+	dashboardDisabled := !cfg.Dashboard.Enabled
+	if b, err := os.ReadFile(daemon.CLITokenPath()); err == nil {
+		c.SetCLIToken(strings.TrimSpace(string(b)))
+	}
 	if e := c.Ping(); e != nil {
 		bad("daemon not running", "start it: termada serve   (or: termada service install)")
 	} else {
@@ -608,18 +639,20 @@ func cmdDoctor() {
 		if s, e := c.Status(); e == nil {
 			ok(fmt.Sprintf("control-plane OK: v%s, %d session(s), %d active job(s), %d pending approval(s)",
 				s.Version, len(s.Sessions), len(s.Jobs), len(s.Pending)))
+			dashboardDisabled = s.DashboardURL == ""
+			if u, err := url.Parse(s.DashboardURL); err == nil && u.Host != "" {
+				dashboardBind = u.Host
+			}
 		}
 	}
 
-	bind := cfg.HTTP.Bind
-	if bind == "" {
-		bind = "127.0.0.1:7717"
-	}
-	if conn, e := net.DialTimeout("tcp", bind, time.Second); e == nil {
+	if dashboardDisabled {
+		warn("dashboard disabled", "set dashboard.enabled: true and restart the daemon")
+	} else if conn, e := net.DialTimeout("tcp", dashboardBind, time.Second); e == nil {
 		_ = conn.Close()
-		ok("dashboard port " + bind + " reachable (termada dashboard to open)")
+		ok("dashboard port " + dashboardBind + " reachable (termada dashboard to open)")
 	} else {
-		warn("dashboard port "+bind+" not listening", "the daemon binds it — start: termada serve")
+		warn("dashboard port "+dashboardBind+" not listening", "the daemon binds it — start: termada serve")
 	}
 
 	if cfg.Vault.File == "" {
@@ -638,7 +671,7 @@ func cmdDoctor() {
 	}
 
 	if _, e := exec.LookPath("claude"); e == nil {
-		ok("claude CLI found — register: claude mcp add termada -- termada serve --stdio")
+		ok("claude CLI found — register: claude mcp add --scope user termada -- termada serve --stdio")
 	} else {
 		warn("claude CLI not found", "install Claude Code, or add termada to your MCP client's config")
 	}
@@ -654,41 +687,48 @@ func cmdDashboard(args []string) {
 			open = true
 		}
 	}
-	cfg, _ := config.Load(config.DefaultPath())
-	bind := cfg.HTTP.Bind
-	if bind == "" {
-		bind = "127.0.0.1:7717"
-	}
-	host, port, err := net.SplitHostPort(bind)
+	status, err := mustClient().Status()
 	if err != nil {
-		host, port = "127.0.0.1", "7717"
+		fatal(err)
 	}
-	// A wildcard bind isn't a browseable host; point the browser at loopback.
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = "127.0.0.1"
+	base := status.DashboardURL
+	if base == "" {
+		fatal(fmt.Errorf("the running daemon is not serving a dashboard; enable dashboard.enabled and restart it"))
 	}
-	// Always hand out the token URL when a token exists. Even in local-trust mode
-	// the read views load without a token, but ACTIONS — approve/deny, kill,
-	// stop-all, policy/server edits — require it, so a bare URL would let you view
-	// the dashboard yet bounce every action to the unlock gate. Including the
-	// token (the dashboard stores it and strips it from the address bar) makes the
-	// page fully usable. In strict (non-local-trust) mode the token is mandatory.
-	localTrust := cfg.Dashboard.LocalTrust == nil || *cfg.Dashboard.LocalTrust
-	url := fmt.Sprintf("http://%s:%s/", host, port)
+	// The complete TCP API requires the dashboard token. The SPA stores it in
+	// sessionStorage and removes it from the address bar after bootstrap.
+	dashboardURL := base
 	if tok, err := os.ReadFile(daemon.TokenPath()); err == nil {
 		if t := strings.TrimSpace(string(tok)); t != "" {
-			url = fmt.Sprintf("http://%s:%s/?token=%s", host, port, t)
+			dashboardURL, err = withDashboardToken(base, t)
+			if err != nil {
+				fatal(err)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "dashboard token at %s is empty — restart the daemon to repair it\n", daemon.TokenPath())
+			os.Exit(1)
 		}
-	} else if !localTrust {
+	} else {
 		fmt.Fprintf(os.Stderr, "no dashboard token at %s — is the daemon running?\nstart it with:  termada serve\n", daemon.TokenPath())
 		os.Exit(1)
 	}
-	fmt.Println(url)
+	fmt.Println(dashboardURL)
 	if open {
-		if err := openURL(url); err != nil {
+		if err := openURL(dashboardURL); err != nil {
 			fmt.Fprintln(os.Stderr, "could not open a browser:", err)
 		}
 	}
+}
+
+func withDashboardToken(base, token string) (string, error) {
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invalid dashboard URL %q", base)
+	}
+	query := u.Query()
+	query.Set("token", token)
+	u.RawQuery = query.Encode()
+	return u.String(), nil
 }
 
 // openURL launches the default browser at url (best-effort, per-OS).
@@ -769,28 +809,39 @@ func cmdSignChecksums(args []string) {
 		fatal(fmt.Errorf("usage: termada sign-checksums <file>  (signs with $TERMADA_RELEASE_PRIVKEY)"))
 	}
 	priv := os.Getenv("TERMADA_RELEASE_PRIVKEY")
+	pub := os.Getenv("TERMADA_RELEASE_PUBKEY")
+	if err := signChecksumsFile(args[0], priv, pub); err != nil {
+		fatal(err)
+	}
 	if priv == "" {
 		// No key provisioned yet: write an empty .sig so the release pipeline keeps
 		// working. self-update only checks the signature when a public key is
 		// embedded (also key-gated), so an empty/unverified .sig is never read.
 		fmt.Fprintln(os.Stderr, "TERMADA_RELEASE_PRIVKEY not set — writing an empty (unsigned) .sig")
-		if err := os.WriteFile(args[0]+".sig", nil, 0o644); err != nil {
-			fatal(err)
-		}
 		return
 	}
-	data, err := os.ReadFile(args[0])
+	fmt.Printf("wrote %s.sig\n", args[0])
+}
+
+func signChecksumsFile(path, priv, pub string) error {
+	if (priv == "") != (pub == "") {
+		return fmt.Errorf("TERMADA_RELEASE_PRIVKEY and TERMADA_RELEASE_PUBKEY must be set together")
+	}
+	if priv == "" {
+		return os.WriteFile(path+".sig", nil, 0o644)
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
-		fatal(err)
+		return err
 	}
 	sig, err := selfupdate.SignEd25519(data, priv)
 	if err != nil {
-		fatal(err)
+		return err
 	}
-	if err := os.WriteFile(args[0]+".sig", []byte(sig), 0o644); err != nil {
-		fatal(err)
+	if err := selfupdate.VerifyEd25519(data, sig, pub); err != nil {
+		return fmt.Errorf("release signing key pair does not match: %w", err)
 	}
-	fmt.Printf("wrote %s.sig\n", args[0])
+	return os.WriteFile(path+".sig", []byte(sig), 0o644)
 }
 
 func cmdSetup() {
@@ -800,7 +851,7 @@ func cmdSetup() {
 
 	// Actually register with Claude Code if its CLI is present (idempotent-ish).
 	if _, err := exec.LookPath("claude"); err == nil {
-		out, err := exec.Command("claude", "mcp", "add", "termada", "--", self, "serve", "--stdio").CombinedOutput()
+		out, err := exec.Command("claude", "mcp", "add", "--scope", "user", "termada", "--", self, "serve", "--stdio").CombinedOutput()
 		s := strings.ToLower(string(out))
 		switch {
 		case err == nil:
@@ -808,18 +859,18 @@ func cmdSetup() {
 		case strings.Contains(s, "already") || strings.Contains(s, "exists"):
 			fmt.Println("✓ already registered with Claude Code")
 		default:
-			fmt.Printf("! couldn't auto-register (%v) — run it yourself:\n    claude mcp add termada -- %s serve --stdio\n", err, self)
+			fmt.Printf("! couldn't auto-register (%v) — run it yourself:\n    claude mcp add --scope user termada -- %s serve --stdio\n", err, self)
 		}
 	} else {
-		fmt.Printf("• register with your MCP client (Claude Code):\n    claude mcp add termada -- %s serve --stdio\n", self)
+		fmt.Printf("• register with your MCP client (Claude Code):\n    claude mcp add --scope user termada -- %s serve --stdio\n", self)
 	}
 
 	fmt.Printf(`
 Next:
   termada service install   # run the daemon in the background (start on login)
       …or: termada serve     # run it in the foreground
-  termada dashboard          # open the dashboard
-  termada doctor             # check everything is wired up
+  termada dashboard --open   # open the dashboard
+  termada doctor             # check the local runtime and daemon
 `)
 }
 
@@ -863,7 +914,7 @@ Getting started:
   termada setup                 register with Claude Code + next steps
   termada service install       run the daemon in the background (start on login)
   termada dashboard [--open]    print/open the dashboard URL
-  termada doctor                check that everything is wired up
+  termada doctor                check the local runtime and daemon
 
 Daemon & agent:
   termada serve                 run the daemon (control-plane + dashboard)

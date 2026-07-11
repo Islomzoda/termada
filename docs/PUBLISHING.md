@@ -1,100 +1,91 @@
-# Publishing & distribution
+# Publishing and distribution
 
-Termada is two things to a marketplace: an **MCP server** (the binary) and a
-**Claude Code plugin** (this repo bundles the MCP config + the usage skill). This
-doc records what is already live and the exact steps that still need *your*
-account (logins / OAuth that an assistant cannot complete for you).
+Termada ships one Go binary through GitHub Releases, GHCR, Homebrew, deb/rpm
+packages, the MCP registry metadata in `server.json`, and the Claude Code plugin
+manifest in `.claude-plugin/`.
 
-## ✅ Already live — Claude Code plugin marketplace
+This document describes the repository configuration and the checks required for
+a release. It deliberately does not claim that an external registry is healthy;
+verify the published artifacts after every release.
 
-This repository is a Claude Code plugin marketplace. The moment the
-`.claude-plugin/marketplace.json` + `.claude-plugin/plugin.json` (and
-`skills/termada/`) are on the default branch, anyone can install it:
+## Release pipeline
+
+Pushing a `v*` tag starts `.github/workflows/release.yml`. The workflow:
+
+1. runs the complete Go test suite;
+2. authenticates to GHCR;
+3. invokes the pinned, snapshot-tested GoReleaser v2.17.0 using `.goreleaser.yaml`;
+4. publishes platform archives, SHA-256 checksums, deb/rpm packages, the
+   Linux/amd64 GHCR image and the Homebrew formula;
+5. signs `checksums.txt` when both release-signing secrets are configured.
+
+The workflow uses these repository secrets:
+
+- `HOMEBREW_TAP_TOKEN`: a token that can write to
+  `Islomzoda/homebrew-tap`;
+- `TERMADA_RELEASE_PRIVKEY` and `TERMADA_RELEASE_PUBKEY`: an optional Ed25519 key
+  pair for signed checksums. Configure both or neither. Release builds embed the
+  public key, so a keyed build refuses unsigned self-updates.
+
+`GITHUB_TOKEN` is provided by Actions and is used for GitHub Releases and GHCR.
+
+## Version checklist
+
+Before tagging, update the version in all release metadata:
+
+- `cmd/termada/main.go` (`version` fallback);
+- `server.json` (`version` and OCI identifier tag);
+- `.claude-plugin/plugin.json`;
+- `CHANGELOG.md`.
+
+`go test ./cmd/termada` enforces that the first three values stay in sync.
+
+Run the local release gate:
+
+```bash
+test -z "$(gofmt -l $(git ls-files '*.go'))"
+go mod verify
+go vet ./...
+go test -race -p 1 ./...
+sh -n install.sh
+```
+
+Then create and push the tag:
+
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+After Actions completes, verify that the release contains `checksums.txt`, its
+signature when signing is enabled, every expected platform archive, packages and
+the GHCR image. Exercise `install.sh` and Unix `termada update` against the new
+release, and confirm that Windows reports the documented manual-install path,
+before announcing it.
+
+## MCP registry
+
+`server.json` points at the versioned GHCR image. After the image exists, follow
+the current [official publisher quickstart](https://modelcontextprotocol.io/registry/quickstart)
+with an authenticated GitHub session:
+
+```bash
+mcp-publisher login github
+mcp-publisher publish
+```
+
+Run `mcp-publisher validate server.json` before publishing, then still check the
+current official publisher help because commands and schemas can change.
+
+## Claude Code plugin
+
+The repository is a Claude Code plugin marketplace through
+`.claude-plugin/marketplace.json`. Consumers register and install it with:
 
 ```text
 /plugin marketplace add Islomzoda/termada
 /plugin install termada@termada
 ```
 
-That installs the usage skill and registers the `termada` MCP server. The user
-still needs the `termada` binary on PATH — via `./install.sh`, a GitHub release,
-or Homebrew (below). No central approval/review gate; nothing more to submit.
-
-## ▢ Needs your account — MCP registries
-
-All package registries require *your* credentials to publish, so these are
-hand-offs. None can be done without you logging in.
-
-### Prerequisite: a published package artifact
-
-The official registry points at a package hosted on npm / PyPI / OCI (Docker).
-Termada currently ships only GitHub Releases + a Homebrew tap, so publish a
-container image first. `server.json` already references `ghcr.io/islomzoda/termada`.
-
-Add to `.goreleaser.yaml` (then it builds on the next `git tag` release):
-
-```yaml
-dockers:
-  - image_templates: ["ghcr.io/islomzoda/termada:{{ .Version }}", "ghcr.io/islomzoda/termada:latest"]
-    dockerfile: Dockerfile
-    build_flag_templates: ["--platform=linux/amd64"]
-```
-
-and ensure `.github/workflows/release.yml` logs in before goreleaser runs:
-
-```yaml
-- uses: docker/login-action@v3
-  with: { registry: ghcr.io, username: ${{ github.actor }}, password: ${{ secrets.GITHUB_TOKEN }} }
-```
-
-(GHCR needs `packages: write` permission on the release job.) This is left for you
-to apply + verify in CI, since a broken docker step would fail the release.
-
-### Official MCP Registry (registry.modelcontextprotocol.io)
-
-```bash
-# 1. install the publisher CLI — download the prebuilt `mcp-publisher` binary
-#    from https://github.com/modelcontextprotocol/registry/releases
-#    (the `go install .../cmd/mcp-publisher` path does NOT exist in the module).
-#    e.g. on macOS:
-#    curl -fsSL https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_darwin_arm64.tar.gz | tar xz
-
-# 2. (recommended) regenerate/validate server.json against the CURRENT schema —
-#    this is the source of truth for the `packages` block (ours is a draft):
-./mcp-publisher init      # writes a fresh server.json; merge our name/description/oci package
-
-# 3. authenticate — THIS step is yours (opens a GitHub OAuth device flow in your browser)
-./mcp-publisher login github
-
-# 4. publish (needs the ghcr.io/islomzoda/termada image to exist — i.e. after a release)
-./mcp-publisher publish
-```
-
-The `io.github.Islomzoda/...` namespace is proven by the GitHub login. The
-`<!-- mcp-name: io.github.Islomzoda/termada -->` marker is already in the README.
-
-### Third-party directories
-
-- **mcp.so**, **Glama** (`glama.ai/mcp`) — largely crawl public GitHub repos that
-  carry the `mcp-name` marker. The marker is in place; they should pick it up, or
-  submit the repo URL on their site.
-- **Smithery** (`smithery.ai`) — sign in with GitHub, "Add server", point at this
-  repo. (Your account.)
-- **awesome-mcp-servers** — open a PR adding Termada to
-  `https://github.com/punkpeye/awesome-mcp-servers` (fork + PR; your GitHub).
-
-## Homebrew (currently formula-only, not pushed)
-
-`brews:` in `.goreleaser.yaml` has `skip_upload: "true"` — goreleaser builds the
-formula but does NOT push it, because the `Islomzoda/homebrew-tap` repo doesn't
-exist yet and the default `GITHUB_TOKEN` can't write to a separate repo anyway.
-(Pushing to a non-existent tap is what turned the v0.7.0 release red.)
-
-To enable `brew install islomzoda/termada/termada`:
-1. Create a public repo `Islomzoda/homebrew-tap`.
-2. Create a PAT (classic, `repo` scope) and add it as the `HOMEBREW_TAP_TOKEN`
-   secret on the termada repo.
-3. In `.goreleaser.yaml`: remove `skip_upload`, and set
-   `brews[].repository.token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"`.
-4. In `release.yml`, pass `HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}`
-   in the goreleaser step's `env:`.
+The plugin installs the MCP configuration and usage skill. The `termada` binary
+must already be available on `PATH`.

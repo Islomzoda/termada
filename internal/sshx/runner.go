@@ -8,13 +8,13 @@
 package sshx
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/termada/termada/internal/fleet"
@@ -34,14 +34,65 @@ const defaultCmdTimeout = 10 * time.Minute
 // session reconnects, instead of a Read hanging forever. Overridable for tests.
 const defaultKeepalive = 15 * time.Second
 
+// defaultIOTimeout bounds SSH channel setup and SFTP operations. The command
+// runtime has its own, longer limit; this covers protocol requests that would
+// otherwise wait forever on a connected but unresponsive peer.
+const defaultIOTimeout = 30 * time.Second
+
+// maxCommandOutputBytes bounds each output stream returned by one fleet SSH
+// command. Fleet results are retained and serialized as a whole, so an
+// untrusted remote must not be able to grow daemon memory without bound.
+const maxCommandOutputBytes = 1 << 20
+
+const outputTruncatedMarker = "\n[termada: output truncated]\n"
+
+// knownHostsMu serializes the read-check-append TOFU transaction. Without it,
+// simultaneous first connections could both trust different keys for the same
+// host before either append became visible.
+var knownHostsMu sync.Mutex
+
+type cappedBuffer struct {
+	data      []byte
+	limit     int
+	truncated bool
+}
+
+func newCappedBuffer(limit int) *cappedBuffer {
+	return &cappedBuffer{limit: limit}
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	stored := 0
+	if remaining := b.limit - len(b.data); remaining > 0 {
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		b.data = append(b.data, p[:remaining]...)
+		stored = remaining
+	}
+	if stored < len(p) {
+		b.truncated = true
+	}
+	return len(p), nil
+}
+
+func (b *cappedBuffer) String() string {
+	if b.truncated {
+		return string(b.data) + outputTruncatedMarker
+	}
+	return string(b.data)
+}
+
 // Runner runs commands over SSH. It satisfies fleet.Runner.
 type Runner struct {
 	vault      *vault.Vault
 	knownHosts string
 	timeout    time.Duration // dial timeout
 	cmdTimeout time.Duration // per-command execution timeout (0 = no cap)
+	ioTimeout  time.Duration // channel setup, interactive writes and SFTP operations
 	keepalive  time.Duration // persistent-shell keepalive interval (0 = off)
 	keyDir     string        // default on-disk key dir; "" => ~/.ssh (overridable for tests)
+	sftpSlots  chan struct{}
 }
 
 // NewRunner builds an SSH runner.
@@ -49,11 +100,14 @@ func NewRunner(v *vault.Vault, knownHostsPath string, timeout time.Duration) *Ru
 	if timeout <= 0 {
 		timeout = 20 * time.Second
 	}
-	return &Runner{vault: v, knownHosts: knownHostsPath, timeout: timeout, cmdTimeout: defaultCmdTimeout, keepalive: defaultKeepalive}
+	return &Runner{vault: v, knownHosts: knownHostsPath, timeout: timeout, cmdTimeout: defaultCmdTimeout, ioTimeout: defaultIOTimeout, keepalive: defaultKeepalive, sftpSlots: make(chan struct{}, 16)}
 }
 
 // SetCommandTimeout overrides the per-command execution timeout (0 disables it).
 func (r *Runner) SetCommandTimeout(d time.Duration) { r.cmdTimeout = d }
+
+// SetIOTimeout overrides the SSH channel/SFTP operation timeout (0 disables it).
+func (r *Runner) SetIOTimeout(d time.Duration) { r.ioTimeout = d }
 
 // SetKeepalive overrides the persistent-shell keepalive interval (0 disables it).
 func (r *Runner) SetKeepalive(d time.Duration) { r.keepalive = d }
@@ -84,7 +138,7 @@ func runWithTimeout(d time.Duration, fn func() error, onTimeout func()) (error, 
 func (r *Runner) Run(server fleet.Server, command []string) fleet.Result {
 	start := time.Now()
 	res := fleet.Result{Server: server.Name}
-	client, err := r.dial(server)
+	client, transport, err := r.dialTransport(server)
 	if err != nil {
 		res.Status = classifyDialErr(err)
 		res.Error = err.Error()
@@ -92,6 +146,12 @@ func (r *Runner) Run(server fleet.Server, command []string) fleet.Result {
 		return res
 	}
 	defer client.Close()
+	if err := setDeadline(transport, r.ioTimeout); err != nil {
+		res.Status = "conn_lost"
+		res.Error = fmt.Sprintf("set SSH setup deadline: %v", err)
+		res.DurationMS = time.Since(start).Milliseconds()
+		return res
+	}
 
 	sess, err := client.NewSession()
 	if err != nil {
@@ -101,13 +161,20 @@ func (r *Runner) Run(server fleet.Server, command []string) fleet.Result {
 		return res
 	}
 	defer sess.Close()
+	if err := transport.SetDeadline(time.Time{}); err != nil {
+		res.Status = "conn_lost"
+		res.Error = fmt.Sprintf("clear SSH setup deadline: %v", err)
+		res.DurationMS = time.Since(start).Milliseconds()
+		return res
+	}
 
-	var stdout, stderr bytes.Buffer
-	sess.Stdout = &stdout
-	sess.Stderr = &stderr
+	stdout := newCappedBuffer(maxCommandOutputBytes)
+	stderr := newCappedBuffer(maxCommandOutputBytes)
+	sess.Stdout = stdout
+	sess.Stderr = stderr
 	runErr, timedOut := runWithTimeout(r.cmdTimeout, func() error {
 		return sess.Run(shellJoin(command))
-	}, func() { _ = sess.Close() })
+	}, func() { _ = transport.Close() })
 	res.DurationMS = time.Since(start).Milliseconds()
 	if timedOut {
 		// Don't read the output buffers here: the abandoned sess.Run goroutine may
@@ -136,13 +203,20 @@ func (r *Runner) Run(server fleet.Server, command []string) fleet.Result {
 }
 
 func (r *Runner) dial(server fleet.Server) (*ssh.Client, error) {
+	client, _, err := r.dialTransport(server)
+	return client, err
+}
+
+// dialTransport retains the underlying net.Conn so callers can apply operation
+// deadlines or forcibly unblock an SSH channel request on timeout.
+func (r *Runner) dialTransport(server fleet.Server) (*ssh.Client, net.Conn, error) {
 	port := server.Port
 	if port == 0 {
 		port = 22
 	}
 	auths, cleanup, err := r.authMethods(server)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The ssh-agent socket is only needed during the handshake; close it once
 	// Dial returns so a per-dial agent connection can't leak (a 30s fleet
@@ -154,7 +228,41 @@ func (r *Runner) dial(server fleet.Server) (*ssh.Client, error) {
 		HostKeyCallback: r.hostKeyCallback(),
 		Timeout:         r.timeout,
 	}
-	return ssh.Dial("tcp", fmt.Sprintf("%s:%d", server.Host, port), cfg)
+	addr := sshServerAddress(server.Host, port)
+	transport, err := (&net.Dialer{Timeout: r.timeout}).Dial("tcp", addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := setDeadline(transport, r.timeout); err != nil {
+		_ = transport.Close()
+		return nil, nil, err
+	}
+	conn, chans, reqs, err := ssh.NewClientConn(transport, addr, cfg)
+	if err != nil {
+		_ = transport.Close()
+		return nil, nil, err
+	}
+	if err := transport.SetDeadline(time.Time{}); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	return ssh.NewClient(conn, chans, reqs), transport, nil
+}
+
+func setDeadline(conn net.Conn, timeout time.Duration) error {
+	if timeout <= 0 {
+		return conn.SetDeadline(time.Time{})
+	}
+	return conn.SetDeadline(time.Now().Add(timeout))
+}
+
+func sshServerAddress(host string, port int) string {
+	// Inventory values normally store a raw IPv6 literal, but tolerate brackets
+	// copied from a URL/config example before applying JoinHostPort.
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	return net.JoinHostPort(host, fmt.Sprintf("%d", port))
 }
 
 // authMethods decides how to authenticate to server:
@@ -187,7 +295,7 @@ func (r *Runner) authMethods(server fleet.Server) ([]ssh.AuthMethod, func(), err
 	}
 	var methods []ssh.AuthMethod
 	var conns []net.Conn
-	if m, conn := agentAuth(); m != nil {
+	if m, conn := agentAuth(r.timeout); m != nil {
 		methods = append(methods, m)
 		if conn != nil {
 			conns = append(conns, conn)
@@ -210,14 +318,17 @@ func (r *Runner) authMethods(server fleet.Server) ([]ssh.AuthMethod, func(), err
 // agentAuth offers the keys held by a running ssh-agent ($SSH_AUTH_SOCK). It
 // returns the underlying connection so the caller can close it after the
 // handshake; both are nil if no agent is reachable.
-func agentAuth() (ssh.AuthMethod, net.Conn) {
+func agentAuth(timeout time.Duration) (ssh.AuthMethod, net.Conn) {
 	sock := os.Getenv("SSH_AUTH_SOCK")
 	if sock == "" {
 		return nil, nil
 	}
-	conn, err := net.Dial("unix", sock)
+	conn, err := net.DialTimeout("unix", sock, timeout)
 	if err != nil {
 		return nil, nil
+	}
+	if timeout > 0 {
+		_ = conn.SetDeadline(time.Now().Add(timeout))
 	}
 	return ssh.PublicKeysCallback(agent.NewClient(conn).Signers), conn
 }
@@ -250,11 +361,27 @@ func defaultKeySigners(dir string) []ssh.Signer {
 // known hosts must match, mismatches are rejected.
 func (r *Runner) hostKeyCallback() ssh.HostKeyCallback {
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		_ = os.MkdirAll(filepath.Dir(r.knownHosts), 0o700)
+		knownHostsMu.Lock()
+		defer knownHostsMu.Unlock()
+
+		if err := os.MkdirAll(filepath.Dir(r.knownHosts), 0o700); err != nil {
+			return fmt.Errorf("create known_hosts directory: %w", err)
+		}
+		unlock, err := lockKnownHosts(r.knownHosts + ".lock")
+		if err != nil {
+			return fmt.Errorf("lock known_hosts: %w", err)
+		}
+		defer unlock()
+
 		check, err := knownhosts.New(r.knownHosts)
 		if err != nil {
-			// No known_hosts yet: trust on first use.
-			return appendKnownHost(r.knownHosts, hostname, key)
+			if os.IsNotExist(err) {
+				// No known_hosts yet: trust on first use.
+				return appendKnownHost(r.knownHosts, hostname, key)
+			}
+			// A malformed/unreadable database is not equivalent to first use. Accepting
+			// here would silently discard the operator's existing trust decisions.
+			return fmt.Errorf("load known_hosts %s: %w", r.knownHosts, err)
 		}
 		e := check(hostname, remote, key)
 		if e == nil {
@@ -275,8 +402,10 @@ func appendKnownHost(path, hostname string, key ssh.PublicKey) error {
 	}
 	defer f.Close()
 	line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
-	_, err = f.WriteString(line + "\n")
-	return err
+	if _, err = f.WriteString(line + "\n"); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 func classifyDialErr(err error) string {
@@ -300,19 +429,5 @@ func shellJoin(argv []string) string {
 }
 
 func shellQuote(s string) string {
-	if s == "" {
-		return "''"
-	}
-	safe := true
-	for _, c := range s {
-		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' ||
-			strings.ContainsRune("_@%+=:,./-", c)) {
-			safe = false
-			break
-		}
-	}
-	if safe {
-		return s
-	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

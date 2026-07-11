@@ -20,21 +20,21 @@ type Backend interface {
 	Kill(owner, jobID string) error
 	ListJobs(owner, filter string) []engine.Info
 	CreateSession(owner, target, mode string) (engine.SessionInfo, error)
-	ListSessions() []engine.SessionInfo
+	ListSessions(owner string) []engine.SessionInfo
 	CloseSession(owner, id string) error
 	Tail(owner, jobID, cursor string) (*engine.TailResult, error)
 	// FileRead/FileWrite are session-aware: with an empty or local session they
 	// act on the daemon host; with a remote session they refuse loudly (instead
 	// of silently touching the local FS while the agent believes it is remote).
-	FileRead(session, path string, maxBytes int) (*engine.FileReadResult, error)
-	FileWrite(session, path, content, mode string) (*engine.FileWriteResult, error)
+	FileRead(owner, session, path string, maxBytes int) (*engine.FileReadResult, error)
+	FileWrite(owner, session, path, content, mode string) (*engine.FileWriteResult, error)
 	RecipeList() []engine.RecipeInfo
 	RecipeRun(owner, session, name string) (*engine.RecipeRunResult, error)
 	ServerList() []fleet.ServerInfo
-	FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error)
-	PortForward(server, remoteHost string, remotePort int, localBind string) (*engine.ForwardInfo, error)
-	PortForwardList() []engine.ForwardInfo
-	PortForwardClose(id string) error
+	FleetRun(owner string, command []string, selector []string, parallelism int) (*fleet.RunResult, error)
+	PortForward(owner, server, remoteHost string, remotePort int, localBind string) (*engine.ForwardInfo, error)
+	PortForwardList(owner string) []engine.ForwardInfo
+	PortForwardClose(owner, id string) error
 	PluginTools() []plugin.ToolSpec
 	PluginCall(owner, name string, args map[string]any) (any, error)
 	RecordConnect(agent string)
@@ -95,7 +95,9 @@ func (b *LocalBackend) CreateSession(owner, target, mode string) (engine.Session
 	return engine.SessionInfo{SessionID: sess.ID, Target: sess.Target, Mode: sess.Mode, Owner: sess.Owner}, nil
 }
 
-func (b *LocalBackend) ListSessions() []engine.SessionInfo { return b.m.ListSessions() }
+func (b *LocalBackend) ListSessions(owner string) []engine.SessionInfo {
+	return b.m.ListSessionsFor(owner)
+}
 func (b *LocalBackend) CloseSession(owner, id string) error {
 	return b.m.CloseSession(owner, id)
 }
@@ -104,12 +106,12 @@ func (b *LocalBackend) Tail(owner, jobID, cursor string) (*engine.TailResult, er
 	return b.m.Tail(owner, jobID, cursor, false)
 }
 
-func (b *LocalBackend) FileRead(session, path string, maxBytes int) (*engine.FileReadResult, error) {
-	return b.m.FileReadAt(session, path, maxBytes)
+func (b *LocalBackend) FileRead(owner, session, path string, maxBytes int) (*engine.FileReadResult, error) {
+	return b.m.FileReadFor(owner, session, path, maxBytes)
 }
 
-func (b *LocalBackend) FileWrite(session, path, content, mode string) (*engine.FileWriteResult, error) {
-	return b.m.FileWriteAt(session, path, content, mode)
+func (b *LocalBackend) FileWrite(owner, session, path, content, mode string) (*engine.FileWriteResult, error) {
+	return b.m.FileWriteFor(owner, session, path, content, mode)
 }
 
 func (b *LocalBackend) RecipeList() []engine.RecipeInfo { return b.m.RecipeList() }
@@ -128,17 +130,21 @@ func (b *LocalBackend) ServerList() []fleet.ServerInfo { return nil }
 // or SSH. The agent should treat target=local as the only option here.
 func (b *LocalBackend) RemoteAvailable() bool { return false }
 
-func (b *LocalBackend) FleetRun(command []string, selector []string, parallelism int) (*fleet.RunResult, error) {
+func (b *LocalBackend) FleetRun(owner string, command []string, selector []string, parallelism int) (*fleet.RunResult, error) {
 	return nil, errs.New(errs.NotSupported, "fleet requires a running daemon (run: termada serve)")
 }
 
 // Port forwarding needs the daemon (server inventory + SSH runner); the
 // in-process fallback returns NotSupported via the engine.
-func (b *LocalBackend) PortForward(server, remoteHost string, remotePort int, localBind string) (*engine.ForwardInfo, error) {
-	return b.m.PortForward(server, remoteHost, remotePort, localBind)
+func (b *LocalBackend) PortForward(owner, server, remoteHost string, remotePort int, localBind string) (*engine.ForwardInfo, error) {
+	return b.m.PortForward(owner, server, remoteHost, remotePort, localBind)
 }
-func (b *LocalBackend) PortForwardList() []engine.ForwardInfo { return b.m.PortForwardList() }
-func (b *LocalBackend) PortForwardClose(id string) error      { return b.m.PortForwardClose(id) }
+func (b *LocalBackend) PortForwardList(owner string) []engine.ForwardInfo {
+	return b.m.PortForwardList(owner)
+}
+func (b *LocalBackend) PortForwardClose(owner, id string) error {
+	return b.m.PortForwardClose(owner, id)
+}
 
 // Plugins are daemon-only (loaded from the plugins dir); the in-process fallback
 // has none.

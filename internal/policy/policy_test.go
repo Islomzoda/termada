@@ -1,6 +1,9 @@
 package policy
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func engine() *Engine {
 	return NewEngine(map[string]Policy{
@@ -48,6 +51,137 @@ func TestNormalizationClosesBypasses(t *testing.T) {
 	// …but a wrapper must NOT slip a non-allowed program past the whitelist.
 	if d := e.Evaluate("read-only", []string{"sudo", "ls"}).Decision; d != Deny {
 		t.Fatalf("sudo ls (allowlist) => %s, want deny", d)
+	}
+}
+
+func TestCompoundShellCommandsFailClosed(t *testing.T) {
+	e := NewEngine(map[string]Policy{
+		"deny":    {Deny: []string{"rm -rf /"}},
+		"confirm": {Confirm: []string{"rm -rf*"}},
+	})
+	denied := [][]string{
+		{"bash", "-c", "echo safe; rm -rf /"},
+		{"bash", "-lc", "echo safe && rm -rf /"},
+		{"sh", "-ec", "echo safe\nrm -rf /"},
+		{"bash", "-c", "echo safe; r''m -rf /"},
+		{"bash", "-c", "$DANGEROUS_COMMAND"},
+		{"bash", "-c", "eval rm -rf /"},
+		{"bash", "-c", "command eval rm -rf /"},
+		{"bash", "-c", "source /tmp/unreviewed-script"},
+		{"sudo", "-u", "root", "env", "-u", "HOME", "bash", "-lc", "echo safe || rm -rf /"},
+	}
+	for _, av := range denied {
+		if got := e.Evaluate("deny", av); got.Decision != Deny {
+			t.Errorf("%v => %+v, want deny", av, got)
+		}
+	}
+
+	if got := e.Evaluate("confirm", []string{"bash", "-c", "echo safe; rm -rf build"}); got.Decision != Confirm {
+		t.Fatalf("compound confirm command => %+v, want confirm", got)
+	}
+	// Even when no literal rule target can be extracted, ambiguous shell syntax
+	// cannot silently become allow under a confirm policy.
+	if got := e.Evaluate("confirm", []string{"bash", "-c", "$MAYBE_DANGEROUS"}); got.Decision != Confirm {
+		t.Fatalf("dynamic shell command => %+v, want confirm", got)
+	}
+}
+
+func TestUninspectableShellInvocationsFailClosed(t *testing.T) {
+	e := NewEngine(map[string]Policy{
+		"deny":    {Deny: []string{"rm -rf /"}},
+		"confirm": {Confirm: []string{"rm -rf*"}},
+	})
+	commands := map[string][]string{
+		"script":      {"bash", "/tmp/agent-script"},
+		"stdin":       {"bash", "-s"},
+		"interactive": {"bash"},
+	}
+	for name, argv := range commands {
+		t.Run(name, func(t *testing.T) {
+			if got := e.Evaluate("deny", argv); got.Decision != Deny {
+				t.Fatalf("deny policy evaluated %v as %+v, want deny", argv, got)
+			}
+			if got := e.Evaluate("confirm", argv); got.Decision != Confirm {
+				t.Fatalf("confirm policy evaluated %v as %+v, want confirm", argv, got)
+			}
+		})
+	}
+
+	// An explicit, syntax-free -c payload remains inspectable and can proceed
+	// when it does not match any restrictive rule.
+	if got := e.Evaluate("deny", []string{"bash", "-c", "printf ok"}); got.Decision != Allow {
+		t.Fatalf("inspectable shell payload = %+v, want allow", got)
+	}
+}
+
+func TestEnvSplitStringIsOpaque(t *testing.T) {
+	for name, rules := range map[string]Policy{
+		"deny":    {Deny: []string{"touch *"}},
+		"confirm": {Confirm: []string{"touch *"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := NewEngine(map[string]Policy{"p": rules})
+			for _, argv := range [][]string{
+				{"env", "-S", "touch /tmp/policy-bypass", "true"},
+				{"env", "-Stouch /tmp/policy-bypass", "true"},
+				{"env", "--split-string=touch /tmp/policy-bypass", "true"},
+			} {
+				got := e.Evaluate("p", argv).Decision
+				if name == "deny" && got != Deny {
+					t.Fatalf("Evaluate(%q) = %s, want deny", argv, got)
+				}
+				if name == "confirm" && got != Confirm {
+					t.Fatalf("Evaluate(%q) = %s, want confirm", argv, got)
+				}
+			}
+		})
+	}
+}
+
+func TestWrapperOptionParsing(t *testing.T) {
+	e := NewEngine(map[string]Policy{"p": {Deny: []string{"rm -rf /"}}})
+	for _, av := range [][]string{
+		{"sudo", "-uroot", "/bin/rm", "-rf", "/"},
+		{"sudo", "--user=root", "env", "X=1", "rm", "-rf", "/"},
+		{"nice", "-n", "10", "nohup", "rm", "-rf", "/"},
+	} {
+		if got := e.Evaluate("p", av); got.Decision != Deny {
+			t.Errorf("%v => %+v, want deny", av, got)
+		}
+	}
+}
+
+func TestLeadingAssignmentCannotHideDeniedProgram(t *testing.T) {
+	e := NewEngine(map[string]Policy{"p": {Deny: []string{"rm -rf /"}}})
+	if got := e.Evaluate("p", []string{"X=1", "rm", "-rf", "/"}); got.Decision != Deny {
+		t.Fatalf("assignment-prefixed command = %+v, want deny", got)
+	}
+}
+
+func TestDarwinExecutableMatchingFoldsOnlyProgramCase(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("APFS/HFS executable case-folding is Darwin-specific")
+	}
+	e := NewEngine(map[string]Policy{"p": {Deny: []string{"rm -rf /", "bash*"}}})
+	for _, command := range [][]string{{"/BIN/RM", "-rf", "/"}, {"/BIN/BASH", "-c", "echo ok"}} {
+		if got := e.Evaluate("p", command); got.Decision != Deny {
+			t.Fatalf("alternate-case executable %v = %+v, want deny", command, got)
+		}
+	}
+}
+
+func TestDarwinAllowlistRequiresExactExecutableCase(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin-specific allowlist regression")
+	}
+	e := NewEngine(map[string]Policy{"p": {Allow: []string{"ls"}}})
+	for _, command := range [][]string{{"LS"}, {"/BIN/LS"}} {
+		if got := e.Evaluate("p", command); got.Decision != Deny {
+			t.Fatalf("alternate-case allowlisted executable %v = %+v, want deny", command, got)
+		}
+	}
+	if got := e.Evaluate("p", []string{"/bin/ls"}); got.Decision != Allow {
+		t.Fatalf("exact-case allowlisted executable = %+v, want allow", got)
 	}
 }
 

@@ -27,6 +27,19 @@ type Config struct {
 	RedactionPatterns    []string
 }
 
+const (
+	maxCommandArgs      = 4096
+	maxCommandBytes     = 256 << 10
+	maxAgentIDBytes     = 128
+	maxAgentTokenBytes  = 4096
+	maxSessionsPerOwner = 32
+	maxSessionsTotal    = 128
+	maxPendingPerOwner  = 32
+	maxPendingTotal     = 128
+	maxJobsInMemory     = 256
+	maxExecWaitMS       = 24 * 60 * 60 * 1000
+)
+
 // DefaultConfig returns sane defaults.
 func DefaultConfig() Config {
 	return Config{
@@ -41,10 +54,17 @@ func DefaultConfig() Config {
 
 // maxOutputBytes returns the effective per-call output cap.
 func (m *Manager) maxOutputBytes() int {
-	if m.cfg.MaxOutputBytes > 0 {
-		return m.cfg.MaxOutputBytes
+	n := m.cfg.MaxOutputBytes
+	if n <= 0 {
+		n = m.cfg.OutputRetentionBytes
 	}
-	return m.cfg.OutputRetentionBytes
+	if n <= 0 {
+		n = 100_000
+	}
+	if n > 1<<20 {
+		n = 1 << 20
+	}
+	return n
 }
 
 // Manager owns all sessions and the global job registry (spec §9/§10).
@@ -52,43 +72,61 @@ type Manager struct {
 	cfg      Config
 	redactor *output.Redactor
 
-	bus            *bus.Bus
-	pol            *policy.Engine
-	agentPolicies  map[string]string
-	agentTokens    map[string]string // token -> agent id (non-spoofable identity)
-	timeoutClasses map[string]int    // class name -> timeout ms (LR-2)
-	auditOK        func() bool       // audit health probe; dangerous ops fail closed if false
-	remoteDial     RemoteDialer      // opens a shell to a named remote server (wired by daemon)
-	remoteFiles    RemoteFileOps     // file_read/file_write against a remote target (wired by daemon)
-	forwards       ForwardOps        // local→remote SSH port forwards (wired by daemon)
+	bus              *bus.Bus
+	pol              *policy.Engine
+	agentPolicies    map[string]string
+	agentTokens      map[string]string   // token -> agent id (non-spoofable identity)
+	tokenBoundAgents map[string]struct{} // ids that may only be claimed with their configured token
+	timeoutClasses   map[string]int      // class name -> timeout ms (LR-2)
+	auditOK          func() bool         // audit health probe; dangerous ops fail closed if false
+	remoteDial       RemoteDialer        // opens a shell to a named remote server (wired by daemon)
+	remoteFiles      RemoteFileOps       // file_read/file_write against a remote target (wired by daemon)
+	forwards         ForwardOps          // local→remote SSH port forwards (wired by daemon)
 
-	persistPath    string
+	persistPath    string // guarded by persistMu
+	persistErr     error  // last registry write/recovery error; guarded by persistMu
 	snapshotDir    string
 	protectedPaths []string    // canonical paths file_read/file_write refuse (C2/FS-3)
 	spawn          SpawnConfig // how local agent shells are launched (uid separation, SEC-8)
 	recovered      []Info      // jobs recovered from a previous run (orphaned/terminal)
 
-	mu       sync.Mutex
-	sessions map[string]*Session
-	jobs     map[string]*Job
-	defaults map[string]string          // owner -> default session id
-	pending  map[string]*pendingConfirm // confirmation_id -> pending exec
-	recipes  map[string]Recipe
-	agents   map[string]*AgentStat // agent id -> activity stats
+	mu                 sync.Mutex
+	persistMu          sync.Mutex
+	watchWG            sync.WaitGroup
+	defaultMu          [32]sync.Mutex
+	sessions           map[string]*Session
+	jobs               map[string]*Job
+	defaults           map[string]string          // owner -> default session id
+	pending            map[string]*pendingConfirm // confirmation_id -> pending exec
+	recipes            map[string]Recipe
+	agents             map[string]*AgentStat // agent id -> activity stats
+	reservedForeground int                   // approved confirmations transitioning into a foreground session job
+	reservedBackground int                   // approved confirmations transitioning into a background session job
+	reservedSessions   int
+	reservedByOwner    map[string]int
+	reservedJobs       int
+	reservedByAgent    map[string]int
+	recipeStepTimeout  time.Duration
+	closed             bool
 }
 
 // NewManager builds a manager.
 func NewManager(cfg Config) *Manager {
 	return &Manager{
-		cfg:           cfg,
-		redactor:      output.NewRedactor(cfg.RedactionPatterns),
-		agentPolicies: map[string]string{},
-		sessions:      map[string]*Session{},
-		jobs:          map[string]*Job{},
-		defaults:      map[string]string{},
-		pending:       map[string]*pendingConfirm{},
-		recipes:       map[string]Recipe{},
-		agents:        map[string]*AgentStat{},
+		cfg:               cfg,
+		redactor:          output.NewRedactor(cfg.RedactionPatterns),
+		agentPolicies:     map[string]string{},
+		agentTokens:       map[string]string{},
+		tokenBoundAgents:  map[string]struct{}{},
+		sessions:          map[string]*Session{},
+		jobs:              map[string]*Job{},
+		defaults:          map[string]string{},
+		pending:           map[string]*pendingConfirm{},
+		recipes:           map[string]Recipe{},
+		agents:            map[string]*AgentStat{},
+		reservedByOwner:   map[string]int{},
+		reservedByAgent:   map[string]int{},
+		recipeStepTimeout: 30 * time.Minute,
 	}
 }
 
@@ -111,21 +149,69 @@ func (m *Manager) SetPolicy(p *policy.Engine, agentPolicies map[string]string) {
 
 // SetAgentTokens installs token→agent-id bindings for non-spoofable identity.
 func (m *Manager) SetAgentTokens(tokens map[string]string) {
-	if tokens != nil {
-		m.agentTokens = tokens
+	if tokens == nil {
+		return
 	}
+	m.mu.Lock()
+	m.agentTokens = make(map[string]string, len(tokens))
+	m.tokenBoundAgents = make(map[string]struct{}, len(tokens))
+	for token, id := range tokens {
+		if !validAgentToken(token) || !validAgentID(id) {
+			continue
+		}
+		m.agentTokens[token] = id
+		m.tokenBoundAgents[id] = struct{}{}
+	}
+	m.mu.Unlock()
 }
 
-// ResolveAgent maps a presented token to its configured agent id. If the token
-// is empty or unknown, the self-asserted fallback is used (local/dev mode); but
-// a configured token resolves to exactly its agent and cannot be spoofed (MA-2).
-func (m *Manager) ResolveAgent(token, fallback string) string {
-	if token != "" {
-		if id, ok := m.agentTokens[token]; ok {
-			return id
-		}
+// AuthenticateAgent binds a request to an agent identity. Presented tokens are
+// authoritative and fail closed: an unknown token is never allowed to fall back
+// to request JSON. Tokenless self-assertion remains available only for
+// unconfigured local/dev identities and never for the empty (operator) owner.
+func (m *Manager) AuthenticateAgent(token, asserted string) (string, error) {
+	token = strings.TrimSpace(token)
+	trimmedAsserted := strings.TrimSpace(asserted)
+	if asserted != trimmedAsserted {
+		return "", errs.New(errs.InvalidArgument, "agent identity must not have leading or trailing whitespace")
 	}
-	return fallback
+	asserted = trimmedAsserted
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if token != "" {
+		if !validAgentToken(token) {
+			return "", errs.New(errs.DeniedByPolicy, "invalid agent token")
+		}
+		if id, ok := m.agentTokens[token]; ok {
+			return id, nil
+		}
+		return "", errs.New(errs.DeniedByPolicy, "unknown agent token")
+	}
+	if asserted == "" {
+		return "", errs.New(errs.DeniedByPolicy, "agent identity is required")
+	}
+	if !validAgentID(asserted) {
+		return "", errs.New(errs.InvalidArgument, "agent identity must be at most %d bytes and contain no whitespace/control characters", maxAgentIDBytes)
+	}
+	if _, protected := m.tokenBoundAgents[asserted]; protected {
+		return "", errs.New(errs.DeniedByPolicy, "agent %q requires its configured token", asserted)
+	}
+	return asserted, nil
+}
+
+func validAgentID(id string) bool {
+	return id != "" && len(id) <= maxAgentIDBytes && strings.IndexFunc(id, func(r rune) bool { return r < 0x21 || r == 0x7f }) < 0
+}
+
+func validAgentToken(token string) bool {
+	return token != "" && len(token) <= maxAgentTokenBytes && strings.IndexFunc(token, func(r rune) bool { return r < 0x21 || r > 0x7e }) < 0
+}
+
+// ResolveAgent is kept for callers that only need the resolved id. Invalid
+// credentials resolve to the empty string rather than a self-asserted fallback.
+func (m *Manager) ResolveAgent(token, asserted string) string {
+	id, _ := m.AuthenticateAgent(token, asserted)
+	return id
 }
 
 // SetTimeoutClasses installs the per-class adaptive timeouts (LR-2).
@@ -195,10 +281,23 @@ func (m *Manager) AgentPolicies() map[string]string {
 	return out
 }
 
-func (m *Manager) publish(e bus.Event) {
+func (m *Manager) publish(e bus.Event) error {
 	if m.bus != nil {
-		m.bus.Publish(e)
+		return m.bus.Publish(e)
 	}
+	return nil
+}
+
+func managerClosedError() error {
+	return errs.New(errs.NotFound, "engine manager is shut down")
+}
+
+// Closed reports whether shutdown has begun. Shutdown is a one-way lifecycle
+// transition: once this returns true, the manager refuses new live resources.
+func (m *Manager) Closed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closed
 }
 
 // pendingConfirm is a command awaiting human approval (spec §18a).
@@ -213,6 +312,7 @@ type pendingConfirm struct {
 	Matched  string
 	Created  time.Time
 	resolved bool
+	timer    *time.Timer
 }
 
 // SessionInfo is the JSON-facing snapshot of a session.
@@ -232,6 +332,24 @@ func (m *Manager) CreateSession(owner, target, mode string) (*Session, error) {
 	if mode == "" {
 		mode = "shell"
 	}
+	if mode != "shell" {
+		return nil, errs.New(errs.InvalidArgument, "unsupported session mode %q", mode)
+	}
+	if len(target) > 255 || strings.TrimSpace(target) != target || strings.IndexFunc(target, func(r rune) bool { return r < 0x21 || r == 0x7f }) >= 0 {
+		return nil, errs.New(errs.InvalidArgument, "session target must be at most 255 bytes and contain no whitespace/control characters")
+	}
+	if owner != "" && !validAgentID(owner) {
+		return nil, errs.New(errs.InvalidArgument, "invalid session owner")
+	}
+	if err := m.reserveSession(owner); err != nil {
+		return nil, err
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			m.releaseSessionReservation(owner)
+		}
+	}()
 	scfg := SessionConfig{OutputRetentionBytes: m.cfg.OutputRetentionBytes, PTYCols: m.cfg.PTYCols}
 	var sess *Session
 	var err error
@@ -250,17 +368,65 @@ func (m *Manager) CreateSession(owner, target, mode string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	sess.onReset = func() {
-		m.publish(bus.Event{Type: bus.EvSessionReset, AgentID: sess.Owner, SessionID: sess.ID,
-			Message: "remote connection dropped; reconnected — cwd/env were reset"})
-	}
 	m.mu.Lock()
+	m.releaseSessionReservationLocked(owner)
+	if m.closed {
+		reserved = false
+		m.mu.Unlock()
+		sess.close()
+		return nil, managerClosedError()
+	}
 	m.sessions[sess.ID] = sess
+	reserved = false
 	m.mu.Unlock()
 	m.publish(bus.Event{Type: bus.EvSessionCreated, AgentID: owner, SessionID: sess.ID,
 		Data: map[string]any{"target": target, "mode": mode}})
+	sess.setOnReset(func() {
+		m.publish(bus.Event{Type: bus.EvSessionReset, AgentID: sess.Owner, SessionID: sess.ID,
+			Message: "remote connection dropped; reconnected — cwd/env were reset"})
+	})
 	m.touchAgent(owner, func(a *AgentStat) { a.Sessions++ })
 	return sess, nil
+}
+
+func (m *Manager) reserveSession(owner string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return managerClosedError()
+	}
+	if len(m.sessions)+m.reservedSessions >= maxSessionsTotal {
+		return errs.New(errs.ParallelismExceeded, "daemon reached its session limit (%d)", maxSessionsTotal)
+	}
+	if owner != "" {
+		owned := m.reservedByOwner[owner]
+		for _, session := range m.sessions {
+			if session.Owner == owner {
+				owned++
+			}
+		}
+		if owned >= maxSessionsPerOwner {
+			return errs.New(errs.ParallelismExceeded, "agent %q reached its session limit (%d)", owner, maxSessionsPerOwner)
+		}
+	}
+	m.reservedSessions++
+	m.reservedByOwner[owner]++
+	return nil
+}
+
+func (m *Manager) releaseSessionReservation(owner string) {
+	m.mu.Lock()
+	m.releaseSessionReservationLocked(owner)
+	m.mu.Unlock()
+}
+
+func (m *Manager) releaseSessionReservationLocked(owner string) {
+	m.reservedSessions--
+	if m.reservedByOwner[owner] <= 1 {
+		delete(m.reservedByOwner, owner)
+	} else {
+		m.reservedByOwner[owner]--
+	}
 }
 
 // resolveSession returns the named session, or the owner's default session
@@ -268,17 +434,39 @@ func (m *Manager) CreateSession(owner, target, mode string) (*Session, error) {
 func (m *Manager) resolveSession(owner, id string) (*Session, error) {
 	if id != "" {
 		m.mu.Lock()
+		if m.closed {
+			m.mu.Unlock()
+			return nil, managerClosedError()
+		}
 		sess := m.sessions[id]
 		m.mu.Unlock()
-		if sess == nil {
+		if sess == nil || (owner != "" && sess.Owner != owner) {
 			return nil, errs.New(errs.NotFound, "session %s not found", id)
 		}
 		return sess, nil
 	}
+	defaultLock := &m.defaultMu[ownerLockIndex(owner)]
+	defaultLock.Lock()
+	defer defaultLock.Unlock()
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, managerClosedError()
+	}
 	defID := m.defaults[owner]
 	sess := m.sessions[defID]
+	closed := sess != nil && sess.isClosed()
+	if closed {
+		delete(m.sessions, defID)
+		delete(m.defaults, owner)
+	}
 	m.mu.Unlock()
+	if closed {
+		// EOF performs this cleanup too; this call is idempotent and covers the
+		// narrow window where the logical close became visible first.
+		sess.close()
+		sess = nil
+	}
 	if sess != nil {
 		return sess, nil
 	}
@@ -287,9 +475,28 @@ func (m *Manager) resolveSession(owner, id string) (*Session, error) {
 		return nil, err
 	}
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		sess.close()
+		return nil, managerClosedError()
+	}
+	if m.sessions[sess.ID] != sess {
+		m.mu.Unlock()
+		sess.close()
+		return nil, errs.New(errs.NotFound, "session %s closed during default-session creation", sess.ID)
+	}
 	m.defaults[owner] = sess.ID
 	m.mu.Unlock()
 	return sess, nil
+}
+
+func ownerLockIndex(owner string) uint32 {
+	var hash uint32 = 2166136261
+	for i := 0; i < len(owner); i++ {
+		hash ^= uint32(owner[i])
+		hash *= 16777619
+	}
+	return hash % 32
 }
 
 // activeForeground counts sessions whose current job holds a foreground slot —
@@ -316,6 +523,21 @@ func (m *Manager) activeBackground() int {
 		}
 	}
 	return n
+}
+
+// markBackgroundWithinQuota atomically reclassifies a live foreground job. If
+// the background pool is full, the job keeps occupying its foreground slot.
+func (m *Manager) markBackgroundWithinQuota(job *Job) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if job.isBackground() {
+		return true
+	}
+	if m.cfg.MaxBackgroundJobs > 0 && m.activeBackground()+m.reservedBackground >= m.cfg.MaxBackgroundJobs {
+		return false
+	}
+	job.markBackground()
+	return true
 }
 
 // activeForAgent counts an agent's currently-running (non-terminal) jobs, for
@@ -346,6 +568,12 @@ func (m *Manager) activeForAgentLocked(owner string) int {
 // The command is first classified by policy: denied commands error, commands
 // requiring confirmation are parked in awaiting_confirmation (spec §18/§18a).
 func (m *Manager) Start(owner, sessionID string, command []string, mode string) (*Job, error) {
+	if err := validateCommand(command); err != nil {
+		return nil, err
+	}
+	if mode != "" && mode != ModeAuto && mode != ModeForeground && mode != ModeBackground {
+		return nil, errs.New(errs.InvalidArgument, "unknown execution mode %q", mode)
+	}
 	sess, err := m.resolveSession(owner, sessionID)
 	if err != nil {
 		return nil, err
@@ -364,7 +592,7 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 			if m.auditOK != nil && !m.auditOK() {
 				return nil, errs.New(errs.Internal, "audit log unavailable — refusing dangerous command (fail-closed)")
 			}
-			return m.enqueueConfirm(owner, sess, command, mode, dec), nil
+			return m.enqueueConfirm(owner, sess, command, mode, dec)
 		}
 	}
 
@@ -376,30 +604,79 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 	if m.cfg.MaxJobsPerAgent > 0 && m.activeForAgent(owner) >= m.cfg.MaxJobsPerAgent {
 		return nil, errs.New(errs.ParallelismExceeded, "agent %q reached its concurrent-job quota (%d)", owner, m.cfg.MaxJobsPerAgent)
 	}
+	reservedClass := ""
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, managerClosedError()
+	}
+	if !m.makeJobRoomLocked() || len(m.jobs)+m.reservedJobs >= maxJobsInMemory {
+		m.mu.Unlock()
+		return nil, errs.New(errs.ParallelismExceeded, "job registry reached its active/history limit (%d)", maxJobsInMemory)
+	}
+	if m.cfg.MaxJobsPerAgent > 0 && m.activeForAgentLocked(owner)+m.reservedByAgent[owner] >= m.cfg.MaxJobsPerAgent {
+		m.mu.Unlock()
+		return nil, errs.New(errs.ParallelismExceeded, "agent %q reached its concurrent-job quota (%d)", owner, m.cfg.MaxJobsPerAgent)
+	}
 	// An explicitly background-mode command is gated by MaxBackgroundJobs, not
 	// MaxForegroundJobs: it doesn't occupy a foreground slot once classified (see
 	// activeForeground). A command that only LATER gets auto-backgrounded by Run
 	// (daemon heuristic / timeout) can't be classified yet at Start time, so it is
 	// still checked against MaxForegroundJobs here — same as any other command —
 	// and only counts against MaxBackgroundJobs from the moment Run reclassifies
-	// it, same non-authoritative soft-check pattern as the rest of this gate.
-	if mode == ModeBackground && m.cfg.MaxBackgroundJobs > 0 && m.activeBackground() >= m.cfg.MaxBackgroundJobs {
+	// it. Reservations make the check-and-start transition race-free.
+	if mode == ModeBackground && m.cfg.MaxBackgroundJobs > 0 && m.activeBackground()+m.reservedBackground >= m.cfg.MaxBackgroundJobs {
 		m.mu.Unlock()
 		return nil, errs.New(errs.ParallelismExceeded, "max background jobs (%d) reached", m.cfg.MaxBackgroundJobs)
 	}
-	if mode != ModeBackground && m.cfg.MaxForegroundJobs > 0 && m.activeForeground() >= m.cfg.MaxForegroundJobs {
+	if mode != ModeBackground && m.cfg.MaxForegroundJobs > 0 && m.activeForeground()+m.reservedForeground >= m.cfg.MaxForegroundJobs {
 		m.mu.Unlock()
 		return nil, errs.New(errs.ParallelismExceeded, "max foreground jobs (%d) reached", m.cfg.MaxForegroundJobs)
 	}
+	if mode == ModeBackground && m.cfg.MaxBackgroundJobs > 0 {
+		m.reservedBackground++
+		reservedClass = ModeBackground
+	} else if mode != ModeBackground && m.cfg.MaxForegroundJobs > 0 {
+		m.reservedForeground++
+		reservedClass = ModeForeground
+	}
+	m.reservedJobs++
+	m.reservedByAgent[owner]++
 	m.mu.Unlock()
 
+	// Record a durable execution intent before touching the shell. This makes the
+	// first audit append/fsync failure fail closed for ordinary commands too; the
+	// post-spawn job.started event adds the generated job id.
+	if err := m.publish(bus.Event{Type: bus.EvJobStartRequested, AgentID: owner, SessionID: sess.ID,
+		Message: strings.Join(command, " "), Data: map[string]any{"mode": mode}}); err != nil {
+		m.mu.Lock()
+		m.releaseStartReservationLocked(owner, reservedClass)
+		m.mu.Unlock()
+		return nil, errs.New(errs.Internal, "audit log unavailable - refusing command start: %v", err)
+	}
+
 	job, err := sess.exec(command, mode)
+	if job != nil && mode == ModeBackground {
+		job.markBackground()
+	}
+	// Transition every reservation -> registered live job atomically. The
+	// per-agent reservation is authoritative and was taken before shell I/O, so a
+	// concurrent loser never gets to execute first and be killed after the fact.
+	m.mu.Lock()
+	m.releaseStartReservationLocked(owner, reservedClass)
+	closed := m.closed
+	var releaseWatch func()
+	if !closed && err == nil && job != nil {
+		m.jobs[job.ID] = job
+		releaseWatch = m.prepareWatchLocked(job)
+	}
+	m.mu.Unlock()
+	if closed {
+		sess.close()
+		return nil, managerClosedError()
+	}
 	if job == nil {
 		return nil, err
-	}
-	if mode == ModeBackground {
-		job.markBackground()
 	}
 	if err != nil {
 		// exec failed before the command ran (e.g. session busy/closed, pty write):
@@ -408,26 +685,77 @@ func (m *Manager) Start(owner, sessionID string, command []string, mode string) 
 		m.register(job)
 		return job, err
 	}
-	// The command is now live on its session but not yet in the registry. Enforce
-	// the per-agent quota atomically at insert; if registering would exceed it,
-	// tear the just-started job down (kill its process group + finalize) and
-	// surface the error — closing the TOCTOU the pre-check alone can't.
-	if qerr := m.registerWithQuota(job); qerr != nil {
-		m.abortStarted(job, "per-agent concurrency quota exceeded")
-		return nil, qerr
-	}
+	m.persist()
 	m.publishStarted(job)
-	m.watch(job)
+	releaseWatch()
 	m.autoAnswerWatch(job, owner)
 	m.touchAgent(owner, func(a *AgentStat) { a.Jobs++; a.recordCommand(cmdString(command)) })
 	return job, nil
 }
 
+func (m *Manager) releaseStartReservationLocked(owner, class string) {
+	if class == ModeBackground {
+		m.reservedBackground--
+	} else if class == ModeForeground {
+		m.reservedForeground--
+	}
+	m.reservedJobs--
+	if m.reservedByAgent[owner] <= 1 {
+		delete(m.reservedByAgent, owner)
+	} else {
+		m.reservedByAgent[owner]--
+	}
+}
+
+func validateCommand(command []string) error {
+	if len(command) == 0 || command[0] == "" {
+		return errs.New(errs.InvalidArgument, "command must not be empty")
+	}
+	if len(command) > maxCommandArgs {
+		return errs.New(errs.InvalidArgument, "command has %d arguments, exceeds limit %d", len(command), maxCommandArgs)
+	}
+	total := 0
+	for _, arg := range command {
+		if strings.IndexByte(arg, 0) >= 0 {
+			return errs.New(errs.InvalidArgument, "command arguments must not contain NUL bytes")
+		}
+		if len(arg) > maxCommandBytes-total {
+			return errs.New(errs.InvalidArgument, "command exceeds %d byte argv limit", maxCommandBytes)
+		}
+		total += len(arg)
+	}
+	return nil
+}
+
 func (m *Manager) register(job *Job) {
 	m.mu.Lock()
-	m.jobs[job.ID] = job
+	if !m.closed && m.makeJobRoomLocked() {
+		m.jobs[job.ID] = job
+	}
 	m.mu.Unlock()
 	m.persist()
+}
+
+func (m *Manager) makeJobRoomLocked() bool {
+	if len(m.jobs)+m.reservedJobs < maxJobsInMemory {
+		return true
+	}
+	oldestID := ""
+	var oldest time.Time
+	for id, job := range m.jobs {
+		job.mu.Lock()
+		terminal := job.status.Terminal()
+		ended := job.endedAt
+		job.mu.Unlock()
+		if terminal && (oldestID == "" || ended.Before(oldest)) {
+			oldestID, oldest = id, ended
+		}
+	}
+	if oldestID == "" {
+		return false
+	}
+	delete(m.jobs, oldestID)
+	return true
 }
 
 // registerWithQuota atomically enforces the per-agent concurrency quota (MA-3)
@@ -436,30 +764,6 @@ func (m *Manager) register(job *Job) {
 // different sessions of the same agent both pass and both register, exceeding
 // MaxJobsPerAgent. On rejection the job is NOT inserted and ParallelismExceeded
 // is returned; the caller owns tearing down the already-started job.
-func (m *Manager) registerWithQuota(job *Job) error {
-	owner := job.sess.Owner
-	m.mu.Lock()
-	if m.cfg.MaxJobsPerAgent > 0 && m.activeForAgentLocked(owner) >= m.cfg.MaxJobsPerAgent {
-		m.mu.Unlock()
-		return errs.New(errs.ParallelismExceeded, "agent %q reached its concurrent-job quota (%d)", owner, m.cfg.MaxJobsPerAgent)
-	}
-	m.jobs[job.ID] = job
-	m.mu.Unlock()
-	m.persist()
-	return nil
-}
-
-// abortStarted tears down a job that started on its session but was rejected
-// before it entered the registry (the quota was hit at insert time). It signals
-// the process group so the session frees promptly, then finalizes the job as
-// killed. The job was never registered, so this deliberately bypasses
-// Kill/Signal, which resolve the job through m.jobs. Must NOT hold m.mu.
-func (m *Manager) abortStarted(job *Job, reason string) {
-	job.requestKill("SIGKILL")
-	_ = job.sess.shell.Signal("SIGKILL") // best-effort: no-op if the command already exited
-	job.finalize(-1, StatusKilled, reason)
-}
-
 func (m *Manager) publishStarted(job *Job) {
 	m.publish(bus.Event{Type: bus.EvJobStarted, AgentID: job.sess.Owner, SessionID: job.SessionID,
 		JobID: job.ID, Message: strings.Join(job.Command, " ")})
@@ -495,7 +799,7 @@ func (m *Manager) autoAnswerWatch(job *Job, owner string) {
 					}
 					if strings.Contains(info.Prompt, rule.Match) {
 						answered[rule.Match] = true
-						_ = job.sess.writeInput([]byte(rule.Send + "\n"))
+						_ = job.sess.writeInput(job, []byte(rule.Send+"\n"))
 						// The answer may be a secret (a configured passphrase), so it
 						// must never reach the bus — which feeds the audit log,
 						// off-box notifications and the dashboard. Surface only what
@@ -510,9 +814,17 @@ func (m *Manager) autoAnswerWatch(job *Job, owner string) {
 	}()
 }
 
-// watch publishes a job.finished event when the job reaches a terminal state.
-func (m *Manager) watch(job *Job) {
+// prepareWatchLocked reserves shutdown accountability for a job before it is
+// exposed in the registry. The watcher waits for release so job.started always
+// precedes job.finished, even when the command exits during Start. Caller holds
+// m.mu, which serializes WaitGroup.Add with Shutdown's one-way closed transition.
+func (m *Manager) prepareWatchLocked(job *Job) func() {
+	ready := make(chan struct{})
+	var releaseOnce sync.Once
+	m.watchWG.Add(1)
 	go func() {
+		defer m.watchWG.Done()
+		<-ready
 		<-job.Done()
 		info := job.info()
 		m.publish(bus.Event{Type: bus.EvJobFinished, AgentID: job.sess.Owner, SessionID: job.SessionID,
@@ -520,34 +832,99 @@ func (m *Manager) watch(job *Job) {
 			Data: map[string]any{"status": info.Status, "exit_code": info.ExitCode, "reason": info.Reason}})
 		m.persist()
 	}()
+	return func() { releaseOnce.Do(func() { close(ready) }) }
 }
 
 // enqueueConfirm parks a command awaiting human approval and returns the job in
 // awaiting_confirmation. A timer denies it by default after the configured
 // timeout (spec §18a: deny-by-default).
-func (m *Manager) enqueueConfirm(owner string, sess *Session, command []string, mode string, dec policy.Result) *Job {
-	m.touchAgent(owner, func(a *AgentStat) { a.Jobs++; a.recordCommand(cmdString(command)) })
+func (m *Manager) enqueueConfirm(owner string, sess *Session, command []string, mode string, dec policy.Result) (*Job, error) {
 	job := newConfirmJob(sess, command, mode)
 	cid := ids.New("cnf")
 	job.setConfirmID(cid)
-	m.register(job)
 	pc := &pendingConfirm{ID: cid, Job: job, Owner: owner, Sess: sess, Argv: command, Mode: mode,
 		Reason: dec.Reason, Matched: dec.Matched, Created: time.Now()}
-	m.mu.Lock()
-	m.pending[cid] = pc
-	m.mu.Unlock()
-	m.publish(bus.Event{Type: bus.EvConfirmRequested, AgentID: owner, SessionID: sess.ID, JobID: job.ID,
+	if err := m.registerPending(pc); err != nil {
+		return nil, err
+	}
+	m.touchAgent(owner, func(a *AgentStat) { a.Jobs++; a.recordCommand(cmdString(command)) })
+	if err := m.publish(bus.Event{Type: bus.EvConfirmRequested, AgentID: owner, SessionID: sess.ID, JobID: job.ID,
 		Message: strings.Join(command, " "),
-		Data:    map[string]any{"confirmation_id": cid, "matched": dec.Matched}})
+		Data:    map[string]any{"confirmation_id": cid, "matched": dec.Matched}}); err != nil {
+		m.mu.Lock()
+		delete(m.pending, cid)
+		pc.resolved = true
+		m.mu.Unlock()
+		job.finalize(-1, StatusFailed, "audit log unavailable")
+		m.persist()
+		return nil, errs.New(errs.Internal, "audit log unavailable - refusing dangerous command: %v", err)
+	}
 
 	timeout := time.Duration(m.cfg.ConfirmTimeoutMS) * time.Millisecond
 	if timeout > 0 {
-		go func() {
-			time.Sleep(timeout)
+		timer := time.AfterFunc(timeout, func() {
 			_ = m.resolveConfirm(cid, false, "timed out", "system")
-		}()
+		})
+		m.mu.Lock()
+		if pc.resolved {
+			timer.Stop()
+		} else {
+			pc.timer = timer
+		}
+		m.mu.Unlock()
 	}
-	return job
+	return job, nil
+}
+
+func (m *Manager) registerPending(pc *pendingConfirm) error {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return managerClosedError()
+	}
+	if len(m.pending) >= maxPendingTotal {
+		m.mu.Unlock()
+		return errs.New(errs.ParallelismExceeded, "daemon reached its pending-confirmation limit (%d)", maxPendingTotal)
+	}
+	owned := 0
+	for _, pending := range m.pending {
+		if pending.Owner == pc.Owner {
+			owned++
+		}
+	}
+	if owned >= maxPendingPerOwner {
+		m.mu.Unlock()
+		return errs.New(errs.ParallelismExceeded, "agent %q reached its pending-confirmation limit (%d)", pc.Owner, maxPendingPerOwner)
+	}
+	if m.cfg.MaxJobsPerAgent > 0 && m.activeForAgentLocked(pc.Owner) >= m.cfg.MaxJobsPerAgent {
+		m.mu.Unlock()
+		return errs.New(errs.ParallelismExceeded, "agent %q reached its concurrent-job quota (%d)", pc.Owner, m.cfg.MaxJobsPerAgent)
+	}
+	if !m.makeJobRoomLocked() || len(m.jobs)+m.reservedJobs >= maxJobsInMemory {
+		m.mu.Unlock()
+		return errs.New(errs.ParallelismExceeded, "job registry reached its active/history limit (%d)", maxJobsInMemory)
+	}
+	m.jobs[pc.Job.ID] = pc.Job
+	m.pending[pc.ID] = pc
+	m.mu.Unlock()
+	if err := m.persist(); err != nil {
+		m.mu.Lock()
+		if m.pending[pc.ID] == pc {
+			delete(m.pending, pc.ID)
+		}
+		if m.jobs[pc.Job.ID] == pc.Job {
+			delete(m.jobs, pc.Job.ID)
+		}
+		m.mu.Unlock()
+		return errs.New(errs.Internal, "persist pending confirmation: %v", err)
+	}
+	m.mu.Lock()
+	closed := m.closed || m.pending[pc.ID] != pc
+	m.mu.Unlock()
+	if closed {
+		return managerClosedError()
+	}
+	return nil
 }
 
 func (m *Manager) resolveConfirm(cid string, approved bool, reason, by string) error {
@@ -557,27 +934,107 @@ func (m *Manager) resolveConfirm(cid string, approved bool, reason, by string) e
 		m.mu.Unlock()
 		return errs.New(errs.NotFound, "confirmation %s not found or already resolved", cid)
 	}
+	if approved && m.cfg.MaxJobsPerAgent > 0 {
+		activeOthers := 0
+		for _, job := range m.jobs {
+			if job == pc.Job || job.sess.Owner != pc.Owner {
+				continue
+			}
+			job.mu.Lock()
+			terminal := job.status.Terminal()
+			job.mu.Unlock()
+			if !terminal {
+				activeOthers++
+			}
+		}
+		if activeOthers >= m.cfg.MaxJobsPerAgent {
+			m.mu.Unlock()
+			return errs.New(errs.ParallelismExceeded, "agent %q reached its concurrent-job quota (%d)", pc.Owner, m.cfg.MaxJobsPerAgent)
+		}
+	}
+	if approved && m.auditOK != nil && !m.auditOK() {
+		m.mu.Unlock()
+		return errs.New(errs.Internal, "audit log unavailable - refusing dangerous command (fail-closed)")
+	}
+	if approved {
+		if pc.Mode == ModeBackground {
+			if m.cfg.MaxBackgroundJobs > 0 && m.activeBackground()+m.reservedBackground >= m.cfg.MaxBackgroundJobs {
+				m.mu.Unlock()
+				return errs.New(errs.ParallelismExceeded, "max background jobs (%d) reached", m.cfg.MaxBackgroundJobs)
+			}
+			m.reservedBackground++
+		} else {
+			if m.cfg.MaxForegroundJobs > 0 && m.activeForeground()+m.reservedForeground >= m.cfg.MaxForegroundJobs {
+				m.mu.Unlock()
+				return errs.New(errs.ParallelismExceeded, "max foreground jobs (%d) reached", m.cfg.MaxForegroundJobs)
+			}
+			m.reservedForeground++
+		}
+	}
+	if pc.timer != nil {
+		pc.timer.Stop()
+	}
 	pc.resolved = true
 	delete(m.pending, cid)
+	var releaseWatch func()
+	if approved {
+		releaseWatch = m.prepareWatchLocked(pc.Job)
+	}
 	m.mu.Unlock()
 
 	if approved {
+		released := false
+		defer func() {
+			if !released {
+				releaseWatch()
+			}
+		}()
+		defer func() {
+			m.mu.Lock()
+			if pc.Mode == ModeBackground {
+				m.reservedBackground--
+			} else {
+				m.reservedForeground--
+			}
+			m.mu.Unlock()
+		}()
+		// Persist the human authorization before starting the dangerous command.
+		// A health probe alone has a race with the next disk write; synchronous
+		// delivery closes that window.
+		if err := m.publish(bus.Event{Type: bus.EvConfirmResolved, JobID: pc.Job.ID, AgentID: pc.Owner,
+			SessionID: pc.Sess.ID,
+			Data:      map[string]any{"confirmation_id": cid, "approved": true, "by": by}}); err != nil {
+			pc.Job.finalize(-1, StatusFailed, "audit log unavailable during approval")
+			m.persist()
+			return errs.New(errs.Internal, "audit log unavailable - refusing dangerous command: %v", err)
+		}
 		if err := pc.Sess.startJob(pc.Job, quoteArgv(pc.Argv)); err != nil {
 			pc.Job.finalize(-1, StatusFailed, "exec after approve: "+err.Error())
-			m.publish(bus.Event{Type: bus.EvConfirmResolved, JobID: pc.Job.ID,
-				Data: map[string]any{"confirmation_id": cid, "approved": false, "by": by, "reason": err.Error()}})
 			return err
 		}
+		if pc.Mode == ModeBackground {
+			// Keep the reservation until the approved job is installed and visible
+			// in the background pool.
+			pc.Job.markBackground()
+		}
 		m.publishStarted(pc.Job)
-		m.watch(pc.Job)
+		releaseWatch()
+		released = true
 		m.autoAnswerWatch(pc.Job, pc.Owner)
-		m.publish(bus.Event{Type: bus.EvConfirmResolved, JobID: pc.Job.ID, AgentID: pc.Owner,
-			Data: map[string]any{"confirmation_id": cid, "approved": true, "by": by}})
 		return nil
 	}
 	pc.Job.finalize(-1, StatusFailed, "confirmation "+reason+" (by "+by+")")
-	m.publish(bus.Event{Type: bus.EvConfirmResolved, JobID: pc.Job.ID, AgentID: pc.Owner,
-		Data: map[string]any{"confirmation_id": cid, "approved": false, "by": by, "reason": reason}})
+	persistErr := m.persist()
+	if err := m.publish(bus.Event{Type: bus.EvConfirmResolved, JobID: pc.Job.ID, AgentID: pc.Owner,
+		Data: map[string]any{"confirmation_id": cid, "approved": false, "by": by, "reason": reason}}); err != nil {
+		if persistErr != nil {
+			return errs.New(errs.Internal, "command denied but audit recording and terminal state persistence failed: audit: %v; persistence: %v", err, persistErr)
+		}
+		return errs.New(errs.Internal, "command denied but audit recording failed: %v", err)
+	}
+	if persistErr != nil {
+		return errs.New(errs.Internal, "command denied but terminal state persistence failed: %v", persistErr)
+	}
 	return nil
 }
 
@@ -621,17 +1078,14 @@ func (m *Manager) ListPending() []PendingInfo {
 	return out
 }
 
-// capChunk trims chunk to at most n bytes, keeping the most recent (tail)
-// portion so a single exec_run/exec_poll/logs_tail call can't dump an unbounded
-// amount of output into the caller's context. n <= 0 disables the cap. The
-// skipped head bytes are still physically retained in the buffer (not evicted,
-// as a retention-cap drop would be) and can be re-read by polling with an
-// earlier cursor; they are just not auto-delivered by this call.
+// capChunk trims chunk to at most n bytes, keeping the next sequential (head)
+// portion. Callers advance their cursor only by the returned bytes, so the
+// remainder can be fetched by the next poll instead of being silently skipped.
 func capChunk(chunk []byte, n int) ([]byte, bool) {
 	if n <= 0 || len(chunk) <= n {
 		return chunk, false
 	}
-	return chunk[len(chunk)-n:], true
+	return chunk[:n], true
 }
 
 // RunResult is the result of a blocking exec_run.
@@ -640,6 +1094,7 @@ type RunResult struct {
 	Stdout     string `json:"stdout"`
 	NextCursor string `json:"next_cursor"`
 	Truncated  bool   `json:"truncated"`
+	HasMore    bool   `json:"has_more,omitempty"`
 	WaitedMS   int64  `json:"waited_ms,omitempty"`  // how long exec_run actually waited
 	TimeoutMS  int64  `json:"timeout_ms,omitempty"` // the wait budget it applied
 }
@@ -648,6 +1103,9 @@ type RunResult struct {
 // finish in time it returns with the current (running/backgrounded) status and
 // the output so far (spec EX-7).
 func (m *Manager) Run(owner, sessionID string, command []string, mode string, timeoutMS int) (*RunResult, error) {
+	if timeoutMS < 0 || timeoutMS > maxExecWaitMS {
+		return nil, errs.New(errs.InvalidArgument, "timeout_ms must be in 0..%d", maxExecWaitMS)
+	}
 	job, err := m.Start(owner, sessionID, command, mode)
 	if err != nil {
 		return nil, err
@@ -714,24 +1172,27 @@ func (m *Manager) Run(owner, sessionID string, command []string, mode string, ti
 		deadline.Stop()
 		tick.Stop()
 	}
-	chunk, next, gap := job.clean.ReadFrom(0)
-	chunk, capped := capChunk(chunk, m.maxOutputBytes())
+	chunk, next, gap, capped := job.clean.ReadFromLimit(0, m.maxOutputBytes())
 	info := job.info()
 	if !info.Status.Terminal() && info.Status != StatusAwaitingConfirmation && info.Status != StatusAwaitingInput {
 		info.Status = StatusBackgrounded
+		reclassified := m.markBackgroundWithinQuota(job)
 		if info.Reason == "" {
 			info.Reason = reason
 		}
 		// Reclassify off the foreground quota from this point on (mirrors the
 		// explicit mode=background case in Start): a daemon-heuristic or
 		// timed-out-but-left-running job no longer occupies a foreground slot.
-		job.markBackground()
+		if !reclassified {
+			info.Reason += "; background quota is full, so this job still occupies a foreground slot"
+		}
 	}
 	return &RunResult{
 		Info:       info,
 		Stdout:     string(chunk),
 		NextCursor: output.EncodeCursor(next),
 		Truncated:  gap || capped,
+		HasMore:    capped,
 		WaitedMS:   time.Since(waitStart).Milliseconds(),
 		TimeoutMS:  wait.Milliseconds(),
 	}, nil
@@ -744,6 +1205,7 @@ type PollResult struct {
 	NextCursor  string `json:"next_cursor"`
 	Gap         bool   `json:"gap,omitempty"`
 	Truncated   bool   `json:"truncated,omitempty"`
+	HasMore     bool   `json:"has_more,omitempty"`
 	OutputHeld  bool   `json:"output_held,omitempty"`
 }
 
@@ -799,9 +1261,9 @@ func (m *Manager) PollWait(owner, jobID, cursor string, waitMS int) (*PollResult
 // When human is false and the job's output is held, no new bytes are returned
 // (the agent is paused); the human dashboard passes human=true to always stream
 // and owner="" to see any agent's job. The returned chunk is capped at
-// maxOutputBytes per call (keeping the freshest bytes) so one poll can't dump an
-// unbounded amount into the caller's context; Truncated reports either a cursor
-// gap or this per-call cap.
+// maxOutputBytes per call (keeping sequential order) so one poll can't dump an
+// unbounded amount into the caller's context; HasMore tells the caller to fetch
+// the remainder from NextCursor.
 func (m *Manager) PollFor(owner, jobID, cursor string, human bool) (*PollResult, error) {
 	job, err := m.getJob(owner, jobID)
 	if err != nil {
@@ -814,14 +1276,14 @@ func (m *Manager) PollFor(owner, jobID, cursor string, human bool) (*PollResult,
 	if _, ho := job.holds(); ho && !human {
 		return &PollResult{Info: job.info(), StdoutChunk: "", NextCursor: cursor, OutputHeld: true}, nil
 	}
-	chunk, next, gap := job.clean.ReadFrom(off)
-	chunk, capped := capChunk(chunk, m.maxOutputBytes())
+	chunk, next, gap, capped := job.clean.ReadFromLimit(off, m.maxOutputBytes())
 	return &PollResult{
 		Info:        job.info(),
 		StdoutChunk: string(chunk),
 		NextCursor:  output.EncodeCursor(next),
 		Gap:         gap,
 		Truncated:   capped,
+		HasMore:     capped,
 	}, nil
 }
 
@@ -831,6 +1293,7 @@ type TailResult struct {
 	NextCursor string `json:"next_cursor"`
 	Gap        bool   `json:"gap,omitempty"`
 	Truncated  bool   `json:"truncated,omitempty"`
+	HasMore    bool   `json:"has_more,omitempty"`
 	OutputHeld bool   `json:"output_held,omitempty"`
 }
 
@@ -850,13 +1313,13 @@ func (m *Manager) Tail(owner, jobID, cursor string, human bool) (*TailResult, er
 	if _, ho := job.holds(); ho && !human {
 		return &TailResult{NextCursor: cursor, OutputHeld: true}, nil
 	}
-	chunk, next, gap := job.clean.ReadFrom(off)
-	chunk, capped := capChunk(chunk, m.maxOutputBytes())
+	chunk, next, gap, capped := job.clean.ReadFromLimit(off, m.maxOutputBytes())
 	return &TailResult{
 		Lines:      string(chunk),
 		NextCursor: output.EncodeCursor(next),
 		Gap:        gap,
 		Truncated:  capped,
+		HasMore:    capped,
 	}, nil
 }
 
@@ -882,14 +1345,31 @@ func (m *Manager) Write(owner, jobID, input string, appendNewline, secret, human
 	if hi, _ := job.holds(); hi && !human {
 		return errs.New(errs.DeniedByPolicy, "input is held by a human operator")
 	}
+	// PTY input is shared with the persistent shell. If an agent writes while the
+	// foreground process is not actually waiting for input, those bytes can remain
+	// queued and be interpreted by the shell as a new, unaudited command after the
+	// job exits. Operators intentionally retain unrestricted terminal control, but
+	// untrusted agents may only answer a prompt the engine has confirmed.
+	if !human && !job.info().AwaitingInput {
+		return errs.New(errs.DeniedByPolicy, "job %s is not awaiting input", jobID)
+	}
+	inputBytes := len(input)
+	if appendNewline {
+		inputBytes++
+	}
+	if inputBytes > maxSessionInputBytes {
+		return errs.New(errs.InvalidArgument, "input exceeds %d byte limit", maxSessionInputBytes)
+	}
 	if secret {
-		m.redactor.AddLiteral(input)
+		if err := m.redactor.AddLiteral(input); err != nil {
+			return errs.New(errs.Internal, "cannot safely register secret for redaction: %v", err)
+		}
 	}
 	data := []byte(input)
 	if appendNewline {
 		data = append(data, '\n')
 	}
-	return job.sess.writeInput(data)
+	return job.sess.writeInput(job, data)
 }
 
 // Hold sets the human-intervention flags for a job (nil = unchanged). Used by
@@ -927,6 +1407,35 @@ func (m *Manager) Signal(owner, jobID, signal string) error {
 
 // Kill force-terminates a job (SIGKILL to its process group).
 func (m *Manager) Kill(owner, jobID string) error {
+	job, err := m.getJob(owner, jobID)
+	if err != nil {
+		return err
+	}
+	info := job.info()
+	if info.Status == StatusAwaitingConfirmation && info.ConfirmationID != "" {
+		m.mu.Lock()
+		pending := m.pending[info.ConfirmationID]
+		cancelled := false
+		if pending != nil && pending.Job == job && !pending.resolved {
+			pending.resolved = true
+			if pending.timer != nil {
+				pending.timer.Stop()
+			}
+			delete(m.pending, info.ConfirmationID)
+			cancelled = true
+		}
+		m.mu.Unlock()
+		if cancelled {
+			job.finalize(-1, StatusKilled, "confirmation cancelled")
+			m.persist()
+			if err := m.publish(bus.Event{Type: bus.EvConfirmResolved, JobID: job.ID, AgentID: job.sess.Owner,
+				SessionID: job.SessionID,
+				Data:      map[string]any{"confirmation_id": info.ConfirmationID, "approved": false, "by": "kill", "reason": "cancelled"}}); err != nil {
+				return errs.New(errs.Internal, "confirmation was cancelled but audit recording failed: %v", err)
+			}
+			return nil
+		}
+	}
 	return m.Signal(owner, jobID, "SIGKILL")
 }
 
@@ -967,12 +1476,19 @@ func (m *Manager) ListJobs(owner, filter string) []Info {
 	return out
 }
 
-// ListSessions returns session snapshots.
-func (m *Manager) ListSessions() []SessionInfo {
+// ListSessions returns all session snapshots for trusted/operator callers.
+func (m *Manager) ListSessions() []SessionInfo { return m.ListSessionsFor("") }
+
+// ListSessionsFor returns session snapshots scoped to owner. A non-empty owner
+// never learns that another agent's session exists.
+func (m *Manager) ListSessionsFor(owner string) []SessionInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := []SessionInfo{}
 	for _, s := range m.sessions {
+		if owner != "" && s.Owner != owner {
+			continue
+		}
 		active := 0
 		if s.currentJob() != nil {
 			active = 1
@@ -1012,16 +1528,42 @@ func (m *Manager) CloseSession(owner, id string) error {
 // Shutdown closes every session (graceful stop).
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
+	m.closed = true
 	sessions := make([]*Session, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		sessions = append(sessions, s)
 	}
+	pending := make([]*pendingConfirm, 0, len(m.pending))
+	for _, confirmation := range m.pending {
+		if confirmation.timer != nil {
+			confirmation.timer.Stop()
+		}
+		confirmation.resolved = true
+		pending = append(pending, confirmation)
+	}
 	m.sessions = map[string]*Session{}
 	m.defaults = map[string]string{}
+	m.pending = map[string]*pendingConfirm{}
+	forwards := m.forwards
 	m.mu.Unlock()
 	for _, s := range sessions {
 		s.close()
 	}
+	for _, confirmation := range pending {
+		confirmation.Job.finalize(-1, StatusFailed, "daemon shutting down")
+	}
+	if len(pending) > 0 {
+		_ = m.persist()
+	}
+	// Every watcher was reserved under m.mu before shutdown set closed, so no Add
+	// can race this Wait. Keep reliable sinks alive until terminal events and their
+	// registry writes have completed.
+	m.watchWG.Wait()
+	shutdownForwardOps(forwards)
 }
 
 // SessionTarget returns a session's target ("local" or a server name) and
@@ -1058,13 +1600,19 @@ type SessionStreamResult struct {
 	NextCursor string `json:"next_cursor"`
 	Gap        bool   `json:"gap,omitempty"`
 	Closed     bool   `json:"closed"`
+	HasMore    bool   `json:"has_more,omitempty"`
 }
 
 // SessionTail returns the session's continuous terminal output from the cursor
 // onward (the whole shell, across all jobs) — what the dashboard streams as one
 // live terminal for the session.
 func (m *Manager) SessionTail(sessionID, cursor string) (*SessionStreamResult, error) {
-	s, err := m.getSession(sessionID)
+	return m.SessionTailFor("", sessionID, cursor)
+}
+
+// SessionTailFor is the owner-scoped session stream used by agent transports.
+func (m *Manager) SessionTailFor(owner, sessionID, cursor string) (*SessionStreamResult, error) {
+	s, err := m.getSessionFor(owner, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -1072,12 +1620,13 @@ func (m *Manager) SessionTail(sessionID, cursor string) (*SessionStreamResult, e
 	if err != nil {
 		return nil, err
 	}
-	chunk, next, gap := s.clean.ReadFrom(off)
+	chunk, next, gap, hasMore := s.clean.ReadFromLimit(off, m.maxOutputBytes())
 	return &SessionStreamResult{
 		Chunk:      string(chunk),
 		NextCursor: output.EncodeCursor(next),
 		Gap:        gap,
 		Closed:     s.isClosed(),
+		HasMore:    hasMore,
 	}, nil
 }
 
@@ -1085,20 +1634,49 @@ func (m *Manager) SessionTail(sessionID, cursor string) (*SessionStreamResult, e
 // If the current foreground job's input is held, agent input (human=false) is
 // rejected; operator input (human=true) always goes through.
 func (m *Manager) SessionWriteInput(sessionID, input string, appendNewline, human bool) error {
-	s, err := m.getSession(sessionID)
+	return m.SessionWriteInputFor("", sessionID, input, appendNewline, human)
+}
+
+// SessionWriteInputFor scopes direct PTY input to the authenticated owner.
+func (m *Manager) SessionWriteInputFor(owner, sessionID, input string, appendNewline, human bool) error {
+	s, err := m.getSessionFor(owner, sessionID)
 	if err != nil {
 		return err
 	}
-	if cur := s.currentJob(); cur != nil {
+	cur := s.currentJob()
+	if cur == nil {
+		if !human {
+			return errs.New(errs.NotFound, "session has no running job")
+		}
+	}
+	if cur != nil {
 		if hi, _ := cur.holds(); hi && !human {
 			return errs.New(errs.DeniedByPolicy, "input is held by a human operator")
 		}
+	}
+	inputBytes := len(input)
+	if appendNewline {
+		inputBytes++
+	}
+	if inputBytes > maxSessionInputBytes {
+		return errs.New(errs.InvalidArgument, "input exceeds %d byte limit", maxSessionInputBytes)
 	}
 	data := []byte(input)
 	if appendNewline {
 		data = append(data, '\n')
 	}
-	return s.writeInput(data)
+	if cur == nil {
+		return s.writeCurrent(nil, data, interactiveWriteTimeout, false)
+	}
+	return s.writeInput(cur, data)
+}
+
+func (m *Manager) getSessionFor(owner, id string) (*Session, error) {
+	s, err := m.getSession(id)
+	if err != nil || (owner != "" && s.Owner != owner) {
+		return nil, errs.New(errs.NotFound, "session %s not found", id)
+	}
+	return s, nil
 }
 
 // getJob resolves a job by id, scoped to owner (MA-2 job isolation): when owner

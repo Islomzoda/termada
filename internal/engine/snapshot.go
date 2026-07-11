@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -58,6 +59,10 @@ func (m *Manager) SnapshotCreate(source string) (*SnapshotInfo, error) {
 	n, err := copyTree(abs, filepath.Join(dst, "payload"))
 	if err != nil {
 		_ = os.RemoveAll(dst)
+		var structured *errs.Error
+		if errors.As(err, &structured) {
+			return nil, structured
+		}
 		return nil, errs.New(errs.Internal, "%v", err)
 	}
 	info := SnapshotInfo{ID: id, Source: abs, Bytes: n, CreatedUnix: time.Now().Unix()}
@@ -161,15 +166,21 @@ func (m *Manager) SnapshotList() []SnapshotInfo {
 // cap. It returns the number of bytes copied.
 func copyTree(src, dst string) (int64, error) {
 	var total int64
-	info, err := os.Stat(src)
+	info, err := os.Lstat(src)
 	if err != nil {
 		return 0, err
 	}
 	if !info.IsDir() {
+		if !info.Mode().IsRegular() {
+			return 0, errs.New(errs.InvalidArgument, "snapshot source must be a regular file or directory")
+		}
+		if info.Size() > maxSnapshotBytes {
+			return 0, snapshotTooLarge()
+		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return 0, err
 		}
-		return copyFile(src, dst, info.Mode())
+		return copyFile(src, dst, info, maxSnapshotBytes)
 	}
 	err = filepath.Walk(src, func(path string, fi os.FileInfo, err error) error {
 		if err != nil {
@@ -184,28 +195,43 @@ func copyTree(src, dst string) (int64, error) {
 			return os.MkdirAll(target, 0o755)
 		}
 		if !fi.Mode().IsRegular() {
-			return nil // skip symlinks/devices
+			return errs.New(errs.InvalidArgument, "snapshot contains unsupported special entry %q", rel)
 		}
-		total += fi.Size()
-		if total > maxSnapshotBytes {
-			return errs.New(errs.InvalidArgument, "snapshot exceeds %d bytes limit", int64(maxSnapshotBytes))
+		remaining := int64(maxSnapshotBytes) - total
+		if fi.Size() > remaining {
+			return snapshotTooLarge()
 		}
-		_, err = copyFile(path, target, fi.Mode())
+		var copied int64
+		copied, err = copyFile(path, target, fi, remaining)
+		total += copied
 		return err
 	})
 	return total, err
 }
 
-func copyFile(src, dst string, mode os.FileMode) (int64, error) {
-	in, err := os.Open(src)
+func snapshotTooLarge() error {
+	return errs.New(errs.InvalidArgument, "snapshot exceeds %d bytes limit", int64(maxSnapshotBytes))
+}
+
+func copyFile(src, dst string, expected os.FileInfo, maxBytes int64) (int64, error) {
+	in, err := openSnapshotSource(src, expected)
 	if err != nil {
 		return 0, err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	// The destination is always new staging/storage state. O_EXCL prevents a
+	// concurrently planted symlink from turning the snapshot copy into an
+	// arbitrary-file overwrite.
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, expected.Mode())
 	if err != nil {
 		return 0, err
 	}
 	defer out.Close()
-	return io.Copy(out, in)
+	// File sizes can change between stat and copy. Read one byte beyond the
+	// remaining allowance so a concurrently-growing file cannot bypass the cap.
+	n, err := io.Copy(out, io.LimitReader(in, maxBytes+1))
+	if err == nil && n > maxBytes {
+		return n, snapshotTooLarge()
+	}
+	return n, err
 }

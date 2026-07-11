@@ -1,6 +1,12 @@
 package fleet
 
-import "testing"
+import (
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // mockRunner returns a canned result per server name.
 type mockRunner struct{ byServer map[string]Result }
@@ -85,5 +91,105 @@ func TestNoServersMatched(t *testing.T) {
 	m := New(testServers(), mockRunner{}, 5)
 	if _, err := m.Run([]string{"x"}, []string{"nonexistent"}, 5); err == nil {
 		t.Fatal("expected error for empty selection")
+	}
+}
+
+type concurrencyRunner struct {
+	active atomic.Int64
+	max    atomic.Int64
+}
+
+func (r *concurrencyRunner) Run(server Server, command []string) Result {
+	active := r.active.Add(1)
+	for previous := r.max.Load(); active > previous && !r.max.CompareAndSwap(previous, active); previous = r.max.Load() {
+	}
+	time.Sleep(20 * time.Millisecond)
+	r.active.Add(-1)
+	return Result{Server: server.Name, Status: "ok"}
+}
+
+func TestRunCapsRequestedParallelism(t *testing.T) {
+	runner := &concurrencyRunner{}
+	m := New(testServers(), runner, 2)
+	requested := int(^uint(0) >> 1)
+	if _, err := m.Run([]string{"true"}, nil, requested); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.max.Load(); got > 2 {
+		t.Fatalf("max concurrency = %d, configured ceiling is 2", got)
+	}
+}
+
+func TestRunCapsParallelismAcrossConcurrentCalls(t *testing.T) {
+	runner := &concurrencyRunner{}
+	m := New(testServers(), runner, 2)
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := m.Run([]string{"true"}, nil, 2)
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := runner.max.Load(); got > 2 {
+		t.Fatalf("max concurrency across calls = %d, manager ceiling is 2", got)
+	}
+}
+
+func TestRunRejectsEmptyCommand(t *testing.T) {
+	m := New(testServers(), mockRunner{}, 2)
+	if _, err := m.Run(nil, nil, 1); err == nil {
+		t.Fatal("empty fleet command was accepted")
+	}
+	if _, err := m.Run([]string{strings.Repeat("x", maxFleetCommandBytes+1)}, nil, 1); err == nil {
+		t.Fatal("oversized fleet command was accepted")
+	}
+	if _, err := m.Run([]string{"echo", "safe\x00; touch injected"}, nil, 1); err == nil {
+		t.Fatal("fleet command containing NUL was accepted")
+	}
+}
+
+type verboseRunner struct{}
+
+func (verboseRunner) Run(server Server, command []string) Result {
+	return Result{Server: server.Name, Status: "ok", Stdout: strings.Repeat("x", maxFleetResultBytes)}
+}
+
+func TestRunBoundsAggregateOutput(t *testing.T) {
+	m := New(testServers(), verboseRunner{}, 2)
+	res, err := m.Run([]string{"true"}, nil, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	truncated := false
+	for _, result := range res.Results {
+		total += len(result.Stdout) + len(result.Stderr) + len(result.Error)
+		truncated = truncated || result.Truncated
+	}
+	if total > maxFleetResultBytes || !truncated {
+		t.Fatalf("aggregate output = %d bytes, truncated=%v", total, truncated)
+	}
+}
+
+func TestAddServerValidatesAndCapsFields(t *testing.T) {
+	m := New(nil, mockRunner{}, 1)
+	if err := m.AddServer(Server{Name: "bad name", Host: "host", User: "user"}); err == nil {
+		t.Fatal("invalid managed server was accepted")
+	}
+	if err := m.AddServer(Server{Name: "ok", Host: "127.0.0.1", User: "user", Port: 22}); err != nil {
+		t.Fatal(err)
 	}
 }

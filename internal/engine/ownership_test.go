@@ -1,9 +1,13 @@
 package engine
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/termada/termada/internal/bus"
 	"github.com/termada/termada/internal/errs"
 	"github.com/termada/termada/internal/policy"
 )
@@ -23,6 +27,77 @@ func TestWriteRejectsNonCurrentJob(t *testing.T) {
 
 	if err := m.Write("agent", job.ID, "rm -rf /whatever", true, false, false); err == nil {
 		t.Fatal("write to a finished job should be rejected, not typed into the idle shell")
+	}
+}
+
+// An agent write to a live command that is not waiting for input must not be
+// allowed to sit in the PTY queue. Otherwise the persistent shell executes it as
+// a fresh command after the current job's completion marker, bypassing policy.
+func TestWriteRejectsQueuedIdleShellCommand(t *testing.T) {
+	m := newTestManager(t)
+	sess, err := m.CreateSession("agent", "local", "shell")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	job, err := m.Start("agent", sess.ID, []string{"sleep", "0.5"}, ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "queued-command-ran")
+	err = m.Write("agent", job.ID, "touch "+shellQuote(marker), true, false, false)
+	structured, ok := err.(*errs.Error)
+	if !ok || structured.Code != errs.DeniedByPolicy {
+		t.Fatalf("write to non-interactive current job = %v, want denied_by_policy", err)
+	}
+	waitDone(t, job, 5*time.Second)
+
+	// Run one more command in the same shell to establish that it has consumed all
+	// terminal input preceding this point. A leaked line would have run first.
+	barrier, err := m.Start("agent", sess.ID, []string{"true"}, ModeForeground)
+	if err != nil {
+		t.Fatalf("start barrier: %v", err)
+	}
+	waitDone(t, barrier, 5*time.Second)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("queued input executed as an idle-shell command: %v", err)
+	}
+}
+
+func TestSessionAndFileOwnershipIsolation(t *testing.T) {
+	m := newTestManager(t)
+	victim, err := m.CreateSession("victim", "local", "shell")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "owned.txt")
+	if err := os.WriteFile(path, []byte("victim-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.Start("attacker", victim.ID, []string{"echo", "stolen"}, ""); err == nil {
+		t.Fatal("attacker started a job in victim session")
+	}
+	if got := m.ListSessionsFor("attacker"); len(got) != 0 {
+		t.Fatalf("attacker session list leaked %+v", got)
+	}
+	if got := m.ListSessionsFor("victim"); len(got) != 1 || got[0].SessionID != victim.ID {
+		t.Fatalf("victim session list = %+v", got)
+	}
+	if _, err := m.FileReadFor("attacker", victim.ID, path, 0); err == nil {
+		t.Fatal("attacker read through victim session")
+	}
+	if _, err := m.FileWriteFor("attacker", victim.ID, path, "changed", ""); err == nil {
+		t.Fatal("attacker wrote through victim session")
+	}
+	if _, err := m.SessionTailFor("attacker", victim.ID, ""); err == nil {
+		t.Fatal("attacker tailed victim session")
+	}
+	if err := m.SessionWriteInputFor("attacker", victim.ID, "echo bypass", true, false); err == nil {
+		t.Fatal("attacker wrote directly to victim PTY")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || string(b) != "victim-data" {
+		t.Fatalf("victim file changed: %q err=%v", b, err)
 	}
 }
 
@@ -236,22 +311,216 @@ func TestMaxBackgroundJobsGate(t *testing.T) {
 	}
 }
 
-// TestCapChunkKeepsTail ensures the per-call output cap keeps the most recent
-// bytes and reports truncation, without losing data from the underlying
-// buffer (a later poll from an earlier cursor can still reach it).
-func TestCapChunkKeepsTail(t *testing.T) {
+// TestCapChunkKeepsHead ensures capped output remains sequential: callers can
+// advance by the returned bytes and fetch the remainder on the next poll.
+func TestCapChunkKeepsHead(t *testing.T) {
 	chunk := []byte("0123456789")
 	got, truncated := capChunk(chunk, 4)
 	if !truncated {
 		t.Fatal("expected truncated=true")
 	}
-	if string(got) != "6789" {
-		t.Fatalf("capChunk kept %q, want the tail %q", got, "6789")
+	if string(got) != "0123" {
+		t.Fatalf("capChunk kept %q, want the head %q", got, "0123")
 	}
 	if got2, truncated2 := capChunk(chunk, 100); truncated2 || string(got2) != string(chunk) {
 		t.Fatalf("capChunk with a cap above len should be a no-op, got %q truncated=%v", got2, truncated2)
 	}
 	if _, truncated3 := capChunk(chunk, 0); truncated3 {
 		t.Fatal("capChunk with n<=0 should disable the cap")
+	}
+}
+
+func TestCappedOutputCursorIsSequential(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MaxOutputBytes = 4
+	m := NewManager(cfg)
+	t.Cleanup(m.Shutdown)
+
+	run, err := m.Run("agent", "", []string{"printf", "0123456789"}, ModeForeground, 5_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Stdout != "0123" || !run.HasMore || run.NextCursor != "4" {
+		t.Fatalf("first page = stdout=%q has_more=%v cursor=%q", run.Stdout, run.HasMore, run.NextCursor)
+	}
+	p2, err := m.Poll("agent", run.JobID, run.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p2.StdoutChunk != "4567" || !p2.HasMore || p2.NextCursor != "8" {
+		t.Fatalf("second page = chunk=%q has_more=%v cursor=%q", p2.StdoutChunk, p2.HasMore, p2.NextCursor)
+	}
+	p3, err := m.Poll("agent", run.JobID, p2.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p3.StdoutChunk != "89" || p3.HasMore || p3.NextCursor != "10" {
+		t.Fatalf("final page = chunk=%q has_more=%v cursor=%q", p3.StdoutChunk, p3.HasMore, p3.NextCursor)
+	}
+}
+
+func TestConfirmationJobsRespectQuotas(t *testing.T) {
+	t.Run("enqueue counts against per-agent quota", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.MaxJobsPerAgent = 1
+		m := NewManager(cfg)
+		t.Cleanup(m.Shutdown)
+		m.SetPolicy(policy.NewEngine(map[string]policy.Policy{"p": {Confirm: []string{"danger*"}}}), map[string]string{"agent": "p"})
+		s1, _ := m.CreateSession("agent", "local", "shell")
+		s2, _ := m.CreateSession("agent", "local", "shell")
+		if _, err := m.Start("agent", s1.ID, []string{"danger-one"}, ""); err != nil {
+			t.Fatalf("first confirmation: %v", err)
+		}
+		if _, err := m.Start("agent", s2.ID, []string{"danger-two"}, ""); err == nil {
+			t.Fatal("second parked confirmation bypassed per-agent quota")
+		}
+	})
+
+	t.Run("approve respects foreground quota", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.MaxForegroundJobs = 1
+		m := NewManager(cfg)
+		t.Cleanup(m.Shutdown)
+		m.SetPolicy(policy.NewEngine(map[string]policy.Policy{"p": {Confirm: []string{"danger*"}}}), map[string]string{"gate": "p"})
+		busySession, _ := m.CreateSession("busy", "local", "shell")
+		busy, err := m.Start("busy", busySession.ID, []string{"sleep", "5"}, ModeForeground)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gateSession, _ := m.CreateSession("gate", "local", "shell")
+		pending, err := m.Start("gate", gateSession.ID, []string{"danger-cmd"}, ModeForeground)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Approve(pending.Snapshot().ConfirmationID, "test"); err == nil {
+			t.Fatal("approval bypassed max foreground jobs")
+		}
+		_ = m.Kill("busy", busy.ID)
+		waitDone(t, busy, 5*time.Second)
+		if err := m.Approve(pending.Snapshot().ConfirmationID, "test"); err != nil {
+			t.Fatalf("approval should succeed after slot is free: %v", err)
+		}
+	})
+}
+
+func TestApproveRechecksAuditHealth(t *testing.T) {
+	m := newTestManager(t)
+	m.SetPolicy(policy.NewEngine(map[string]policy.Policy{"p": {Confirm: []string{"danger*"}}}), map[string]string{"agent": "p"})
+	healthy := true
+	m.SetAuditHealth(func() bool { return healthy })
+	pending, err := m.Start("agent", "", []string{"danger-cmd"}, ModeForeground)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cid := pending.Snapshot().ConfirmationID
+	healthy = false
+	if err := m.Approve(cid, "test"); err == nil {
+		t.Fatal("approval executed after audit became unhealthy")
+	}
+	if len(m.ListPending()) != 1 {
+		t.Fatal("failed approval should remain pending for a later healthy retry or denial")
+	}
+	healthy = true
+	if err := m.Approve(cid, "test"); err != nil {
+		t.Fatalf("healthy retry: %v", err)
+	}
+}
+
+func TestConfirmationFailsClosedOnSynchronousAuditError(t *testing.T) {
+	t.Run("request", func(t *testing.T) {
+		m := newTestManager(t)
+		m.SetPolicy(policy.NewEngine(map[string]policy.Policy{"p": {Confirm: []string{"danger*"}}}), map[string]string{"agent": "p"})
+		b := bus.New(10)
+		m.SetBus(b)
+		cancel := b.SubscribeReliable(func(bus.Event) error { return errors.New("disk full") })
+		defer cancel()
+		if _, err := m.Start("agent", "", []string{"danger-cmd"}, ModeForeground); err == nil {
+			t.Fatal("confirmation request succeeded without a durable audit record")
+		}
+		if len(m.ListPending()) != 0 {
+			t.Fatal("failed confirmation request remained pending")
+		}
+	})
+
+	t.Run("approval", func(t *testing.T) {
+		m := newTestManager(t)
+		m.SetPolicy(policy.NewEngine(map[string]policy.Policy{"p": {Confirm: []string{"sh*"}}}), map[string]string{"agent": "p"})
+		b := bus.New(10)
+		m.SetBus(b)
+		cancel := b.SubscribeReliable(func(event bus.Event) error {
+			if event.Type == bus.EvConfirmResolved {
+				return errors.New("disk full")
+			}
+			return nil
+		})
+		defer cancel()
+		marker := filepath.Join(t.TempDir(), "ran")
+		pending, err := m.Start("agent", "", []string{"sh", "-c", "echo ran > " + marker}, ModeForeground)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Approve(pending.Snapshot().ConfirmationID, "test"); err == nil {
+			t.Fatal("approval succeeded without a durable audit record")
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("dangerous command ran despite audit failure: %v", err)
+		}
+	})
+}
+
+func TestOrdinaryCommandFailsClosedOnAuditIntentError(t *testing.T) {
+	m := newTestManager(t)
+	b := bus.New(10)
+	m.SetBus(b)
+	cancel := b.SubscribeReliable(func(event bus.Event) error {
+		if event.Type == bus.EvJobStartRequested {
+			return errors.New("disk full")
+		}
+		return nil
+	})
+	defer cancel()
+	marker := filepath.Join(t.TempDir(), "ran")
+	if _, err := m.Start("agent", "", []string{"sh", "-c", "echo ran > " + marker}, ModeForeground); err == nil {
+		t.Fatal("ordinary command started without a durable audit intent")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("command ran despite audit failure: %v", err)
+	}
+}
+
+func TestShutdownResolvesPendingConfirmations(t *testing.T) {
+	m := NewManager(DefaultConfig())
+	m.SetPolicy(policy.NewEngine(map[string]policy.Policy{"p": {Confirm: []string{"danger*"}}}), map[string]string{"agent": "p"})
+	job, err := m.Start("agent", "", []string{"danger-cmd"}, ModeForeground)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Shutdown()
+	select {
+	case <-job.Done():
+	case <-time.After(time.Second):
+		t.Fatal("pending confirmation remained live after Shutdown")
+	}
+	if got := len(m.ListPending()); got != 0 {
+		t.Fatalf("Shutdown left %d pending confirmations", got)
+	}
+}
+
+func TestKillCancelsPendingConfirmation(t *testing.T) {
+	m := NewManager(DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	m.SetPolicy(policy.NewEngine(map[string]policy.Policy{"p": {Confirm: []string{"danger*"}}}), map[string]string{"agent": "p"})
+	job, err := m.Start("agent", "", []string{"danger-cmd"}, ModeForeground)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Kill("agent", job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := job.Snapshot().Status; got != StatusKilled {
+		t.Fatalf("status = %s, want killed", got)
+	}
+	if got := len(m.ListPending()); got != 0 {
+		t.Fatalf("kill left %d confirmations pending", got)
 	}
 }

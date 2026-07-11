@@ -110,9 +110,9 @@
     <div class="gate-h">🔒 Termada dashboard</div>
     <p>This dashboard is local-only and needs the <b>access token</b> printed when the daemon started.</p>
     <p class="muted">Easiest: run <code>termada dashboard</code> — it prints (and can open) the full link. Or copy the <code>?token=…</code> URL from the <code>termada serve</code> output and paste the token below.</p>
-    <input id="gate-token" placeholder="paste token here" autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter')submitGate()">
-    <button class="on" onclick="submitGate()">Unlock</button>
-    <p class="muted">Stored in this browser — you won't be asked again on this machine.</p>
+    <input id="gate-token" placeholder="paste token here" autocomplete="off" spellcheck="false">
+    <button class="on" data-action="submit-gate">Unlock</button>
+    <p class="muted">Stored only for this browser tab.</p>
   </div>
 </div>
 <header>
@@ -123,16 +123,16 @@
   <span class="stat">pending <b id="s-pend">0</b></span>
   <span class="spacer"></span>
   <span class="stat" id="ver"></span>
-  <button onclick="openHistory()">📜 History</button>
-  <button class="danger" onclick="stopAll()">⏹ Stop All</button>
+  <button data-action="open-history">📜 History</button>
+  <button class="danger" data-action="stop-all">⏹ Stop All</button>
 </header>
 <div id="history">
   <div class="hist-card">
     <div class="hist-top"><b>History — what agents did</b>
       <span class="muted" id="hist-meta"></span>
       <span style="flex:1"></span>
-      <input id="hist-filter" placeholder="filter (agent, command, type)…" oninput="renderAudit()">
-      <button onclick="closeHistory()">✕</button></div>
+      <input id="hist-filter" placeholder="filter (agent, command, type)…">
+      <button data-action="close-history">✕</button></div>
     <div id="hist-list" class="hist-list"><div class="empty">loading…</div></div>
     <div class="muted hist-foot">Tamper-evident, hash-chained audit log. Verify with <code>termada audit verify</code>.</div>
   </div>
@@ -152,7 +152,7 @@
       <div class="leg"><span class="badge st-orphaned">orphaned</span> daemon restarted — process &amp; output were lost</div>
       <div class="leg"><span class="muted">Finished &amp; failed jobs don't stay in this list — find them under 📜 History.</span></div>
     </details>
-    <h2>Servers <button class="mini" onclick="toggleServerForm()">+ add</button></h2>
+    <h2>Servers <button class="mini" data-action="toggle-server-form">+ add</button></h2>
     <div id="server-form">
       <input id="sf-name" placeholder="name  (e.g. prod)">
       <input id="sf-host" placeholder="host or IP">
@@ -162,21 +162,21 @@
       <textarea id="sf-secret" placeholder="SSH key/password — leave BLANK to use your own ssh-agent / ~/.ssh key (no vault needed)"></textarea>
       <input id="sf-vault" type="password" placeholder="vault passphrase — only if you typed a key/password above">
       <div class="sf-hint"><b>Leave the key blank</b> to connect with your existing ssh-agent / <code>~/.ssh</code> key — no vault, no passphrase. Fill it only if you want Termada to <i>store</i> a credential; then the passphrase is its at-rest encryption key (protects it if the vault file is ever copied — backup, sync, stolen disk).</div>
-      <div class="row"><button class="on" onclick="addServer()">Add &amp; test</button>
-        <button onclick="toggleServerForm()">cancel</button></div>
+      <div class="row"><button class="on" data-action="add-server">Add &amp; test</button>
+        <button data-action="toggle-server-form">cancel</button></div>
       <div id="sf-msg" class="muted"></div>
     </div>
     <div id="servers"><div class="empty">none</div></div>
     <h2>Agents</h2><div id="agents"><div class="empty">none connected yet</div></div>
-    <h2>Policies <button class="mini" onclick="togglePolicyForm()">+ add</button></h2>
+    <h2>Policies <button class="mini" data-action="toggle-policy-form">+ add</button></h2>
     <div id="policy-form">
       <input id="pf-name" placeholder="name  (e.g. restricted)">
       <textarea id="pf-allow" placeholder="allow — one glob per line. If set, this is a WHITELIST: anything not matched is denied."></textarea>
       <textarea id="pf-deny" placeholder="deny — one glob per line  (e.g. rm -rf *, sudo *)"></textarea>
       <textarea id="pf-confirm" placeholder="confirm — one glob per line  (parks the command for your approval)"></textarea>
       <div class="sf-hint">Globs match the command's argv — <code>git push*</code>, <code>rm *</code>, <code>sudo*</code>. Precedence: <b>allow</b> (whitelist) → <b>deny</b> → <b>confirm</b> → allow. To apply a policy to an agent, set <code>agents:</code> in <code>config.yaml</code>.</div>
-      <div class="row"><button class="on" onclick="savePolicy()">Save</button>
-        <button onclick="togglePolicyForm()">cancel</button></div>
+      <div class="row"><button class="on" data-action="save-policy">Save</button>
+        <button data-action="toggle-policy-form">cancel</button></div>
       <div id="pf-msg" class="muted"></div>
     </div>
     <div id="policies"><div class="empty">—</div></div>
@@ -191,20 +191,22 @@
     </div>
   </main>
 </div>
-<script>
-// Token: taken from ?token= on first visit, then remembered in THIS browser so a
-// bare http://127.0.0.1:7717 keeps working (and the token is stripped from the
-// address bar so it doesn't linger in history). If there's no token anywhere we
-// show a clear gate instead of a silently-empty dashboard.
+<script nonce="__CSP_NONCE__">
+// Token: taken from ?token= on first visit, kept only for this browser tab, and
+// stripped from the address bar so it doesn't linger in history. If there's no
+// token we show a clear gate instead of a silently-empty dashboard.
 let token = new URLSearchParams(location.search).get('token') || '';
 if(token){
-  try{ localStorage.setItem('termada_token', token); }catch(_){}
+  try{ sessionStorage.setItem('termada_token', token); }catch(_){}
   try{ history.replaceState(null,'',location.pathname); }catch(_){}
 }else{
-  try{ token = localStorage.getItem('termada_token') || ''; }catch(_){}
+  try{ token = sessionStorage.getItem('termada_token') || ''; }catch(_){}
 }
-let q = token ? ('token='+encodeURIComponent(token)) : '';
 function authHeaders(){ return token ? {'Authorization':'Bearer '+token} : {}; }
+function withToken(path){
+  if(!token) return path;
+  return path+(path.includes('?')?'&':'?')+'token='+encodeURIComponent(token);
+}
 const FitAddon = window.FitAddon ? window.FitAddon.FitAddon : null;
 
 async function api(path, opts={}){
@@ -213,20 +215,24 @@ async function api(path, opts={}){
   if(r.status===401){ showGate(); throw new Error('unauthorized'); }
   return r.json().catch(()=>({}));
 }
-// Only shown if the daemon actually rejects us (401) — i.e. strict mode without a
-// valid token. In the default local-trust mode the API answers without a token,
-// so the gate never appears and the dashboard just loads.
+// The complete TCP API is token-gated; static assets remain readable so this
+// prompt can collect the token without exposing operational data.
 let gated=false;
 function showGate(){ gated=true; const g=document.getElementById('gate'); if(g) g.style.display='flex'; }
 function submitGate(){
   const t=(document.getElementById('gate-token').value||'').trim();
   if(!t){ return; }
-  token=t; q='token='+encodeURIComponent(t); gated=false;
-  try{ localStorage.setItem('termada_token', t); }catch(_){}
+  token=t; gated=false;
+  try{ sessionStorage.setItem('termada_token', t); }catch(_){}
   const g=document.getElementById('gate'); if(g) g.style.display='none';
+  startFeed();
+  for(const key in terms) connectTermStream(terms[key]);
   refresh();
+  loadPolicies();
 }
-function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function esc(s){return (s==null?'':String(s)).replace(/[&<>"']/g,c=>({
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+}[c]));}
 function cmd(c){return Array.isArray(c)?c.join(' '):(c||'');}
 function short(s,n){s=s||'';return s.length>n?s.slice(0,n)+'…':s;}
 function relTime(unix){ if(!unix)return''; const d=Math.max(0,Math.floor(Date.now()/1000-unix));
@@ -238,7 +244,7 @@ const TERMINAL = ['exited','killed','failed','timed_out','orphaned'];
 const terms = {};   // key -> {term, fit, es, host, tab}
 let active = null;
 
-function makeTerm(key, icon, title, grip, controlsHTML, streamUrl, onInput){
+function makeTerm(key, icon, title, grip, controlsHTML, streamPath, onInput){
   if(terms[key]){ focusTab(key); return terms[key]; }
   const host=document.createElement('div'); host.className='termhost';
   host.innerHTML=`<div class="termctl"><span class="grip">${esc(grip)}</span>${controlsHTML}</div><div class="termel"></div>`;
@@ -252,17 +258,21 @@ function makeTerm(key, icon, title, grip, controlsHTML, streamUrl, onInput){
   if(onInput) term.onData(onInput);
 
   const tab=document.createElement('div'); tab.className='tab'; tab.id='tab-'+cssId(key);
-  tab.innerHTML=`<span class="ic">${icon}</span><span>${esc(title)}</span><span class="x">✕</span>`;
+  tab.innerHTML=`<span class="ic">${esc(icon)}</span><span>${esc(title)}</span><span class="x">✕</span>`;
   tab.onclick=()=>focusTab(key);
   tab.querySelector('.x').onclick=(e)=>{e.stopPropagation();closeTerm(key);};
   document.getElementById('tabs').appendChild(tab);
 
-  const es=new EventSource(streamUrl);
+  const info={term,fit,es:null,host,tab,streamPath};
+  terms[key]=info; connectTermStream(info); focusTab(key); return info;
+}
+function connectTermStream(info){
+  if(info.es){ try{info.es.close();}catch(_){ } }
+  const es=new EventSource(withToken(info.streamPath));
+  info.es=es;
   es.onmessage=ev=>{ let m; try{m=JSON.parse(ev.data);}catch(_){return;}
-    if(m.chunk) term.write(m.chunk);
-    if(m.done){ term.write('\r\n\x1b[2m── '+(m.status||'ended')+' ──\x1b[0m\r\n'); es.close(); } };
-
-  terms[key]={term,fit,es,host,tab}; focusTab(key); return terms[key];
+    if(m.chunk) info.term.write(m.chunk);
+    if(m.done){ info.term.write('\r\n\x1b[2m── '+(m.status||'ended')+' ──\x1b[0m\r\n'); es.close(); } };
 }
 function cssId(k){return k.replace(/[^a-z0-9]/gi,'_');}
 function focusTab(key){
@@ -282,18 +292,18 @@ function closeTerm(key){
 // session terminal: the whole shell, live; type straight into it
 function openSession(id){
   makeTerm('sess:'+id, '▸', short(id,16), 'session '+id+'  ·  operator console (type to run/answer)',
-    '', '/api/session/stream?session_id='+encodeURIComponent(id)+'&'+q,
+    '', '/api/session/stream?session_id='+encodeURIComponent(id),
     d=>api('/api/session/write',{method:'POST',body:JSON.stringify({session_id:id,input:d,append_newline:false,human:true})}));
 }
 // job terminal: one command, with takeover controls
 function openJob(job){
   const id=job.job_id;
-  const controls=`<span class="hold-tag" id="ht-${id}"></span>
-    <button id="hi-${id}" onclick="toggleHold('${id}','input')">Block agent ⌨</button>
-    <button id="ho-${id}" onclick="toggleHold('${id}','output')">Pause agent ⏸</button>
-    <button class="danger" onclick="killJob('${id}')">kill</button>`;
+  const controls=`<span class="hold-tag" id="ht-${esc(id)}"></span>
+    <button id="hi-${esc(id)}" data-action="toggle-hold" data-id="${esc(id)}" data-kind="input">Block agent ⌨</button>
+    <button id="ho-${esc(id)}" data-action="toggle-hold" data-id="${esc(id)}" data-kind="output">Pause agent ⏸</button>
+    <button class="danger" data-action="kill-job" data-id="${esc(id)}">kill</button>`;
   makeTerm('job:'+id, '●', short(cmd(job.command),20), cmd(job.command), controls,
-    '/api/exec/stream?job_id='+encodeURIComponent(id)+'&'+q,
+    '/api/exec/stream?job_id='+encodeURIComponent(id),
     d=>api('/api/exec/write',{method:'POST',body:JSON.stringify({job_id:id,input:d,append_newline:false,human:true})}));
 }
 async function openJobById(id){ let j=lastJobs[id]; if(j) openJob(j); }
@@ -370,11 +380,11 @@ async function refresh(){
   document.getElementById('approvals').innerHTML=(s.pending||[]).map(p=>`
     <div class="approve-card"><div style="color:var(--yellow);font-size:11px">⚠ APPROVAL NEEDED · ${esc(p.agent_id||'')}</div>
       <div class="cmd">${esc(cmd(p.command))}</div>
-      <div class="row"><button class="on" onclick="resolve('approve','${p.confirmation_id}')">approve</button>
-      <button class="danger" onclick="resolve('deny','${p.confirmation_id}')">deny</button></div></div>`).join('');
+      <div class="row"><button class="on" data-action="resolve" data-kind="approve" data-id="${esc(p.confirmation_id)}">approve</button>
+      <button class="danger" data-action="resolve" data-kind="deny" data-id="${esc(p.confirmation_id)}">deny</button></div></div>`).join('');
 
   document.getElementById('sessions').innerHTML=(s.sessions||[]).length ? (s.sessions||[]).map(x=>`
-    <div class="item ${active==='sess:'+x.session_id?'sel':''}" onclick="openSession('${x.session_id}')">
+    <div class="item ${active==='sess:'+x.session_id?'sel':''}" data-action="open-session" data-id="${esc(x.session_id)}">
       <span class="cmd">▸ ${esc(short(x.session_id,18))}</span><span class="badge">${esc(x.owner||'—')}</span>
       <span class="badge ${x.active_jobs?'st-running':''}">${x.active_jobs?'busy':'idle'}</span></div>`).join('') : '<div class="empty">none</div>';
 
@@ -382,7 +392,7 @@ async function refresh(){
   // also list them here (and they aren't a real job terminal yet).
   const jobList=jobs.filter(j=>j.status!=='awaiting_confirmation');
   document.getElementById('jobs').innerHTML=jobList.length ? jobList.map(j=>`
-    <div class="item ${active==='job:'+j.job_id?'sel':''}" onclick="openJobById('${j.job_id}')">
+    <div class="item ${active==='job:'+j.job_id?'sel':''}" data-action="open-job" data-id="${esc(j.job_id)}">
       <span class="cmd">${esc(cmd(j.command))}</span>
       ${j.hold_input?'<span class="hold-tag">⌨</span>':''}${j.hold_output?'<span class="hold-tag">⏸</span>':''}
       <span class="badge st-${esc(j.status)}">${esc(j.status)}</span></div>`).join('') : '<div class="empty">none</div>';
@@ -402,8 +412,8 @@ async function refresh(){
         <span class="muted">${esc(x.user)}@${esc(x.host)}${st?' · '+esc(st):''}${stale?' · <span style="color:var(--yellow)">stale</span>':''}</span></span>
       ${(x.tags||[]).map(t=>'<span class="badge">'+esc(t)+'</span>').join('')}
       <span style="flex:1"></span>
-      <button class="mini" onclick="testServer('${esc(x.name)}')">test</button>
-      ${x.managed?`<button class="mini" onclick="removeServer('${esc(x.name)}')">✕</button>`:''}
+      <button class="mini" data-action="test-server" data-name="${esc(x.name)}">test</button>
+      ${x.managed?`<button class="mini" data-action="remove-server" data-name="${esc(x.name)}">✕</button>`:''}
     </div>`; }).join('') : '<div class="empty">none yet — click <b>+ add</b></div>';
 
   // agents: who connected, how often, what they did
@@ -415,10 +425,10 @@ async function refresh(){
     return `<div class="item srv" title="${esc(titleAttr)}">
         <span class="srv-name agent-name"><span class="sdot" style="color:${online?'#3fb950':'#8b949e'}">●</span>${esc(a.id)}
           <span class="muted">${online?'online':'idle · '+ago}</span></span>
-        <span class="badge">×${a.connections||0} conn</span>
-        <span class="badge">${a.jobs||0} jobs</span>
-        ${a.sessions?`<span class="badge">${a.sessions} sess</span>`:''}
-        ${a.denied?`<span class="badge st-failed">${a.denied} denied</span>`:''}
+        <span class="badge">×${esc(a.connections||0)} conn</span>
+        <span class="badge">${esc(a.jobs||0)} jobs</span>
+        ${a.sessions?`<span class="badge">${esc(a.sessions)} sess</span>`:''}
+        ${a.denied?`<span class="badge st-failed">${esc(a.denied)} denied</span>`:''}
       </div>${a.last_command?`<div class="amini" title="${esc(hist)}">↳ ${esc(a.last_command)} · ${a.last_command_unix?relTime(a.last_command_unix):ago}</div>`:''}`;
   }).join('') : '<div class="empty">none connected yet</div>';
 
@@ -479,7 +489,7 @@ async function loadPolicies(){
     if((po.confirm||[]).length) rules.push('<span class="tag st-awaiting_input">confirm</span> '+po.confirm.map(esc).join(', '));
     const who=(byPol[n]||[]).map(esc).join(', ');
     const ctl = managed[n]
-      ? `<span class="ctl"><button onclick="editPolicy('${esc(n)}')">edit</button><button class="danger" onclick="deletePolicy('${esc(n)}')">✕</button></span>`
+      ? `<span class="ctl"><button data-action="edit-policy" data-name="${esc(n)}">edit</button><button class="danger" data-action="delete-policy" data-name="${esc(n)}">✕</button></span>`
       : `<span class="ctl"><span class="tag cfg" title="defined in config.yaml — edit the file to change">config</span></span>`;
     return `<div class="pol">${ctl}<b>${esc(n)}</b>${who?' <span class="muted">· '+who+'</span>':''}<div class="pr">${rules.join('<br>')||'<span class="muted">no rules → allow all</span>'}</div></div>`;
   }).join('') : '<div class="empty">none yet — click <b>+ add</b></div>';
@@ -510,22 +520,55 @@ function renderAudit(){
     return `<div class="arow"><span class="at">${t}</span><span class="aa">${esc(r.agent_id||'—')}</span><span class="ay">${esc(r.type||'')}</span><span class="am">${m}</span></div>`;
   }).join('') : '<div class="empty">no records yet</div>';
 }
-document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeHistory(); } });
-
 const feed=document.getElementById('feed');
-try{
-  const es=new EventSource('/api/events?'+q);
+let feedES=null;
+function startFeed(){
+  if(feedES){ try{feedES.close();}catch(_){ } }
+  const es=new EventSource(withToken('/api/events'));
+  feedES=es;
   es.onmessage=ev=>{ let e; try{e=JSON.parse(ev.data);}catch(_){return;}
     const d=document.createElement('div'); d.className='e';
     const t=new Date(e.time||Date.now()).toLocaleTimeString();
-    d.innerHTML=`<span class="t">${t}</span><span class="ty">${esc(e.type)}</span><span class="cmd">${esc(e.message||'')}</span>`;
+    const ts=document.createElement('span'); ts.className='t'; ts.textContent=t;
+    const ty=document.createElement('span'); ty.className='ty'; ty.textContent=e.type||'';
+    const msg=document.createElement('span'); msg.className='cmd'; msg.textContent=e.message||'';
+    d.append(ts,ty,msg);
     feed.prepend(d); while(feed.children.length>80) feed.removeChild(feed.lastChild);
     if(['job.started','job.finished','confirm.requested','confirm.resolved','session.created','job.hold'].includes(e.type)) refresh();
   };
-}catch(e){}
+}
+
+document.addEventListener('click',e=>{
+  const el=e.target.closest&&e.target.closest('[data-action]');
+  if(!el) return;
+  const id=el.dataset.id||'', name=el.dataset.name||'';
+  switch(el.dataset.action){
+  case 'submit-gate': submitGate(); break;
+  case 'open-history': openHistory(); break;
+  case 'close-history': closeHistory(); break;
+  case 'stop-all': stopAll(); break;
+  case 'toggle-server-form': toggleServerForm(); break;
+  case 'add-server': addServer(); break;
+  case 'test-server': testServer(name); break;
+  case 'remove-server': removeServer(name); break;
+  case 'toggle-policy-form': togglePolicyForm(); break;
+  case 'save-policy': savePolicy(); break;
+  case 'edit-policy': editPolicy(name); break;
+  case 'delete-policy': deletePolicy(name); break;
+  case 'resolve': resolve(el.dataset.kind||'',id); break;
+  case 'open-session': openSession(id); break;
+  case 'open-job': openJobById(id); break;
+  case 'toggle-hold': toggleHold(id,el.dataset.kind||''); break;
+  case 'kill-job': killJob(id); break;
+  }
+});
+document.getElementById('gate-token').addEventListener('keydown',e=>{ if(e.key==='Enter') submitGate(); });
+document.getElementById('hist-filter').addEventListener('input',renderAudit);
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeHistory(); });
 
 window.addEventListener('resize',()=>{ if(active&&terms[active]&&terms[active].fit){try{terms[active].fit.fit();}catch(_){}}});
-refresh(); // always try — local-trust answers without a token; a 401 shows the gate
+startFeed();
+refresh(); // a missing/invalid token receives 401 and opens the gate
 loadPolicies();
 setInterval(()=>{ if(!gated) refresh(); }, 1500);
 </script>

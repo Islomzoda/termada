@@ -1,14 +1,14 @@
 # goreleaser config — cross-platform release builds + checksums.
-# Run by .github/workflows/release.yml on a tag push. Signing/notarization steps
-# are gated on release secrets (Apple Developer ID, Windows cert) and are no-ops
-# until those are configured (spec DI-1, phase 4).
+# Run by .github/workflows/release.yml on a tag push. Checksums can be signed
+# below; native Apple notarization and Windows code signing are not configured.
 version: 2
 
 project_name: termada
 
 before:
   hooks:
-    - go mod tidy
+    # Release builds must consume the committed dependency graph, not rewrite it.
+    - go mod verify
 
 builds:
   - id: termada
@@ -38,6 +38,9 @@ archives:
     # Matches the asset name the in-binary updater expects:
     #   termada_<os>_<arch>.tar.gz
     name_template: "termada_{{ .Os }}_{{ .Arch }}"
+    # Keep one format across platforms; self-update and install.sh both verify
+    # and parse these exact .tar.gz assets (including termada.exe on Windows).
+    formats: [tar.gz]
     files:
       - README.md
       - LICENSE

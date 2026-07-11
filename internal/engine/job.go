@@ -72,11 +72,15 @@ func newConfirmJob(sess *Session, command []string, mode string) *Job {
 
 // activate transitions a job to running and stamps its start time. Used both
 // for normal starts and when a confirmation is approved.
-func (j *Job) activate() {
+func (j *Job) activate() bool {
 	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.status.Terminal() {
+		return false
+	}
 	j.status = StatusRunning
 	j.startedAt = time.Now()
-	j.mu.Unlock()
+	return true
 }
 
 func (j *Job) setConfirmID(id string) {
@@ -257,7 +261,7 @@ func (j *Job) detectPromptLocked() (string, bool) {
 		if from < 0 {
 			from = 0
 		}
-		chunk, _, _ := j.clean.ReadFrom(from)
+		chunk, _, _, _ := j.clean.ReadFromLimit(from, 256)
 		s := strings.TrimRight(string(chunk), "\n")
 		if i := strings.LastIndexByte(s, '\n'); i >= 0 {
 			s = s[i+1:]

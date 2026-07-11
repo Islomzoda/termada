@@ -1,10 +1,19 @@
 # goreleaser docker image: packages the pre-built static binary (goreleaser puts
-# it in the build context) with bash + an SSH client, which termada needs for
-# local PTY sessions and remote fleet/SSH. See Dockerfile for the from-source build.
+# it in the build context) with bash + an SSH client for commands run inside
+# sessions. Termada's remote backend uses x/crypto/ssh. See Dockerfile for the
+# from-source build.
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash openssh-client ca-certificates \
+    && apt-get install -y --no-install-recommends bash openssh-client ca-certificates tini \
+    && groupadd --gid 10001 termada \
+    && useradd --uid 10001 --gid termada --home-dir /home/termada --create-home --shell /bin/bash termada \
+    && mkdir -p /home/termada/.config/termada \
+    && chown -R termada:termada /home/termada/.config \
     && rm -rf /var/lib/apt/lists/*
 COPY termada /usr/bin/termada
-ENTRYPOINT ["/usr/bin/termada"]
-CMD ["serve"]
+ENV HOME=/home/termada
+WORKDIR /home/termada
+USER termada
+EXPOSE 7717
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/bin/termada"]
+CMD ["serve", "--bind", "0.0.0.0:7717"]

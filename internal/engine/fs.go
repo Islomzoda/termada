@@ -4,9 +4,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/termada/termada/internal/errs"
+)
+
+const (
+	defaultFileReadBytes = 100_000
+	maxFileReadBytes     = 1 << 20
 )
 
 // SetProtectedPaths installs the set of paths file_read/file_write must refuse,
@@ -26,13 +32,40 @@ func (m *Manager) SetProtectedPaths(paths []string) {
 
 // pathProtected reports whether path resolves to (or under) a protected prefix.
 func (m *Manager) pathProtected(path string) bool {
-	target := canonicalPath(path)
+	return m.canonicalPathProtected(canonicalPath(path))
+}
+
+func (m *Manager) canonicalPathProtected(target string) bool {
 	for _, p := range m.protectedPaths {
-		if target == p || strings.HasPrefix(target, p+string(filepath.Separator)) {
+		if pathWithin(target, p) {
 			return true
 		}
 	}
 	return false
+}
+
+func pathWithin(target, root string) bool {
+	target = filepath.Clean(target)
+	root = filepath.Clean(root)
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		target = strings.ToLower(target)
+		root = strings.ToLower(root)
+	}
+	if target == root {
+		return true
+	}
+	return pathPrefixWithin(target, root, string(filepath.Separator))
+}
+
+// pathPrefixWithin compares already-cleaned paths at a separator boundary. A
+// filesystem root already ends in its separator ("/", "C:\\", or a UNC share
+// root), so it must not receive a second separator before prefix matching.
+func pathPrefixWithin(target, root, separator string) bool {
+	prefix := root
+	if !strings.HasSuffix(prefix, separator) {
+		prefix += separator
+	}
+	return strings.HasPrefix(target, prefix)
 }
 
 // canonicalPath resolves p to an absolute, symlink-free path. For a path whose
@@ -73,14 +106,57 @@ func (m *Manager) EnsureLocalFileOp(session string) error {
 	return nil
 }
 
+// sessionTargetFor resolves a session without leaking cross-agent ids. Empty
+// session means the caller's local default and therefore has no remote target.
+func (m *Manager) sessionTargetFor(owner, id string) (string, bool, error) {
+	if id == "" {
+		return "", false, nil
+	}
+	m.mu.Lock()
+	s := m.sessions[id]
+	m.mu.Unlock()
+	if s == nil || (owner != "" && s.Owner != owner) {
+		return "", false, errs.New(errs.NotFound, "session %s not found", id)
+	}
+	return s.Target, true, nil
+}
+
+// FileReadFor is the agent-facing, owner-scoped file read path.
+func (m *Manager) FileReadFor(owner, session, path string, maxBytes int) (*FileReadResult, error) {
+	target, found, err := m.sessionTargetFor(owner, session)
+	if err != nil {
+		return nil, err
+	}
+	return m.fileReadAtTarget(target, found, session, path, maxBytes)
+}
+
+// FileWriteFor is the agent-facing, owner-scoped file write path.
+func (m *Manager) FileWriteFor(owner, session, path, content, mode string) (*FileWriteResult, error) {
+	target, found, err := m.sessionTargetFor(owner, session)
+	if err != nil {
+		return nil, err
+	}
+	return m.fileWriteAtTarget(target, found, session, path, content, mode)
+}
+
 // FileReadAt reads path for the given session: locally on the daemon host for a
 // local/default session, or over SFTP on the session's server for a remote one.
 // Secrets are redacted in either case.
 func (m *Manager) FileReadAt(session, path string, maxBytes int) (*FileReadResult, error) {
-	if err := m.EnsureLocalFileOp(session); err != nil {
+	target, found := m.SessionTarget(session)
+	return m.fileReadAtTarget(target, found, session, path, maxBytes)
+}
+
+func (m *Manager) fileReadAtTarget(target string, found bool, session, path string, maxBytes int) (*FileReadResult, error) {
+	maxBytes, err := normalizeFileReadLimit(maxBytes)
+	if err != nil {
 		return nil, err
 	}
-	if target, ok := m.SessionTarget(session); ok && target != "" && target != "local" {
+	if found && target != "" && target != "local" {
+		if m.remoteFiles == nil {
+			return nil, errs.New(errs.NotSupported,
+				"remote file ops need the termada daemon (none running); read/write remote files with exec_run in that session")
+		}
 		content, size, truncated, err := m.remoteFiles.ReadFile(target, path, maxBytes)
 		if err != nil {
 			return nil, errs.New(errs.Internal, "remote read on %s: %v", target, err)
@@ -97,10 +173,16 @@ func (m *Manager) FileReadAt(session, path string, maxBytes int) (*FileReadResul
 // FileWriteAt writes path for the given session: locally on the daemon host, or
 // over SFTP on the session's server for a remote session.
 func (m *Manager) FileWriteAt(session, path, content, mode string) (*FileWriteResult, error) {
-	if err := m.EnsureLocalFileOp(session); err != nil {
-		return nil, err
-	}
-	if target, ok := m.SessionTarget(session); ok && target != "" && target != "local" {
+	target, found := m.SessionTarget(session)
+	return m.fileWriteAtTarget(target, found, session, path, content, mode)
+}
+
+func (m *Manager) fileWriteAtTarget(target string, found bool, session, path, content, mode string) (*FileWriteResult, error) {
+	if found && target != "" && target != "local" {
+		if m.remoteFiles == nil {
+			return nil, errs.New(errs.NotSupported,
+				"remote file ops need the termada daemon (none running); read/write remote files with exec_run in that session")
+		}
 		n, err := m.remoteFiles.WriteFile(target, path, content, mode)
 		if err != nil {
 			return nil, errs.New(errs.Internal, "remote write on %s: %v", target, err)
@@ -126,20 +208,28 @@ type FileWriteResult struct {
 // FileRead reads a local file up to maxBytes, redacting secrets in the result
 // (spec FS-1/§3a). Reading more than maxBytes sets Truncated.
 func (m *Manager) FileRead(path string, maxBytes int) (*FileReadResult, error) {
-	if m.pathProtected(path) {
+	if m.spawn.SeparateUID {
+		return nil, errs.New(errs.NotSupported, "local file_read is disabled with security.run_as because file tools execute in the daemon process; use exec in the dropped-uid session")
+	}
+	maxBytes, err := normalizeFileReadLimit(maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	target := canonicalPath(path)
+	if m.canonicalPathProtected(target) {
 		return nil, errs.New(errs.DeniedByPolicy, "reading %q is denied: protected secret path", path)
 	}
-	if maxBytes <= 0 {
-		maxBytes = 100_000
-	}
-	fi, err := os.Stat(path)
+	fi, err := os.Stat(target)
 	if err != nil {
 		return nil, errs.New(errs.NotFound, "%v", err)
 	}
 	if fi.IsDir() {
 		return nil, errs.New(errs.InvalidArgument, "%s is a directory", path)
 	}
-	f, err := os.Open(path)
+	if !fi.Mode().IsRegular() {
+		return nil, errs.New(errs.InvalidArgument, "%s is not a regular file", path)
+	}
+	f, err := openLocalNoSymlink(target, false, false)
 	if err != nil {
 		return nil, errs.New(errs.Internal, "%v", err)
 	}
@@ -160,22 +250,30 @@ func (m *Manager) FileRead(path string, maxBytes int) (*FileReadResult, error) {
 	return &FileReadResult{Content: content, Truncated: truncated, Size: fi.Size()}, nil
 }
 
+func normalizeFileReadLimit(maxBytes int) (int, error) {
+	if maxBytes <= 0 {
+		return defaultFileReadBytes, nil
+	}
+	if maxBytes > maxFileReadBytes {
+		return 0, errs.New(errs.InvalidArgument, "max_bytes exceeds %d byte file-read limit", maxFileReadBytes)
+	}
+	return maxBytes, nil
+}
+
 // FileWrite writes content to a local file (spec FS-2). mode "append" appends;
 // anything else truncates.
 func (m *Manager) FileWrite(path, content, mode string) (*FileWriteResult, error) {
-	if m.pathProtected(path) {
-		return nil, errs.New(errs.DeniedByPolicy, "writing %q is denied: protected secret path", path)
+	if m.spawn.SeparateUID {
+		return nil, errs.New(errs.NotSupported, "local file_write is disabled with security.run_as because file tools execute in the daemon process; use exec in the dropped-uid session")
 	}
-	flags := os.O_CREATE | os.O_WRONLY
-	if mode == "append" {
-		flags |= os.O_APPEND
-	} else {
-		flags |= os.O_TRUNC
+	target := canonicalPath(path)
+	if m.canonicalPathProtected(target) {
+		return nil, errs.New(errs.DeniedByPolicy, "writing %q is denied: protected secret path", path)
 	}
 	// 0o600 (not 0o644): a file the agent writes may carry secrets/config and
 	// must not be world-readable. Only applies when creating the file; an existing
 	// file keeps its mode.
-	f, err := os.OpenFile(path, flags, 0o600)
+	f, err := openLocalNoSymlink(target, true, mode == "append")
 	if err != nil {
 		return nil, errs.New(errs.Internal, "%v", err)
 	}

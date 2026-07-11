@@ -3,10 +3,10 @@ package engine
 import (
 	"bytes"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/termada/termada/internal/errs"
@@ -17,6 +17,12 @@ import (
 // markerDelim is ASCII RS (record separator), chosen because it is extremely
 // unlikely to appear in normal command output.
 const markerDelim = 0x1e
+
+const (
+	maxSessionInputBytes    = 64 << 10
+	commandWriteTimeout     = 30 * time.Second
+	interactiveWriteTimeout = 5 * time.Second
+)
 
 // SessionConfig holds the per-session knobs the manager passes down.
 type SessionConfig struct {
@@ -34,6 +40,8 @@ type SessionConfig struct {
 type SpawnConfig struct {
 	SeparateUID bool
 	UID, GID    int
+	Username    string
+	HomeDir     string
 }
 
 // Session is a persistent shell over a PTY that preserves cwd/env/venv between
@@ -56,11 +64,14 @@ type Session struct {
 	clean   *output.Buffer
 	cleaner *output.Cleaner
 
-	mu      sync.Mutex
-	current *Job
-	scan    []byte
-	closed  bool
-	ready   bool // init finished; session-terminal buffer starts capturing
+	mu             sync.Mutex
+	writeMu        sync.Mutex
+	closeOnce      sync.Once
+	current        *Job
+	scan           []byte
+	closed         bool
+	ready          bool // init finished; session-terminal buffer starts capturing
+	onResetPending int
 }
 
 // newSession spawns the shell, starts the reader, and runs the init sequence
@@ -101,7 +112,7 @@ func newSessionConn(owner, target, mode string, shell ShellConn, cfg SessionConf
 	// kills).
 	job, err := s.runRaw("stty -echo -onlcr 2>/dev/null; set -m 2>/dev/null; true", nil, "init")
 	if err != nil {
-		shell.Close()
+		s.close()
 		return nil, err
 	}
 	select {
@@ -109,7 +120,7 @@ func newSessionConn(owner, target, mode string, shell ShellConn, cfg SessionConf
 	case <-time.After(30 * time.Second):
 		// Generous: under heavy CI load (many PTYs spawning in parallel, -race
 		// slowdown) a shell's first marker round-trip can take several seconds.
-		shell.Close()
+		s.close()
 		return nil, errs.New(errs.Internal, "session init timed out")
 	}
 	s.mu.Lock()
@@ -136,11 +147,19 @@ func (s *Session) startJob(job *Job, line string) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return errs.New(errs.NotFound, "session closed")
+		err := errs.New(errs.NotFound, "session closed")
+		job.finalize(-1, StatusFailed, err.Error())
+		return err
 	}
 	if s.current != nil {
 		s.mu.Unlock()
-		return errs.New(errs.SessionBusy, "session %s is running another command", s.ID)
+		err := errs.New(errs.SessionBusy, "session %s is running another command", s.ID)
+		job.finalize(-1, StatusFailed, err.Error())
+		return err
+	}
+	if !job.activate() {
+		s.mu.Unlock()
+		return errs.New(errs.NotFound, "job is already terminal")
 	}
 	s.current = job
 	s.mu.Unlock()
@@ -151,14 +170,15 @@ func (s *Session) startJob(job *Job, line string) error {
 	//   RS "TERMADA:" <marker> ":" <exit> RS
 	payload := line + "; " +
 		fmt.Sprintf("printf '\\036TERMADA:%s:%%d\\036' \"$?\"\n", job.marker)
-	if _, err := s.shell.Write([]byte(payload)); err != nil {
+	if err := s.writeCurrent(job, []byte(payload), commandWriteTimeout, false); err != nil {
 		s.mu.Lock()
-		s.current = nil
+		if s.current == job {
+			s.current = nil
+		}
 		s.mu.Unlock()
 		job.finalize(-1, StatusFailed, "pty write: "+err.Error())
-		return errs.New(errs.Internal, "pty write: %v", err)
+		return err
 	}
-	job.activate()
 	return nil
 }
 
@@ -193,6 +213,7 @@ func (s *Session) readLoop() {
 
 func (s *Session) handleEOF() {
 	if s.isClosed() {
+		s.closeTransport()
 		return // deliberate close
 	}
 	// Remote transports can reconnect (the shell survives in tmux on the server);
@@ -202,15 +223,7 @@ func (s *Session) handleEOF() {
 			return
 		}
 	}
-	s.mu.Lock()
-	job := s.current
-	s.current = nil
-	s.closed = true
-	s.mu.Unlock()
-	if job != nil {
-		// The shell died with a command still running: it is orphaned, not exited.
-		job.finalize(-1, StatusOrphaned, "session shell exited")
-	}
+	s.terminate(StatusOrphaned, "session shell exited")
 }
 
 // tryReconnect re-establishes a dropped remote transport (tmux re-attach). The
@@ -222,10 +235,25 @@ func (s *Session) tryReconnect(rc interface{ Reconnect() error }) bool {
 			return false
 		}
 		time.Sleep(time.Duration(200*(attempt+1)) * time.Millisecond)
+		// Serialize the transport swap with every shell write. Without this lock,
+		// Reconnect can install a fresh SSH shell while input for the orphaned job
+		// is still in writeCurrent; sshShell.Write would then resolve its current
+		// connection to the new shell and type stale input into it.
+		s.writeMu.Lock()
+		if s.isClosed() {
+			s.writeMu.Unlock()
+			return false
+		}
 		if err := rc.Reconnect(); err != nil {
+			s.writeMu.Unlock()
 			continue
 		}
 		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			s.writeMu.Unlock()
+			return false
+		}
 		job := s.current
 		s.current = nil
 		s.scan = s.scan[:0]
@@ -233,12 +261,11 @@ func (s *Session) tryReconnect(rc interface{ Reconnect() error }) bool {
 		if job != nil {
 			job.finalize(-1, StatusOrphaned, "connection dropped; session reconnected")
 		}
+		s.writeMu.Unlock()
 		// Surface the reset even when the session was idle: the reconnected shell is
 		// fresh, so cwd/env from before the drop are gone — make that observable
 		// instead of a silent footgun for the next command.
-		if s.onReset != nil {
-			s.onReset()
-		}
+		s.notifyReset()
 		go s.readLoop()
 		// re-init the new PTY (echo off, job control); fire-and-forget.
 		_, _ = s.runRaw("stty -echo -onlcr 2>/dev/null; set -m 2>/dev/null; true", nil, "init")
@@ -350,15 +377,101 @@ func parseMarker(s, open []byte) (rest []byte, code int, ok bool) {
 
 // writeInput writes raw bytes to the PTY master (spec EX-4/M19: input including
 // passwords goes to the PTY, not a stdin pipe).
-func (s *Session) writeInput(b []byte) error {
+func (s *Session) writeInput(job *Job, b []byte) error {
+	if len(b) > maxSessionInputBytes {
+		return errs.New(errs.InvalidArgument, "input exceeds %d byte limit", maxSessionInputBytes)
+	}
+	return s.writeCurrent(job, b, interactiveWriteTimeout, true)
+}
+
+type shellWriteResult struct {
+	n   int
+	err error
+}
+
+func (s *Session) writeCurrent(job *Job, data []byte, timeout time.Duration, verifyAfter bool) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return errs.New(errs.NotFound, "session closed")
 	}
-	_, err := s.shell.Write(b)
-	if err != nil {
-		return errs.New(errs.Internal, "pty write: %v", err)
+	if job != nil && s.current != job {
+		s.mu.Unlock()
+		return errs.New(errs.NotFound, "job is no longer current")
+	}
+	shell := s.shell
+	s.mu.Unlock()
+
+	payload := append([]byte(nil), data...)
+	done := make(chan shellWriteResult, 1)
+	var writeFinished atomic.Bool
+	go func() {
+		n, err := shell.Write(payload)
+		// Publish completion before the channel send. If job.Done and done become
+		// ready together, the waiter can distinguish a completed write from one
+		// that is still capable of leaking bytes into an idle/future shell.
+		writeFinished.Store(true)
+		done <- shellWriteResult{n: n, err: err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	var jobDone <-chan struct{}
+	if verifyAfter && job != nil {
+		jobDone = job.Done()
+	}
+	var result shellWriteResult
+	select {
+	case result = <-done:
+	case <-timer.C:
+		s.closeTransport()
+		select {
+		case result = <-done:
+		case <-time.After(time.Second):
+		}
+		return errs.New(errs.Internal, "PTY write timed out after %s; session transport closed", timeout)
+	case <-jobDone:
+		if writeFinished.Load() {
+			result = <-done
+			break
+		}
+		select {
+		case result = <-done:
+			// The full write completed before we acted on the terminal event. This
+			// is the normal fast-path for input that immediately completes `read`;
+			// do not tear down a healthy persistent shell merely because both
+			// notifications became ready together.
+			break
+		default:
+			s.closeTransport()
+			select {
+			case result = <-done:
+			case <-time.After(time.Second):
+			}
+			return errs.New(errs.NotFound, "job completed while input was being written; session transport closed")
+		}
+	}
+	if result.err != nil {
+		return errs.New(errs.Internal, "pty write: %v", result.err)
+	}
+	if result.n != len(payload) {
+		return errs.New(errs.Internal, "short PTY write: wrote %d of %d bytes", result.n, len(payload))
+	}
+	if verifyAfter && job != nil {
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if closed {
+			return errs.New(errs.NotFound, "session closed while input was being written")
+		}
+	} else {
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if closed {
+			return errs.New(errs.NotFound, "session closed while command was being written")
+		}
 	}
 	return nil
 }
@@ -376,22 +489,55 @@ func (s *Session) isClosed() bool {
 }
 
 func (s *Session) close() {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return
-	}
-	s.closed = true
-	job := s.current
-	s.current = nil
-	s.mu.Unlock()
-	if job != nil {
-		job.finalize(-1, StatusKilled, "session closed")
-	}
-	_ = s.shell.Close()
+	s.terminate(StatusKilled, "session closed")
 }
 
-var safeArg = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
+// terminate performs the one-way logical close and always drives the transport
+// through its exactly-once cleanup path. EOF and an explicit close can race; the
+// first transition owns the job status, while either caller may reap the backend.
+func (s *Session) terminate(status Status, reason string) {
+	s.mu.Lock()
+	var job *Job
+	if !s.closed {
+		s.closed = true
+		job = s.current
+		s.current = nil
+	}
+	s.mu.Unlock()
+	if job != nil {
+		job.finalize(-1, status, reason)
+	}
+	s.closeTransport()
+}
+
+func (s *Session) closeTransport() {
+	s.closeOnce.Do(func() { _ = s.shell.Close() })
+}
+
+// setOnReset installs the manager callback and drains resets that happened
+// during session construction. The callback is invoked without s.mu held.
+func (s *Session) setOnReset(callback func()) {
+	s.mu.Lock()
+	s.onReset = callback
+	pending := s.onResetPending
+	s.onResetPending = 0
+	s.mu.Unlock()
+	for i := 0; i < pending; i++ {
+		callback()
+	}
+}
+
+func (s *Session) notifyReset() {
+	s.mu.Lock()
+	callback := s.onReset
+	if callback == nil {
+		s.onResetPending++
+	}
+	s.mu.Unlock()
+	if callback != nil {
+		callback()
+	}
+}
 
 // quoteArgv joins argv into a single shell command line with each argument
 // safely single-quoted, so metacharacters are literal.
@@ -404,11 +550,5 @@ func quoteArgv(argv []string) string {
 }
 
 func shellQuote(s string) string {
-	if s == "" {
-		return "''"
-	}
-	if safeArg.MatchString(s) {
-		return s
-	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

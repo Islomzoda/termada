@@ -4,6 +4,116 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/) once it reaches 1.0.
 
+## [Unreleased]
+
+### Security
+- Require the dashboard token for every TCP `/api/*` route and `/metrics`, with
+  loopback Host/Origin checks retained as defense in depth. The legacy
+  `dashboard.local_trust` setting no longer bypasses API authentication.
+- Derive operator and agent principals from transport credentials. Unix-socket
+  operator routes now require the separate `cli.token`; configured token-bound
+  agent ids cannot be claimed without their token, and invalid presented tokens
+  fail closed.
+- Remove the silent in-process shim fallback: if the daemon cannot be reached or
+  auto-started, MCP startup now fails instead of bypassing policy, audit and the
+  shared control plane.
+- Enforce owner scoping for jobs, sessions, PTY input/output, remote files
+  addressed through sessions, recipes and SSH forwards, and enforce per-agent
+  and global foreground/background quotas when confirmed work starts.
+- Cap session creation at 32 per owner and 128 daemon-wide, serialize default
+  session creation, and make Stop-All cancel confirmation-parked jobs as well as
+  running/backgrounded engine jobs.
+- Reserve per-agent job quota before shell I/O; cap pending confirmations at 32
+  per owner/128 total and the in-memory registry at 256.
+- Harden policy evaluation against absolute paths, known command wrappers,
+  shell `-c` payloads and compound/dynamic shell syntax; ambiguous deny/confirm
+  cases now fail closed.
+- Treat shell scripts, stdin/interactive shells and `env --split-string` as
+  opaque under deny/confirm rules, and accept untrusted PTY input only after the
+  engine has identified an `awaiting_input` prompt so queued bytes cannot become
+  a later unaudited shell command.
+- Quote every argv word so assignment-looking executables cannot hide a second
+  command, and account for case-insensitive Darwin executable/protected paths.
+- Make audit delivery synchronous and non-dropping, latch append/fsync failures
+  as unhealthy, require a durable start intent before ordinary commands touch
+  the shell, redact nested structured data, and verify one continuous chain
+  across sealed rotations with `termada audit verify`.
+- Bound audit storage to 64 sealed segments plus the active file, committing
+  pruned prefixes to an atomic verifiable checkpoint. Redaction never expands
+  records and has a fixed per-value literal-scan work budget.
+- Make redaction concurrent-safe and bounded, bound VT/line carry buffers, and
+  use descriptor-relative no-follow local file opens to close symlink races
+  (Windows file tools fail closed until equivalent secure opens exist).
+- Make local file tools fail closed when `security.run_as` separates the shell
+  uid from the privileged daemon; dropped shells receive a minimal credential-
+  free environment, and root/negative/overflow uid/gid values fail closed.
+  Remote SFTP operations remain available.
+- Bound control-plane and MCP JSON messages, reject malformed/unknown/trailing
+  request data, and refuse FIFO/device/special files in local file tools.
+- Bound encoded MCP responses, event/audit-tail memory, HTTP connections,
+  interactive PTY input and blocking SSH/SFTP operations.
+- Limit `file_read` to a 1 MiB prefix (100,000 bytes by default), require a
+  non-empty `fleet_run` argv, share a five-target concurrency ceiling across all
+  fleet calls, and redact fleet stdout, stderr and per-server errors before
+  returning or auditing results.
+- Cap one fleet call at 256 targets/2 MiB aggregate result text, live forwards
+  at 16 per owner/64 total, SFTP connections at 16 and plugin processes at 8.
+- Fail closed on malformed SSH `known_hosts`, serialize and fsync TOFU pinning,
+  cap SSH command output, validate ports, and restrict all forwards to
+  loopback with owner/policy/audit checks and 64 connections per forward.
+- Serialize vault passphrase checks so concurrent failures cannot bypass the
+  five-attempt lockout.
+- Treat plugins as trusted, non-sandboxed executables and harden their boundary:
+  policy/audit all calls, reject unsafe files, detect stable path/same-inode
+  content changes with file identity and SHA-256 checks, validate described
+  tools, bound executable/I/O/tool counts/time, and attempt best-effort
+  descendant cleanup after timeout.
+- Bound snapshots to 200 MiB cumulatively, reject symlinks/devices/special files
+  anywhere in a source, validate restore ids, and stage restores with
+  rollback instead of deleting the original first.
+- Make release checksums mandatory in the installer and updater, add bounded
+  downloads/extraction, extract only the expected binary, and require Ed25519
+  checksum signatures when a release public key is configured.
+- Raise the minimum toolchain to Go 1.26.5 and `golang.org/x/crypto` to v0.52.0
+  to remove all vulnerabilities reachable in the project under `govulncheck`.
+
+### Changed
+- Return output in sequential bounded pages. `truncated`/`has_more` now preserves
+  a cursor that can drain remaining output even after a job reaches a terminal
+  state, rather than skipping earlier bytes.
+- Use a bounded circular output buffer and limited reads so noisy streams and
+  page-by-page drains avoid repeated whole-buffer copying.
+- Add owner-scoped `port_forward`, `port_forward_list` and
+  `port_forward_close` MCP tools.
+- Parse configuration with a strict YAML schema, validate supported values and
+  regexes, and expand `${NAME}` references while refusing unset variables. Only
+  the age `encrypted_file` vault and outbound Telegram notifications are
+  supported.
+- Harden the dashboard against stored script injection with escaped attributes,
+  delegated event handlers, a per-response CSP nonce and tab-scoped token
+  storage; token submission now restarts protected SSE streams and policy loads.
+- Run Docker images as an unprivileged user and document loopback-only host port
+  publishing. Claude setup now installs MCP configuration at `--scope user`.
+- Expose registry persistence health in `/api/status`; failures are retained and
+  emitted as `persistence.error` instead of being silently discarded.
+
+### Fixed
+- Accept both `termada logs <job> -f` and `termada logs -f <job>`.
+- Report and open the daemon's actual runtime dashboard URL (including a
+  `--bind` override) only after the listener is ready, and fail clearly when the
+  dashboard is disabled.
+- Refuse automatic Windows self-update with an explicit manual-install
+  instruction instead of attempting to replace a running `.exe` non-atomically;
+  release-archive tests still validate the expected `termada.exe` member.
+- Add strict formatting, module verification, installer syntax, race and
+  Linux/macOS/Windows cross-build gates to CI, plus focused regression coverage
+  for the hardened boundaries above.
+- Reap session transports exactly once on EOF, replace closed default sessions,
+  prevent failed starts from leaving phantom running jobs, drain job-finished
+  audit events before daemon shutdown, and preserve terminal confirmation state.
+- Keep new and old daemon/shim pairs interoperable through a data-free legacy
+  UDS health response while retaining operator-only access to full status.
+
 ## [0.7.5] — 2026-06-17
 
 ### Added
@@ -37,7 +147,8 @@ All notable changes to this project are documented here. The format is based on
   add`, and `termada vault reset` for a forgotten passphrase.
 - **No-Go installer:** `curl … | sh` downloads the prebuilt binary (SHA-256
   verified) — no Go required.
-- **Dashboard:** token-less local-trust access on your own machine, a 📜
+- **Dashboard:** this release introduced token-less local-trust access (historical
+  behavior removed by the strict TCP authentication in [Unreleased]), a 📜
   History/replay timeline over the hash-chained audit (with filter), a read-only
   Policies panel, and a status legend.
 - **SSH agent / on-disk-key auth:** a server you can already `ssh` into needs no
@@ -211,8 +322,9 @@ self-update, Windows cross-compilation.
   workflow produce the cross-platform archives (signing gated on later keys).
 - **Plugins** (§29): out-of-process plugin executables are discovered from the
   plugins dir, queried for their tools, and surfaced to agents over MCP as
-  `<plugin>.<tool>`. Plugins run with a minimal environment — no vault, audit key
-  or dashboard token (capability boundary, §3a).
+  `<plugin>.<tool>`. Plugins run with a minimal inherited environment but retain
+  the daemon user's OS permissions; [Unreleased] makes this trusted,
+  non-sandboxed boundary explicit and adds enforcement limits.
 - **Windows cross-compilation**: the tree now builds for windows/amd64 (and
   linux/darwin × amd64/arm64). The ConPTY PTY backend and Windows signals are
   honest "not supported yet" stubs (fork R6) until that platform work lands.
@@ -236,7 +348,7 @@ Remote access, files, recipes and notifications — the rest of phase 2.
   the selection/aggregation logic is unit-tested via a mock runner.*
 - **Vault unlock in the daemon** (§CR-5): `termada unlock` sends the passphrase to
   the running daemon, which holds the key in memory and registers secret values
-  with the redactor so they can never echo back to an agent.
+  for best-effort exact-value redaction before output reaches an agent.
 - **File tools** (§16): `file_read` (with best-effort redaction + size limit) and
   `file_write`.
 - **Recipes** (§19/RC-1): `recipe_list` and `recipe_run` execute configured
@@ -263,7 +375,7 @@ tamper-evident audit log.
   proxies MCP to the daemon (auto-spawning it; falling back to in-process if
   unavailable), enabling multi-agent attribution and a shared dashboard.
 - **Live web dashboard** (§8.1): real-time sessions, jobs, activity feed (SSE),
-  pending approvals with Approve/Deny, and a Stop-All kill-switch. Token auth with
+  pending approvals with Approve/Deny, and an active-job Stop-All kill-switch. Token auth with
   anti-DNS-rebinding (loopback Host/Origin) checks (§M12).
 - **Policy engine** (§18): argv-level allow/deny/confirm classification with
   hot-reloadable named policies, per-agent policy mapping.
@@ -271,9 +383,10 @@ tamper-evident audit log.
   with a `confirmation_id`, resolved by a human via dashboard/CLI; deny-by-default
   timeout. The agent channel cannot self-approve.
 - **Encrypted vault** (§17): age-based, CGO-free credential store with a CLI
-  (`termada vault init|set|list|rm`). Secrets never returned to agents (§3a).
-- **Tamper-evident audit log** (§8.5/SEC-3): hash-chained, fsynced, secret-redacted;
-  `termada audit verify` detects any alteration.
+  (`termada vault init|set|list|rm`). Vault APIs do not return secret values (§3a).
+- **Tamper-evident audit log** (§8.5/SEC-3): hash-chained, fsynced and
+  best-effort-redacted; `termada audit verify` verifies the recorded chain,
+  subject to the threat-model limits documented in `docs/SECURITY.md`.
 - **Event bus** (§8.7) feeding dashboard (best-effort) and audit (durable).
 - **CLI**: `status`, `jobs`, `sessions`, `logs`, `kill`, `stop`, `pending`,
   `approve`, `deny`, `audit [verify]`, `top` (live TUI), `vault`, `setup`.

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFileWriteRead(t *testing.T) {
@@ -85,5 +86,76 @@ func TestRecipeStopsOnFailure(t *testing.T) {
 	}
 	if res.Status != "failed" || len(res.Steps) != 1 {
 		t.Fatalf("expected to stop after first failing step, got %+v", res)
+	}
+}
+
+func TestRecipeOutputIsCapped(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MaxOutputBytes = 4
+	m := NewManager(cfg)
+	t.Cleanup(m.Shutdown)
+	m.SetRecipes(map[string]Recipe{"out": {Name: "out", Steps: [][]string{{"printf", "123456789"}}}})
+	res, err := m.RunRecipe("agent", "", "out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Steps[0]; got.Stdout != "1234" || !got.Truncated || got.JobID == "" {
+		t.Fatalf("bounded recipe step = %+v", got)
+	}
+}
+
+func TestRecipeTimeoutInterruptsStep(t *testing.T) {
+	m := NewManager(DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	m.recipeStepTimeout = 50 * time.Millisecond
+	m.SetRecipes(map[string]Recipe{"slow": {Name: "slow", Steps: [][]string{{"sleep", "5"}}}})
+	start := time.Now()
+	res, err := m.RunRecipe("agent", "", "slow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != "failed" || len(res.Steps) != 1 || !strings.Contains(res.Steps[0].Reason, "exceeded") {
+		t.Fatalf("timed-out recipe = %+v", res)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("recipe timeout took %v", elapsed)
+	}
+}
+
+type nonResponsiveRecipeShell struct{ closed bool }
+
+func (s *nonResponsiveRecipeShell) Read([]byte) (int, error)    { return 0, os.ErrClosed }
+func (s *nonResponsiveRecipeShell) Write(p []byte) (int, error) { return len(p), nil }
+func (s *nonResponsiveRecipeShell) Signal(string) error         { return nil }
+func (s *nonResponsiveRecipeShell) Close() error {
+	s.closed = true
+	return nil
+}
+
+func TestRecipeTimeoutClosesSessionAfterInterruptGrace(t *testing.T) {
+	m := NewManager(DefaultConfig())
+	shell := &nonResponsiveRecipeShell{}
+	sess := &Session{
+		ID: "recipe-session", Owner: "agent", Target: "remote", Mode: "shell",
+		cfg: SessionConfig{OutputRetentionBytes: 1024}, redactor: m.redactor, shell: shell,
+	}
+	job := newJob(sess, []string{"ignore-interrupt"}, ModeForeground)
+	job.activate()
+	sess.current = job
+	m.sessions[sess.ID] = sess
+	m.jobs[job.ID] = job
+
+	forced, err := m.interruptRecipeJob("agent", job, time.Millisecond)
+	if err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	if !forced || !shell.closed {
+		t.Fatalf("forced=%v shell.closed=%v, want forced close", forced, shell.closed)
+	}
+	if !job.info().Status.Terminal() {
+		t.Fatalf("job remained live after recipe timeout: %s", job.info().Status)
+	}
+	if _, ok := m.sessions[sess.ID]; ok {
+		t.Fatal("non-responsive recipe session remained registered")
 	}
 }

@@ -9,9 +9,9 @@ import "github.com/termada/termada/internal/engine"
 // every tool result cheap in tokens without hiding anything actionable. The rich
 // structs still flow to the dashboard/control-plane unchanged.
 
-// leanRun shapes an exec_run result. A handle (job_id + next_cursor) is included
-// only when the command is still going, since that's the only time the agent
-// needs to poll.
+// leanRun shapes an exec_run result. A handle is included while the command is
+// running and for a terminal capped page whose remaining output is still
+// retrievable through next_cursor.
 func leanRun(r *engine.RunResult) map[string]any {
 	m := map[string]any{"status": r.Status}
 	if r.ExitCode != nil {
@@ -38,7 +38,10 @@ func leanRun(r *engine.RunResult) map[string]any {
 	if r.Truncated {
 		m["truncated"] = true
 	}
-	if !r.Status.Terminal() {
+	if r.HasMore {
+		m["has_more"] = true
+	}
+	if !r.Status.Terminal() || r.HasMore {
 		if r.JobID != "" {
 			m["job_id"] = r.JobID
 		}
@@ -57,8 +60,8 @@ func leanRun(r *engine.RunResult) map[string]any {
 	return m
 }
 
-// leanPoll shapes an exec_poll result: the incremental chunk plus just enough
-// status. next_cursor is dropped once the job is terminal (nothing left to poll).
+// leanPoll shapes an exec_poll result. A terminal page keeps next_cursor while
+// has_more is true and drops it only after the final output page.
 func leanPoll(r *engine.PollResult) map[string]any {
 	m := map[string]any{"status": r.Status}
 	if r.StdoutChunk != "" {
@@ -87,7 +90,13 @@ func leanPoll(r *engine.PollResult) map[string]any {
 	if r.OutputHeld {
 		m["output_held"] = true
 	}
-	if !r.Status.Terminal() {
+	if r.Truncated {
+		m["truncated"] = true
+	}
+	if r.HasMore {
+		m["has_more"] = true
+	}
+	if !r.Status.Terminal() || r.HasMore {
 		m["next_cursor"] = r.NextCursor
 	}
 	return m

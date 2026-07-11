@@ -10,12 +10,18 @@ import (
 	"errors"
 	"io"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/termada/termada/internal/errs"
 )
 
 const protocolVersion = "2024-11-05"
+
+const maxMCPMessageBytes = 8 << 20
+const maxMCPResponseBytes = 8 << 20
+
+var errMCPMessageTooLarge = errors.New("MCP message exceeds size limit")
 
 // supportedProtocols are the MCP versions whose handshake we're compatible with
 // (the tools surface is the same across them). We echo the client's requested
@@ -35,12 +41,13 @@ const serverInstructions = `termada gives you reliable persistent terminal sessi
 USE THESE TOOLS FOR ALL SHELL WORK BY DEFAULT. Run every command through exec_run / exec_start instead of a built-in shell, and never shell out to a raw ` + "`ssh`" + ` client — go through termada so the human can watch, take over, and policy-gate the work.
 
 - Sessions persist cwd and env. Omit ` + "`session`" + ` to use your per-agent default (state still persists); create a separate one with session_create, and for a remote server create session_create(target=<server-name>) and run in that session_id.
-- Long-running jobs (dev servers, builds, watchers) run async: exec_start (or exec_run mode:"background") returns a job_id; read output with exec_poll(job_id, cursor), passing back next_cursor.
+- If a remote connection resets, its fresh shell loses cwd/env; the in-flight job is orphaned and its remote process may continue. Verify remote state before retrying.
+- Long-running jobs (dev servers, builds, watchers) run async: exec_start (or exec_run mode:"background") returns a job_id; read output with exec_poll(job_id, cursor), passing back next_cursor. A terminal page can still have has_more=true when output was capped; follow its next_cursor until has_more is false.
 - Interactive prompts come back as status "awaiting_input" with the prompt — answer with exec_write(job_id, input) (secret:true for passwords).
 - Dangerous commands come back as status "awaiting_confirmation" with a confirmation_id and need a HUMAN to approve. You CANNOT self-approve. Do not silently poll: tell the user in chat what the command will do and that it needs their approval (dashboard/CLI), then wait. denied_by_policy is final — don't try to bypass it.
-- file_read / file_write are session-aware: with no/local session they act on the daemon host; with a remote session they read/write that server's files over SFTP (binary-safe). Pass absolute paths.
+- file_read / file_write are session-aware: omit session for the default local target, or pass a session_id created for a local/remote target. The literal string "local" is not a session_id. Remote text transfers use SFTP without invoking a shell; these are not arbitrary-binary APIs. Pass absolute paths.
 
-Call capabilities() once for a quickstart plus your allowed/denied policy summary and the registered servers.`
+Call capabilities() once for the asserted client id, tools, modes, remote availability and a quickstart. This id is client-reported; when configured, the transport token is authoritative for daemon ownership. Use server_list to inspect the configured server inventory.`
 
 // Server serves MCP requests backed by a Backend (in-process engine or a daemon
 // proxy).
@@ -96,6 +103,10 @@ func (s *Server) ServeStdio(r io.Reader, w io.Writer) error {
 	br := bufio.NewReaderSize(r, 1<<20)
 	for {
 		line, err := readLine(br)
+		if errors.Is(err, errMCPMessageTooLarge) {
+			s.logf("ignoring MCP message larger than %d bytes", maxMCPMessageBytes)
+			continue
+		}
 		if len(line) > 0 {
 			s.handleLine(line)
 		}
@@ -108,18 +119,34 @@ func (s *Server) ServeStdio(r io.Reader, w io.Writer) error {
 	}
 }
 
-// readLine reads a single newline-terminated message, tolerating arbitrarily
-// long lines (bufio.Scanner's token cap is too small for big payloads).
+// readLine reads one newline-terminated message with a hard memory bound. An
+// oversized line is fully consumed before errMCPMessageTooLarge is returned so
+// the next JSON-RPC message remains aligned.
 func readLine(br *bufio.Reader) ([]byte, error) {
-	var buf []byte
+	buf := make([]byte, 0, min(br.Size(), maxMCPMessageBytes))
+	tooLarge := false
 	for {
-		chunk, err := br.ReadBytes('\n')
-		buf = append(buf, chunk...)
+		chunk, err := br.ReadSlice('\n')
+		if !tooLarge {
+			remaining := maxMCPMessageBytes - len(buf)
+			if len(chunk) > remaining {
+				buf = append(buf, chunk[:remaining]...)
+				tooLarge = true
+			} else {
+				buf = append(buf, chunk...)
+			}
+		}
 		if err == nil {
+			if tooLarge {
+				return nil, errMCPMessageTooLarge
+			}
 			return trimNL(buf), nil
 		}
 		if err == bufio.ErrBufferFull {
 			continue
+		}
+		if tooLarge {
+			return nil, errMCPMessageTooLarge
 		}
 		return trimNL(buf), err
 	}
@@ -166,7 +193,7 @@ func (s *Server) dispatch(req rpcRequest) (any, *rpcError) {
 			} `json:"clientInfo"`
 		}
 		_ = json.Unmarshal(req.Params, &p)
-		if p.ClientInfo.Name != "" && (s.agentID == "" || s.agentID == "default") {
+		if validMCPAgentID(p.ClientInfo.Name) && (s.agentID == "" || s.agentID == "default") {
 			s.agentID = p.ClientInfo.Name
 		}
 		s.backend.RecordConnect(s.agentID)
@@ -236,9 +263,27 @@ func toolResult(v any, isErr bool) map[string]any {
 func (s *Server) write(resp rpcResponse) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if err := s.enc.Encode(resp); err != nil {
+	payload, err := json.Marshal(resp)
+	if err != nil || len(payload) > maxMCPResponseBytes {
+		message := "failed to encode response"
+		if err == nil {
+			message = "response exceeds MCP size limit"
+		}
+		resp = rpcResponse{JSONRPC: "2.0", ID: resp.ID, Error: &rpcError{Code: -32603, Message: message}}
+		payload, err = json.Marshal(resp)
+	}
+	if err == nil {
+		err = s.enc.Encode(json.RawMessage(payload))
+	}
+	if err != nil {
 		s.logf("write error: %v", err)
 	}
+}
+
+func validMCPAgentID(id string) bool {
+	return id != "" && len(id) <= 128 && strings.IndexFunc(id, func(r rune) bool {
+		return r < 0x21 || r == 0x7f
+	}) < 0
 }
 
 func (s *Server) logf(format string, args ...any) {

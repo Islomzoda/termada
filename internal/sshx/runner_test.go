@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,6 +59,72 @@ func startTestSSHServer(t *testing.T, password string) string {
 				return
 			}
 			go serveConn(conn, cfg)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// startStallingSessionSSHServer completes authentication and accepts session
+// channels. With acceptShell=false it never replies to channel requests; with
+// acceptShell=true it opens a shell but deliberately never reads channel data.
+func startStallingSessionSSHServer(t *testing.T, password string, acceptShell bool) string {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &ssh.ServerConfig{
+		PasswordCallback: func(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
+			if string(pass) == password {
+				return nil, nil
+			}
+			return nil, errAuth
+		},
+	}
+	cfg.AddHostKey(signer)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			nConn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				serverConn, chans, reqs, err := ssh.NewServerConn(nConn, cfg)
+				if err != nil {
+					_ = nConn.Close()
+					return
+				}
+				defer serverConn.Close()
+				go ssh.DiscardRequests(reqs)
+				for newCh := range chans {
+					if newCh.ChannelType() != "session" {
+						_ = newCh.Reject(ssh.UnknownChannelType, "only session")
+						continue
+					}
+					ch, requests, err := newCh.Accept()
+					if err != nil {
+						continue
+					}
+					go func() {
+						defer ch.Close()
+						for req := range requests {
+							if acceptShell && (req.Type == "pty-req" || req.Type == "shell") {
+								_ = req.Reply(true, nil)
+							}
+							// All other requests that require a reply intentionally stall.
+						}
+					}()
+				}
+			}()
 		}
 	}()
 	return ln.Addr().String()
@@ -376,6 +444,77 @@ func TestSSHCommandTimeout(t *testing.T) {
 	}
 }
 
+func TestSSHChannelOperationsHaveDeadlines(t *testing.T) {
+	addr := startStallingSessionSSHServer(t, "sshpass", false)
+	r := newTestRunner(t, "sshpass")
+	r.SetIOTimeout(75 * time.Millisecond)
+	srv := serverAt(t, addr)
+
+	start := time.Now()
+	if _, err := r.OpenShell(srv, 80, 24); err == nil {
+		t.Fatal("shell setup succeeded although the server never replied")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("shell setup deadline took %v", elapsed)
+	}
+
+	start = time.Now()
+	if _, _, _, err := r.SFTPRead(srv, "/tmp/file", 10); err == nil {
+		t.Fatal("SFTP setup succeeded although the server never replied")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("SFTP deadline took %v", elapsed)
+	}
+}
+
+func TestSSHShellWriteTimesOutWithoutRemoteWindowUpdates(t *testing.T) {
+	addr := startStallingSessionSSHServer(t, "sshpass", true)
+	r := newTestRunner(t, "sshpass")
+	r.SetIOTimeout(75 * time.Millisecond)
+	r.SetKeepalive(0)
+	shell, err := r.OpenShell(serverAt(t, addr), 80, 24)
+	if err != nil {
+		t.Fatalf("open shell: %v", err)
+	}
+	defer shell.Close()
+
+	start := time.Now()
+	_, err = shell.Write(make([]byte, 8<<20))
+	if err == nil || !strings.Contains(err.Error(), "write timed out") {
+		t.Fatalf("write error = %v, want bounded SSH write timeout", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("SSH write deadline took %v", elapsed)
+	}
+}
+
+func TestSSHShellReconnectCannotReviveClosedShell(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	created := &sshConn{}
+	shell := &sshShell{conn: &sshConn{}, open: func() (*sshConn, error) {
+		close(started)
+		<-release
+		return created, nil
+	}}
+	done := make(chan error, 1)
+	go func() { done <- shell.Reconnect() }()
+	<-started
+	if err := shell.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-done; !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("Reconnect after Close = %v", err)
+	}
+	created.mu.RLock()
+	closed := created.closed
+	created.mu.RUnlock()
+	if !closed || shell.current() != nil {
+		t.Fatal("closed SSH shell retained the late connection")
+	}
+}
+
 func TestSSHExitCode(t *testing.T) {
 	addr := startTestSSHServer(t, "sshpass")
 	r := newTestRunner(t, "sshpass")
@@ -403,6 +542,120 @@ func TestSSHHostKeyTOFU(t *testing.T) {
 	// Second connect must succeed against the now-known host key.
 	if res := r.Run(serverAt(t, addr), []string{"true"}); res.Status != "ok" {
 		t.Fatalf("second connect (known host): %s", res.Status)
+	}
+}
+
+func TestSSHHostKeyMalformedKnownHostsFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(path, []byte("not a valid known_hosts record\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	signer, _ := ssh.NewSignerFromKey(priv)
+	r := NewRunner(nil, path, time.Second)
+	err := r.hostKeyCallback()("example.test:22", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 22}, signer.PublicKey())
+	if err == nil || !strings.Contains(err.Error(), "load known_hosts") {
+		t.Fatalf("malformed known_hosts error = %v, want fail-closed load error", err)
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != "not a valid known_hosts record\n" {
+		t.Fatalf("malformed known_hosts was modified: %q", got)
+	}
+}
+
+func TestSSHHostKeyConcurrentTOFUIsSingleTransaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "known_hosts")
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	signer, _ := ssh.NewSignerFromKey(priv)
+	r := NewRunner(nil, path, time.Second)
+	cb := r.hostKeyCallback()
+	remote := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 22}
+
+	const calls = 32
+	errs := make(chan error, calls)
+	var wg sync.WaitGroup
+	for i := 0; i < calls; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- cb("example.test:22", remote, signer.PublicKey())
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent TOFU: %v", err)
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Count(strings.TrimSpace(string(data)), "\n") + 1; lines != 1 {
+		t.Fatalf("known_hosts has %d records, want exactly one: %q", lines, data)
+	}
+}
+
+func TestSSHHostKeyConcurrentFirstUseRejectsSecondKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "known_hosts")
+	_, privA, _ := ed25519.GenerateKey(rand.Reader)
+	_, privB, _ := ed25519.GenerateKey(rand.Reader)
+	signerA, _ := ssh.NewSignerFromKey(privA)
+	signerB, _ := ssh.NewSignerFromKey(privB)
+	r := NewRunner(nil, path, time.Second)
+	cb := r.hostKeyCallback()
+	remote := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 22}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, key := range []ssh.PublicKey{signerA.PublicKey(), signerB.PublicKey()} {
+		go func(key ssh.PublicKey) {
+			<-start
+			errs <- cb("race.test:22", remote, key)
+		}(key)
+	}
+	close(start)
+	errA, errB := <-errs, <-errs
+	if (errA == nil) == (errB == nil) {
+		t.Fatalf("concurrent different keys returned %v and %v; want one trust and one mismatch", errA, errB)
+	}
+	if errA != nil && !strings.Contains(errA.Error(), "host key mismatch") {
+		t.Fatalf("unexpected rejection: %v", errA)
+	}
+	if errB != nil && !strings.Contains(errB.Error(), "host key mismatch") {
+		t.Fatalf("unexpected rejection: %v", errB)
+	}
+}
+
+func TestCappedCommandOutput(t *testing.T) {
+	b := newCappedBuffer(8)
+	if n, err := b.Write([]byte("12345678")); err != nil || n != 8 {
+		t.Fatalf("write exact cap: n=%d err=%v", n, err)
+	}
+	if b.truncated {
+		t.Fatal("exactly-at-cap output reported truncation")
+	}
+	if n, err := b.Write([]byte("overflow")); err != nil || n != 8 {
+		t.Fatalf("overflow write: n=%d err=%v", n, err)
+	}
+	if len(b.data) != 8 || !b.truncated || !strings.Contains(b.String(), "output truncated") {
+		t.Fatalf("capped buffer state: len=%d truncated=%v output=%q", len(b.data), b.truncated, b.String())
+	}
+}
+
+func TestSSHServerAddressIPv6(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		want string
+	}{
+		{"example.test", "example.test:22"},
+		{"2001:db8::1", "[2001:db8::1]:22"},
+		{"[2001:db8::1]", "[2001:db8::1]:22"},
+	} {
+		if got := sshServerAddress(tc.host, 22); got != tc.want {
+			t.Errorf("sshServerAddress(%q) = %q, want %q", tc.host, got, tc.want)
+		}
 	}
 }
 

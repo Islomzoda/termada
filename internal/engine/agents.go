@@ -8,6 +8,8 @@ import (
 	"github.com/termada/termada/internal/bus"
 )
 
+const maxTrackedAgents = 1024
+
 // AgentStat is per-agent activity surfaced to the human (spec MA-2): who
 // connected, how often, and what they did.
 type AgentStat struct {
@@ -48,6 +50,17 @@ func (m *Manager) touchAgent(id string, mutate func(*AgentStat)) {
 	m.mu.Lock()
 	a := m.agents[id]
 	if a == nil {
+		if len(m.agents) >= maxTrackedAgents {
+			oldestID := ""
+			var oldestSeen int64
+			for candidateID, candidate := range m.agents {
+				if oldestID == "" || candidate.LastSeenUnix < oldestSeen {
+					oldestID = candidateID
+					oldestSeen = candidate.LastSeenUnix
+				}
+			}
+			delete(m.agents, oldestID)
+		}
 		a = &AgentStat{ID: id, FirstSeenUnix: now}
 		m.agents[id] = a
 	}

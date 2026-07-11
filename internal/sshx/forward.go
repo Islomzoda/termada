@@ -4,11 +4,17 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/termada/termada/internal/fleet"
 	"golang.org/x/crypto/ssh"
 )
+
+// maxForwardConnections bounds sockets and copy goroutines owned by one
+// forward. Excess connections are rejected immediately and can retry later.
+const maxForwardConnections = 64
 
 // Forward is a live local→remote TCP tunnel over SSH (like `ssh -L`): it listens
 // on a local address and pipes each accepted connection to remoteHost:remotePort
@@ -22,6 +28,7 @@ type Forward struct {
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
 	closed bool
+	slots  chan struct{}
 }
 
 // Addr is the local address the tunnel listens on (host:port).
@@ -34,6 +41,12 @@ func (r *Runner) OpenForward(server fleet.Server, localBind, remoteHost string, 
 	if localBind == "" {
 		localBind = "127.0.0.1:0"
 	}
+	if err := validateLocalBind(localBind); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(remoteHost) == "" || remotePort < 1 || remotePort > 65535 {
+		return nil, fmt.Errorf("remote address requires a host and port in 1..65535")
+	}
 	client, err := r.dial(server)
 	if err != nil {
 		return nil, err
@@ -43,9 +56,36 @@ func (r *Runner) OpenForward(server fleet.Server, localBind, remoteHost string, 
 		_ = client.Close()
 		return nil, err
 	}
-	f := &Forward{ln: ln, client: client, remote: fmt.Sprintf("%s:%d", remoteHost, remotePort), conns: map[net.Conn]struct{}{}}
+	if addr, ok := ln.Addr().(*net.TCPAddr); !ok || addr.IP == nil || !addr.IP.IsLoopback() {
+		_ = ln.Close()
+		_ = client.Close()
+		return nil, fmt.Errorf("resolved local bind %q is not loopback", localBind)
+	}
+	f := &Forward{
+		ln: ln, client: client,
+		remote: net.JoinHostPort(remoteHost, strconv.Itoa(remotePort)),
+		conns:  map[net.Conn]struct{}{}, slots: make(chan struct{}, maxForwardConnections),
+	}
 	go f.serve()
 	return f, nil
+}
+
+func validateLocalBind(localBind string) error {
+	host, _, err := net.SplitHostPort(localBind)
+	if err != nil {
+		return fmt.Errorf("invalid local bind %q: %w", localBind, err)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	if i := strings.LastIndexByte(host, '%'); i >= 0 {
+		host = host[:i] // IPv6 zone identifier
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("local bind %q is not loopback; public SSH forwards are disabled", localBind)
+	}
+	return nil
 }
 
 func (f *Forward) serve() {
@@ -54,22 +94,46 @@ func (f *Forward) serve() {
 		if err != nil {
 			return // listener closed
 		}
-		go f.handle(local)
+		if f.reserve() {
+			go func() {
+				defer f.release()
+				f.handle(local)
+			}()
+		} else {
+			_ = local.Close()
+		}
 	}
 }
 
+func (f *Forward) reserve() bool {
+	select {
+	case f.slots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (f *Forward) release() { <-f.slots }
+
 func (f *Forward) handle(local net.Conn) {
-	remote, err := f.client.Dial("tcp", f.remote)
-	if err != nil {
-		_ = local.Close()
+	if !f.track(local, true) {
 		return
 	}
-	f.track(local, true)
-	f.track(remote, true)
 	defer func() {
 		f.track(local, false)
-		f.track(remote, false)
 		_ = local.Close()
+	}()
+	remote, err := f.client.Dial("tcp", f.remote)
+	if err != nil {
+		return
+	}
+	if !f.track(remote, true) {
+		_ = remote.Close()
+		return
+	}
+	defer func() {
+		f.track(remote, false)
 		_ = remote.Close()
 	}()
 	done := make(chan struct{}, 2)
@@ -78,18 +142,19 @@ func (f *Forward) handle(local net.Conn) {
 	<-done // first side to finish tears the pair down (deferred closes unblock the other)
 }
 
-func (f *Forward) track(c net.Conn, add bool) {
+func (f *Forward) track(c net.Conn, add bool) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if add {
 		if f.closed {
 			_ = c.Close()
-			return
+			return false
 		}
 		f.conns[c] = struct{}{}
 	} else {
 		delete(f.conns, c)
 	}
+	return true
 }
 
 // Close stops accepting, drops the SSH connection, and closes every tunneled

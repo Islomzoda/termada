@@ -132,11 +132,39 @@ func TestLeanPollKeepsConfirmationID(t *testing.T) {
 	}
 }
 
+func TestLeanTerminalOutputKeepsCursorWhileHasMore(t *testing.T) {
+	run := leanRun(&engine.RunResult{Info: engine.Info{JobID: "job_1", Status: engine.StatusExited}, Stdout: "page", NextCursor: "4", Truncated: true, HasMore: true})
+	if run["job_id"] != "job_1" || run["next_cursor"] != "4" || run["has_more"] != true {
+		t.Fatalf("terminal capped run lost continuation handle: %v", run)
+	}
+	poll := leanPoll(&engine.PollResult{Info: engine.Info{Status: engine.StatusExited}, StdoutChunk: "page", NextCursor: "8", Truncated: true, HasMore: true})
+	if poll["next_cursor"] != "8" || poll["has_more"] != true || poll["truncated"] != true {
+		t.Fatalf("terminal capped poll lost continuation: %v", poll)
+	}
+	final := leanPoll(&engine.PollResult{Info: engine.Info{Status: engine.StatusExited}, StdoutChunk: "last", NextCursor: "10"})
+	if _, ok := final["next_cursor"]; ok {
+		t.Fatalf("final terminal page should drop cursor: %v", final)
+	}
+}
+
 func TestCapabilitiesHasQuickstart(t *testing.T) {
 	s := newTestServer(t)
 	out := callMap(t, s, "capabilities", map[string]any{})
 	if q, _ := out["quickstart"].(string); q == "" {
 		t.Fatal("capabilities missing quickstart cheatsheet")
+	}
+	description := s.tools["capabilities"].Description
+	if !strings.Contains(description, "asserted") || !strings.Contains(description, "transport token") {
+		t.Fatalf("capabilities description overclaims identity: %s", description)
+	}
+}
+
+func TestServerListDescriptionMatchesSecretFreeMetadata(t *testing.T) {
+	description := newTestServer(t).tools["server_list"].Description
+	for _, required := range []string{"name", "host", "user", "tags", "managed", "status", "checked_unix", "not returned"} {
+		if !strings.Contains(description, required) {
+			t.Fatalf("server_list description omits %q: %s", required, description)
+		}
 	}
 }
 
@@ -155,6 +183,9 @@ func TestCapabilitiesReportsInProcessMode(t *testing.T) {
 	if n, _ := out["notes"].(string); strings.Contains(n, "phase 2") {
 		t.Fatalf("notes still claim the stale phase-2 status: %q", n)
 	}
+	if n, _ := out["notes"].(string); strings.Contains(n, "in-process fallback") {
+		t.Fatalf("notes advertise the removed production fallback: %q", n)
+	}
 }
 
 // A remote target with no daemon must fail LOUDLY (so the agent doesn't fall
@@ -172,5 +203,61 @@ func TestRemoteSessionRejectedInProcess(t *testing.T) {
 	// local must still work.
 	if _, e := s.tools["session_create"].Handler(map[string]any{"target": "local"}); e != nil {
 		t.Fatalf("local session_create should still work: %v", e)
+	}
+}
+
+func TestFileToolDescriptionsExplainLocalRestrictions(t *testing.T) {
+	s := newTestServer(t)
+	for _, name := range []string{"file_read", "file_write"} {
+		description := s.tools[name].Description
+		for _, required := range []string{"Windows", "security.run_as", "dropped-uid", "session_id whose target", "literal string `local`"} {
+			if !strings.Contains(description, required) {
+				t.Fatalf("%s description omits %q: %s", name, required, description)
+			}
+		}
+	}
+}
+
+func TestBackgroundDescriptionsExplainSessionOccupancy(t *testing.T) {
+	s := newTestServer(t)
+	for _, name := range []string{"exec_run", "exec_start"} {
+		description := s.tools[name].Description
+		if !strings.Contains(description, "occupies its session") || !strings.Contains(description, "another session") {
+			t.Fatalf("%s description omits background session occupancy: %s", name, description)
+		}
+	}
+}
+
+func TestInputAndSessionDescriptionsStateBoundedGuarantees(t *testing.T) {
+	s := newTestServer(t)
+	writeDescription := s.tools["exec_write"].Description
+	for _, required := range []string{"exact input", "redaction literal", "normal input logging", "best-effort"} {
+		if !strings.Contains(writeDescription, required) {
+			t.Fatalf("exec_write description omits %q: %s", required, writeDescription)
+		}
+	}
+	if strings.Contains(writeDescription, "never logged") {
+		t.Fatalf("exec_write description overclaims logging guarantee: %s", writeDescription)
+	}
+	sessionDescription := s.tools["session_create"].Description
+	for _, required := range []string{"32 sessions per owner", "128 total", "parallelism_exceeded"} {
+		if !strings.Contains(sessionDescription, required) {
+			t.Fatalf("session_create description omits %q: %s", required, sessionDescription)
+		}
+	}
+}
+
+func TestSignalToolDescriptionsDistinguishRemotePTY(t *testing.T) {
+	s := newTestServer(t)
+	for _, name := range []string{"exec_signal", "exec_kill"} {
+		description := s.tools[name].Description
+		for _, required := range []string{"Local", "Remote", "Ctrl-C"} {
+			if !strings.Contains(description, required) {
+				t.Fatalf("%s description omits %q: %s", name, required, description)
+			}
+		}
+	}
+	if description := s.tools["exec_signal"].Description; !strings.Contains(description, "SIGHUP") || !strings.Contains(description, "error") {
+		t.Fatalf("exec_signal description omits unsupported remote signal behavior: %s", description)
 	}
 }

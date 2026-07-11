@@ -22,7 +22,7 @@ test:
 	$(GO) test $(PKG)
 
 race:
-	$(GO) test -race $(PKG)
+	$(GO) test -race -p 1 $(PKG)
 
 vet:
 	$(GO) vet $(PKG)

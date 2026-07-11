@@ -111,11 +111,17 @@ func TestEnvPersists(t *testing.T) {
 
 func TestExecWriteAnswersPrompt(t *testing.T) {
 	m := newTestManager(t)
-	job, err := m.Start("agent", "", []string{"bash", "-c", "read -r x; echo got=$x"}, "")
+	job, err := m.Start("agent", "", []string{"bash", "-c", "printf 'Value: '; read -r x; echo got=$x"}, "")
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	time.Sleep(150 * time.Millisecond) // let the inner read reach the prompt
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
 	if err := m.Write("agent", job.ID, "pizza", true, false, false); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -160,13 +166,24 @@ func TestSessionBusy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start first: %v", err)
 	}
-	_, err = m.Start("agent", sess.ID, []string{"echo", "x"}, "")
+	failed, err := m.Start("agent", sess.ID, []string{"echo", "x"}, "")
 	if err == nil {
 		t.Fatalf("expected session_busy error, got nil")
 	}
 	e, ok := err.(*errs.Error)
 	if !ok || e.Code != errs.SessionBusy {
 		t.Fatalf("error = %v, want session_busy", err)
+	}
+	if failed == nil || failed.Snapshot().Status != StatusFailed {
+		t.Fatalf("busy start job = %+v, want terminal failed job", failed)
+	}
+	select {
+	case <-failed.Done():
+	default:
+		t.Fatal("busy start left a non-terminal phantom job")
+	}
+	if active := m.ListJobs("agent", "active"); len(active) != 1 || active[0].JobID != j1.ID {
+		t.Fatalf("active jobs after busy start = %+v, want only %s", active, j1.ID)
 	}
 	for i := 0; i < 40; i++ {
 		time.Sleep(50 * time.Millisecond)
@@ -175,4 +192,11 @@ func TestSessionBusy(t *testing.T) {
 		}
 	}
 	waitDone(t, j1, 5*time.Second)
+}
+
+func TestLeadingAssignmentWordIsAlwaysQuoted(t *testing.T) {
+	got := quoteArgv([]string{"X=1", "printf", "PWNED"})
+	if got != "'X=1' 'printf' 'PWNED'" {
+		t.Fatalf("quoteArgv = %q", got)
+	}
 }

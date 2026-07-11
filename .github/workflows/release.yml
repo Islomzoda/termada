@@ -18,7 +18,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.26.5'
       - name: Run tests before releasing
         run: go test -p 1 ./...   # -p 1: serialize packages (avoid cross-package PTY contention)
       - name: Log in to GHCR (for the Docker image)
@@ -29,7 +29,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: goreleaser/goreleaser-action@v6
         with:
-          version: '~> v2'
+          # Pin the snapshot-tested release tool for reproducible tag builds.
+          version: 'v2.17.0'
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

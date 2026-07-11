@@ -72,6 +72,12 @@
   .termhost.active{display:flex}
   .termctl{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--border)}
   .termctl .grip{flex:1;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .termnotice{display:none;align-items:flex-start;gap:10px;padding:8px 12px;background:#2a210c;border-bottom:1px solid var(--yellow);color:#fff4c2}
+  .termnotice.visible{display:flex}
+  .termnotice.error{background:#3d1418;border-color:var(--red);color:#ffb4ab}
+  .termnotice .notice-label{flex:0 0 auto;font-size:10.5px;font-weight:700;color:var(--yellow);white-space:nowrap}
+  .termnotice.error .notice-label{color:var(--red)}
+  .termnotice .notice-text{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;max-height:84px;overflow:auto}
   .termel{flex:1;min-height:0;padding:6px 8px}
   .nudge{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);padding:30px}
   .nudge>div{max-width:520px;text-align:center;line-height:1.65;font-size:13px}
@@ -247,7 +253,9 @@ let active = null;
 function makeTerm(key, icon, title, grip, controlsHTML, streamPath, onInput){
   if(terms[key]){ focusTab(key); return terms[key]; }
   const host=document.createElement('div'); host.className='termhost';
-  host.innerHTML=`<div class="termctl"><span class="grip">${esc(grip)}</span>${controlsHTML}</div><div class="termel"></div>`;
+  host.innerHTML=`<div class="termctl"><span class="grip">${esc(grip)}</span>${controlsHTML}</div>
+    <div class="termnotice" role="status" aria-live="polite"><span class="notice-label"></span><span class="notice-text"></span></div>
+    <div class="termel"></div>`;
   document.getElementById('termwrap').appendChild(host);
 
   const term=new Terminal({convertEol:true,cursorBlink:true,fontSize:12.5,scrollback:8000,
@@ -255,7 +263,6 @@ function makeTerm(key, icon, title, grip, controlsHTML, streamPath, onInput){
     theme:{background:'#000000',foreground:'#e6edf3',cursor:'#58a6ff'}});
   let fit=null; term.open(host.querySelector('.termel'));
   if(FitAddon){ fit=new FitAddon(); term.loadAddon(fit); }
-  if(onInput) term.onData(onInput);
 
   const tab=document.createElement('div'); tab.className='tab'; tab.id='tab-'+cssId(key);
   tab.innerHTML=`<span class="ic">${esc(icon)}</span><span>${esc(title)}</span><span class="x">✕</span>`;
@@ -263,16 +270,57 @@ function makeTerm(key, icon, title, grip, controlsHTML, streamPath, onInput){
   tab.querySelector('.x').onclick=(e)=>{e.stopPropagation();closeTerm(key);};
   document.getElementById('tabs').appendChild(tab);
 
-  const info={term,fit,es:null,host,tab,streamPath};
+  const info={term,fit,es:null,host,tab,streamPath,inputQueue:Promise.resolve(),inputFailed:false,promptText:''};
+  if(onInput) term.onData(d=>queueTermInput(info,onInput,d));
   terms[key]=info; connectTermStream(info); focusTab(key); return info;
+}
+function setTermNotice(info,kind,message){
+  if(!info||!info.host) return;
+  const notice=info.host.querySelector('.termnotice');
+  if(!notice) return;
+  const beforeVisible=notice.classList.contains('visible');
+  const beforeKind=notice.dataset.kind||'';
+  const beforeText=notice.querySelector('.notice-text').textContent;
+  const text=message||'';
+  if(kind==='prompt'&&text) info.promptText=text;
+  else if(!text&&kind!=='error') info.promptText='';
+  notice.className='termnotice'+(text?' visible '+kind:'');
+  notice.dataset.kind=text?kind:'';
+  notice.querySelector('.notice-label').textContent=kind==='error'?'INPUT FAILED':'⌨ INPUT REQUIRED';
+  notice.querySelector('.notice-text').textContent=text;
+  if((beforeVisible!==!!text||beforeKind!==(text?kind:'')||beforeText!==text)&&info.fit){
+    setTimeout(()=>{try{info.fit.fit();}catch(_){}} ,0);
+  }
+}
+function queueTermInput(info,onInput,data){
+  if(info.inputFailed){
+    info.inputFailed=false; info.inputQueue=Promise.resolve();
+    setTermNotice(info,info.promptText?'prompt':'',info.promptText);
+  }
+  const next=info.inputQueue.then(async()=>{
+    const result=await onInput(data);
+    if(result&&result.error) throw new Error(result.error.message||result.error.code||'input rejected');
+    if(/[\r\n]/.test(data)) setTermNotice(info,'','');
+  });
+  info.inputQueue=next.catch(err=>{
+    info.inputFailed=true;
+    setTermNotice(info,'error','Could not send input: '+(err&&err.message?err.message:String(err)));
+    throw err;
+  });
+  void info.inputQueue.catch(()=>{});
 }
 function connectTermStream(info){
   if(info.es){ try{info.es.close();}catch(_){ } }
   const es=new EventSource(withToken(info.streamPath));
   info.es=es;
   es.onmessage=ev=>{ let m; try{m=JSON.parse(ev.data);}catch(_){return;}
+    if(m.error){ setTermNotice(info,'error','Terminal stream error: '+m.error); return; }
+    if(!info.inputFailed&&Object.prototype.hasOwnProperty.call(m,'awaiting_input')){
+      setTermNotice(info,m.awaiting_input?'prompt':'',m.awaiting_input?(m.prompt||'Input is required'):'');
+    }
+    if(m.gap) info.term.write('\r\n\x1b[33m── output gap: earlier terminal data expired ──\x1b[0m\r\n');
     if(m.chunk) info.term.write(m.chunk);
-    if(m.done){ info.term.write('\r\n\x1b[2m── '+(m.status||'ended')+' ──\x1b[0m\r\n'); es.close(); } };
+    if(m.done){ setTermNotice(info,'',''); info.term.write('\r\n\x1b[2m── '+(m.status||'ended')+' ──\x1b[0m\r\n'); es.close(); } };
 }
 function cssId(k){return k.replace(/[^a-z0-9]/gi,'_');}
 function focusTab(key){
@@ -435,7 +483,8 @@ async function refresh(){
   for(const key in terms){ if(!key.startsWith('job:')) continue; const id=key.slice(4); const j=lastJobs[id]; if(!j) continue;
     const hi=document.getElementById('hi-'+id), ho=document.getElementById('ho-'+id), ht=document.getElementById('ht-'+id);
     if(hi) hi.className=j.hold_input?'on':''; if(ho) ho.className=j.hold_output?'warn':'';
-    if(ht) ht.textContent=(j.hold_input?'agent input BLOCKED ':'')+(j.hold_output?'agent output PAUSED':''); }
+    if(ht) ht.textContent=(j.hold_input?'agent input BLOCKED ':'')+(j.hold_output?'agent output PAUSED':'');
+    if(!terms[key].inputFailed) setTermNotice(terms[key],j.awaiting_input?'prompt':'',j.awaiting_input?(j.prompt||'Input is required'):''); }
 }
 async function resolve(kind,id){ await api('/api/'+kind,{method:'POST',body:JSON.stringify({confirmation_id:id,by:'dashboard'})}); refresh(); }
 async function stopAll(){ if(!confirm('Kill ALL active jobs?'))return; await api('/api/stop_all',{method:'POST'}); refresh(); }

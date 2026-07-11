@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -76,6 +77,39 @@ func newTestServer(t *testing.T) (*http.ServeMux, *engine.Manager) {
 	v := vault.New(filepath.Join(t.TempDir(), "v.age"))
 	fl := fleet.New(nil, okRunner{}, 2)
 	return New(m, b, nil, fl, v, nil, "test").Mux(), m
+}
+
+func firstSSEEvent(t *testing.T, s *Server, path string) map[string]any {
+	t.Helper()
+	mux := s.Mux()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, WithOperatorPrincipal(r))
+	}))
+	defer ts.Close()
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(ts.URL + path)
+	if err != nil {
+		t.Fatalf("open SSE stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("SSE status = %d", resp.StatusCode)
+	}
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read SSE stream: %v", err)
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data: "))), &event); err != nil {
+			t.Fatalf("decode SSE event: %v", err)
+		}
+		return event
+	}
 }
 
 func do(t *testing.T, mux *http.ServeMux, method, path, body string) (int, map[string]any) {
@@ -397,6 +431,160 @@ func TestExecStreamDrainsCappedTerminalOutput(t *testing.T) {
 		if !strings.Contains(body, page) {
 			t.Fatalf("terminal stream did not drain page %q: %s", page, body)
 		}
+	}
+	if !strings.Contains(body, "id: ") {
+		t.Fatalf("terminal stream omitted resumable SSE ids: %s", body)
+	}
+
+	first, err := m.PollFor("", job.ID, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeReq := httptest.NewRequest(http.MethodGet, "/api/exec/stream?job_id="+job.ID+"&cursor=0", nil)
+	resumeReq.Header.Set("Last-Event-ID", first.NextCursor)
+	resumeReq = WithOperatorPrincipal(resumeReq)
+	resumeRec := httptest.NewRecorder()
+	s.hExecStream(resumeRec, resumeReq)
+	resumed := resumeRec.Body.String()
+	if strings.Contains(resumed, "0123") || !strings.Contains(resumed, "4567") || !strings.Contains(resumed, "89") {
+		t.Fatalf("resumed terminal stream replayed or lost output: %s", resumed)
+	}
+}
+
+func TestExecStreamReportsRetentionGap(t *testing.T) {
+	cfg := engine.DefaultConfig()
+	cfg.OutputRetentionBytes = 4
+	cfg.MaxOutputBytes = 4
+	m := engine.NewManager(cfg)
+	t.Cleanup(m.Shutdown)
+	job, err := m.Start("agent", "", []string{"printf", "0123456789"}, engine.ModeForeground)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("job did not finish")
+	}
+	s := New(m, nil, nil, nil, nil, nil, "test")
+	req := httptest.NewRequest(http.MethodGet, "/api/exec/stream?job_id="+job.ID, nil)
+	req.Header.Set("Last-Event-ID", "1")
+	req = WithOperatorPrincipal(req)
+	rec := httptest.NewRecorder()
+	s.hExecStream(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, `"gap":true`) || !strings.Contains(body, "6789") {
+		t.Fatalf("expired cursor did not surface an output gap: %s", body)
+	}
+}
+
+func TestSessionStreamDrainsCappedClosedOutput(t *testing.T) {
+	cfg := engine.DefaultConfig()
+	cfg.MaxOutputBytes = 4
+	m := engine.NewManager(cfg)
+	t.Cleanup(m.Shutdown)
+	sess, err := m.CreateSession("agent", "local", "shell")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	job, err := m.Start("agent", sess.ID, []string{"printf", "0123456789"}, engine.ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("job did not finish")
+	}
+	if err := m.SessionWriteInput(sess.ID, "exit", true, true); err != nil {
+		t.Fatalf("close session shell: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		res, err := m.SessionTail(sess.ID, "")
+		if err != nil {
+			t.Fatalf("read session tail: %v", err)
+		}
+		if res.Closed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session shell did not close")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	s := New(m, nil, nil, nil, nil, nil, "test")
+	req := httptest.NewRequest(http.MethodGet, "/api/session/stream?session_id="+sess.ID, nil)
+	req = WithOperatorPrincipal(req)
+	rec := httptest.NewRecorder()
+	s.hSessionStream(rec, req)
+	body := rec.Body.String()
+	for _, page := range []string{"0123", "4567", "89"} {
+		if !strings.Contains(body, page) {
+			t.Fatalf("closed session stream did not drain page %q: %s", page, body)
+		}
+	}
+	if !strings.Contains(body, `"done":true`) {
+		t.Fatalf("closed session stream omitted terminal event: %s", body)
+	}
+}
+
+func TestTerminalStreamsExposePromptBeforeInput(t *testing.T) {
+	m := engine.NewManager(engine.DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	sess, err := m.CreateSession("agent", "local", "shell")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	job, err := m.Start("agent", sess.ID, []string{"bash", "-c", "printf 'Generate secrets? [y/N] '; read -r answer; sleep 0.3; printf 'answer=%s\\n' \"$answer\""}, engine.ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
+
+	s := New(m, nil, nil, nil, nil, nil, "test")
+	for name, path := range map[string]string{
+		"job":     "/api/exec/stream?job_id=" + job.ID,
+		"session": "/api/session/stream?session_id=" + sess.ID,
+	} {
+		t.Run(name, func(t *testing.T) {
+			event := firstSSEEvent(t, s, path)
+			if awaiting, _ := event["awaiting_input"].(bool); !awaiting {
+				t.Fatalf("prompt event is not awaiting input: %v", event)
+			}
+			if prompt, _ := event["prompt"].(string); prompt != "Generate secrets? [y/N]" {
+				t.Fatalf("prompt = %q, want exact question", prompt)
+			}
+		})
+	}
+
+	if err := m.SessionWriteInput(sess.ID, "n", false, true); err != nil {
+		t.Fatalf("type prompt answer: %v", err)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("prompt disappeared before Enter")
+	}
+	if err := m.SessionWriteInput(sess.ID, "\r", false, true); err != nil {
+		t.Fatalf("submit prompt answer: %v", err)
+	}
+	if job.Snapshot().AwaitingInput {
+		t.Fatal("prompt remained active after Enter")
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("job did not finish after input")
+	}
+	idleEvent := firstSSEEvent(t, s, "/api/session/stream?session_id="+sess.ID)
+	if awaiting, _ := idleEvent["awaiting_input"].(bool); awaiting || idleEvent["prompt"] != "" {
+		t.Fatalf("initial idle stream state retained a stale prompt: %v", idleEvent)
 	}
 }
 

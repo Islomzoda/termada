@@ -846,18 +846,27 @@ func (s *Server) hSessionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.URL.Query().Get("session_id")
-	cursor := r.URL.Query().Get("cursor")
+	cursor := r.Header.Get("Last-Event-ID")
+	if cursor == "" {
+		cursor = r.URL.Query().Get("cursor")
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	send := func(v any) {
+	send := func(id string, v any) {
 		b, _ := json.Marshal(v)
+		if id != "" {
+			_, _ = fmt.Fprintf(w, "id: %s\n", id)
+		}
 		_, _ = w.Write([]byte("data: "))
 		_, _ = w.Write(b)
 		_, _ = w.Write([]byte("\n\n"))
 		flusher.Flush()
 	}
+	lastAwaiting := false
+	lastPrompt := ""
+	sentState := false
 	for {
 		select {
 		case <-r.Context().Done():
@@ -866,15 +875,24 @@ func (s *Server) hSessionStream(w http.ResponseWriter, r *http.Request) {
 		}
 		res, err := s.mgr.SessionTailFor("", sessionID, cursor)
 		if err != nil {
-			send(map[string]any{"error": err.Error()})
+			send("", map[string]any{"error": err.Error()})
 			return
 		}
-		if res.Chunk != "" {
-			send(map[string]any{"chunk": res.Chunk})
+		stateChanged := !sentState || res.AwaitingInput != lastAwaiting || res.Prompt != lastPrompt
+		if res.Chunk != "" || stateChanged {
+			send(res.NextCursor, map[string]any{
+				"chunk":          res.Chunk,
+				"gap":            res.Gap,
+				"awaiting_input": res.AwaitingInput,
+				"prompt":         res.Prompt,
+			})
 		}
+		lastAwaiting = res.AwaitingInput
+		lastPrompt = res.Prompt
+		sentState = true
 		cursor = res.NextCursor
-		if res.Closed {
-			send(map[string]any{"done": true})
+		if res.Closed && !res.HasMore {
+			send(cursor, map[string]any{"done": true, "awaiting_input": false, "prompt": ""})
 			return
 		}
 		time.Sleep(120 * time.Millisecond)
@@ -934,18 +952,27 @@ func (s *Server) hExecStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobID := r.URL.Query().Get("job_id")
-	cursor := r.URL.Query().Get("cursor")
+	cursor := r.Header.Get("Last-Event-ID")
+	if cursor == "" {
+		cursor = r.URL.Query().Get("cursor")
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	send := func(v any) {
+	send := func(id string, v any) {
 		b, _ := json.Marshal(v)
+		if id != "" {
+			_, _ = fmt.Fprintf(w, "id: %s\n", id)
+		}
 		_, _ = w.Write([]byte("data: "))
 		_, _ = w.Write(b)
 		_, _ = w.Write([]byte("\n\n"))
 		flusher.Flush()
 	}
+	lastAwaiting := false
+	lastPrompt := ""
+	sentState := false
 	for {
 		select {
 		case <-r.Context().Done():
@@ -954,15 +981,27 @@ func (s *Server) hExecStream(w http.ResponseWriter, r *http.Request) {
 		}
 		res, err := s.mgr.PollFor("", jobID, cursor, true) // dashboard live view: unscoped, always streams
 		if err != nil {
-			send(map[string]any{"error": err.Error()})
+			send("", map[string]any{"error": err.Error()})
 			return
 		}
-		if res.StdoutChunk != "" {
-			send(map[string]any{"chunk": res.StdoutChunk, "status": res.Status})
+		stateChanged := !sentState || res.AwaitingInput != lastAwaiting || res.Prompt != lastPrompt
+		if res.StdoutChunk != "" || stateChanged {
+			send(res.NextCursor, map[string]any{
+				"chunk":          res.StdoutChunk,
+				"gap":            res.Gap,
+				"status":         res.Status,
+				"awaiting_input": res.AwaitingInput,
+				"prompt":         res.Prompt,
+			})
 		}
+		lastAwaiting = res.AwaitingInput
+		lastPrompt = res.Prompt
+		sentState = true
 		cursor = res.NextCursor
 		if res.Status.Terminal() && !res.HasMore {
-			send(map[string]any{"status": res.Status, "done": true})
+			send(cursor, map[string]any{
+				"status": res.Status, "done": true, "awaiting_input": false, "prompt": "",
+			})
 			return
 		}
 		time.Sleep(120 * time.Millisecond)

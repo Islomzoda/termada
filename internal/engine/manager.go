@@ -1196,8 +1196,7 @@ func (m *Manager) Run(owner, sessionID string, command []string, mode string, ti
 		deadline.Stop()
 		tick.Stop()
 	}
-	chunk, next, gap, capped := job.clean.ReadFromLimit(0, m.maxOutputBytes())
-	info := job.info()
+	info, chunk, next, gap, capped := job.readOutput(0, m.maxOutputBytes())
 	if !info.Status.Terminal() && info.Status != StatusAwaitingConfirmation && info.Status != StatusAwaitingInput {
 		info.Status = StatusBackgrounded
 		reclassified := m.markBackgroundWithinQuota(job)
@@ -1300,9 +1299,9 @@ func (m *Manager) PollFor(owner, jobID, cursor string, human bool) (*PollResult,
 	if _, ho := job.holds(); ho && !human {
 		return &PollResult{Info: job.info(), StdoutChunk: "", NextCursor: cursor, OutputHeld: true}, nil
 	}
-	chunk, next, gap, capped := job.clean.ReadFromLimit(off, m.maxOutputBytes())
+	info, chunk, next, gap, capped := job.readOutput(off, m.maxOutputBytes())
 	return &PollResult{
-		Info:        job.info(),
+		Info:        info,
 		StdoutChunk: string(chunk),
 		NextCursor:  output.EncodeCursor(next),
 		Gap:         gap,
@@ -1620,11 +1619,13 @@ func (m *Manager) getSession(id string) (*Session, error) {
 
 // SessionStreamResult is incremental session-terminal output.
 type SessionStreamResult struct {
-	Chunk      string `json:"chunk"`
-	NextCursor string `json:"next_cursor"`
-	Gap        bool   `json:"gap,omitempty"`
-	Closed     bool   `json:"closed"`
-	HasMore    bool   `json:"has_more,omitempty"`
+	Chunk         string `json:"chunk"`
+	NextCursor    string `json:"next_cursor"`
+	Gap           bool   `json:"gap,omitempty"`
+	Closed        bool   `json:"closed"`
+	HasMore       bool   `json:"has_more,omitempty"`
+	AwaitingInput bool   `json:"awaiting_input"`
+	Prompt        string `json:"prompt,omitempty"`
 }
 
 // SessionTail returns the session's continuous terminal output from the cursor
@@ -1644,14 +1645,8 @@ func (m *Manager) SessionTailFor(owner, sessionID, cursor string) (*SessionStrea
 	if err != nil {
 		return nil, err
 	}
-	chunk, next, gap, hasMore := s.clean.ReadFromLimit(off, m.maxOutputBytes())
-	return &SessionStreamResult{
-		Chunk:      string(chunk),
-		NextCursor: output.EncodeCursor(next),
-		Gap:        gap,
-		Closed:     s.isClosed(),
-		HasMore:    hasMore,
-	}, nil
+	res := s.streamSnapshot(off, m.maxOutputBytes())
+	return &res, nil
 }
 
 // SessionWriteInput sends operator input directly to a session's shell PTY.

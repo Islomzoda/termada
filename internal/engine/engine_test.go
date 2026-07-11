@@ -111,7 +111,7 @@ func TestEnvPersists(t *testing.T) {
 
 func TestExecWriteAnswersPrompt(t *testing.T) {
 	m := newTestManager(t)
-	job, err := m.Start("agent", "", []string{"bash", "-c", "printf 'Value: '; read -r x; echo got=$x"}, "")
+	job, err := m.Start("agent", "", []string{"bash", "-c", "printf 'Value: '; read -r x; sleep 0.3; echo got=$x"}, "")
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -122,13 +122,103 @@ func TestExecWriteAnswersPrompt(t *testing.T) {
 	if !job.Snapshot().AwaitingInput {
 		t.Fatal("job did not expose its input prompt")
 	}
+	sessionView, err := m.SessionTail(job.SessionID, "")
+	if err != nil {
+		t.Fatalf("session tail: %v", err)
+	}
+	if !sessionView.AwaitingInput || sessionView.Prompt != "Value:" {
+		t.Fatalf("session prompt = %+v, want awaiting Value:", sessionView)
+	}
 	if err := m.Write("agent", job.ID, "pizza", true, false, false); err != nil {
 		t.Fatalf("write: %v", err)
+	}
+	if info := job.Snapshot(); info.AwaitingInput || info.Status == StatusAwaitingInput {
+		t.Fatalf("answered prompt remained active: %+v", info)
 	}
 	waitDone(t, job, 5*time.Second)
 	res := poll(t, m, job.ID)
 	if !strings.Contains(res.StdoutChunk, "got=pizza") {
 		t.Fatalf("output = %q, want got=pizza", res.StdoutChunk)
+	}
+}
+
+func TestPromptMetadataIsRedacted(t *testing.T) {
+	m := newTestManager(t)
+	const secret = "prompt-secret"
+	if err := m.Redactor().AddLiteral(secret); err != nil {
+		t.Fatal(err)
+	}
+	job, err := m.Start("agent", "", []string{"bash", "-c", "printf 'Password prompt-secret: '; read -r x"}, "")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	info := job.Snapshot()
+	if !info.AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
+	masked := strings.Contains(info.Prompt, "REDACTED") || strings.Contains(info.Prompt, "***")
+	if strings.Contains(info.Prompt, secret) || !masked {
+		t.Fatalf("prompt was not redacted: %q", info.Prompt)
+	}
+	if err := m.Write("agent", job.ID, "done", true, true, false); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	waitDone(t, job, 5*time.Second)
+}
+
+func TestPromptMetadataOnlyShowsCurrentQuestion(t *testing.T) {
+	m := newTestManager(t)
+	job, err := m.Start("agent", "", []string{"bash", "-c", "printf 'First? '; read -r first; printf '   Second? '; read -r second; printf '\\rPath: invalid, retry? '; read -r third; printf '\\nFirst? '; read -r fourth; echo done"}, "")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitPrompt := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if info := job.Snapshot(); info.AwaitingInput && info.Prompt == want {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("prompt = %q, want %q", job.Snapshot().Prompt, want)
+	}
+	waitPrompt("First?")
+	if err := m.Write("agent", job.ID, "one", true, false, false); err != nil {
+		t.Fatalf("answer first prompt: %v", err)
+	}
+	waitPrompt("Second?")
+	if err := m.Write("agent", job.ID, "two", true, false, false); err != nil {
+		t.Fatalf("answer second prompt: %v", err)
+	}
+	waitPrompt("Path: invalid, retry?")
+	if err := m.Write("agent", job.ID, "three", true, false, false); err != nil {
+		t.Fatalf("answer third prompt: %v", err)
+	}
+	waitPrompt("First?")
+	if err := m.Write("agent", job.ID, "four", true, false, false); err != nil {
+		t.Fatalf("answer fourth prompt: %v", err)
+	}
+	waitDone(t, job, 5*time.Second)
+}
+
+func TestSessionTailFlushesCompletedUnterminatedOutput(t *testing.T) {
+	m := newTestManager(t)
+	job, err := m.Start("agent", "", []string{"printf", "unterminated"}, "")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitDone(t, job, 5*time.Second)
+	res, err := m.SessionTail(job.SessionID, "")
+	if err != nil {
+		t.Fatalf("session tail: %v", err)
+	}
+	if res.Chunk != "unterminated" {
+		t.Fatalf("session output = %q, want unterminated", res.Chunk)
 	}
 }
 

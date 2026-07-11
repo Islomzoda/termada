@@ -9,7 +9,44 @@ import (
 	"time"
 
 	"github.com/termada/termada/internal/bus"
+	"github.com/termada/termada/internal/output"
 )
+
+func TestTerminateFlushesSessionPartialOutput(t *testing.T) {
+	shell := newBlockingShell()
+	redactor := output.NewRedactor(nil)
+	s := &Session{
+		ID: "session", shell: shell, cfg: SessionConfig{OutputRetentionBytes: 1024},
+		redactor: redactor, clean: output.NewBuffer(1024), cleaner: &output.Cleaner{}, ready: true,
+	}
+	job := newJob(s, []string{"partial"}, ModeForeground)
+	job.activate()
+	s.current = job
+	s.sessionAppend([]byte("unterminated"))
+	s.terminate(StatusOrphaned, "test disconnect")
+	got, _, gap := s.clean.ReadFrom(0)
+	if gap || string(got) != "unterminated" {
+		t.Fatalf("session output = %q gap=%v, want unterminated", got, gap)
+	}
+}
+
+func TestTerminateClosesSessionBufferWithIncompleteUTF8(t *testing.T) {
+	shell := newBlockingShell()
+	redactor := output.NewRedactor(nil)
+	s := &Session{
+		ID: "session", shell: shell, cfg: SessionConfig{OutputRetentionBytes: 1024},
+		redactor: redactor, clean: output.NewBuffer(1024), cleaner: &output.Cleaner{}, ready: true,
+	}
+	job := newJob(s, []string{"partial-utf8"}, ModeForeground)
+	job.activate()
+	s.current = job
+	s.sessionAppend([]byte{0xe2})
+	s.terminate(StatusOrphaned, "test disconnect")
+	got, next, gap, hasMore := s.clean.ReadFromLimit(0, 4)
+	if gap || hasMore || next != 1 || !bytes.Equal(got, []byte{0xe2}) {
+		t.Fatalf("session output = %x next=%d gap=%v hasMore=%v", got, next, gap, hasMore)
+	}
+}
 
 type blockingShell struct {
 	started chan struct{}

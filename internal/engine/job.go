@@ -34,6 +34,11 @@ type Job struct {
 	startedAt     time.Time
 	endedAt       time.Time
 	lastOutput    time.Time
+	lastInput     time.Time
+	promptInput   time.Time
+	lineEpoch     uint64
+	promptEpoch   uint64
+	promptPrefix  string
 
 	clean    *output.Buffer // cleaned-for-agent (cursor indexes this)
 	cleaner  *output.Cleaner
@@ -131,10 +136,34 @@ func (j *Job) appendOutput(p []byte) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	cleaned := j.cleaner.Clean(p)
+	for _, b := range p {
+		if b == '\n' || b == '\r' {
+			j.lineEpoch++
+		}
+	}
 	if len(cleaned) > 0 {
 		_, _ = j.clean.Write([]byte(j.redactor.Redact(string(cleaned))))
 	}
 	j.lastOutput = time.Now()
+}
+
+func (j *Job) inputBoundary() (time.Time, string, uint64) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return time.Now(), j.cleaner.Pending(), j.lineEpoch
+}
+
+func (j *Job) recordInput(at time.Time, promptPrefix string, promptEpoch uint64, submitted bool) {
+	j.mu.Lock()
+	if at.After(j.promptInput) {
+		j.promptInput = at
+		j.promptPrefix = promptPrefix
+		j.promptEpoch = promptEpoch
+	}
+	if submitted && at.After(j.lastInput) {
+		j.lastInput = at
+	}
+	j.mu.Unlock()
 }
 
 // finalize moves the job to a terminal state. killStatus, when non-empty,
@@ -205,6 +234,13 @@ func (j *Job) info() Info {
 	return j.infoLocked()
 }
 
+func (j *Job) readOutput(offset int64, limit int) (Info, []byte, int64, bool, bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	chunk, next, gap, hasMore := j.clean.ReadFromLimit(offset, limit)
+	return j.infoLocked(), chunk, next, gap, hasMore
+}
+
 // Snapshot returns the job's current Info (exported for callers outside the
 // engine package, e.g. the MCP layer).
 func (j *Job) Snapshot() Info { return j.info() }
@@ -243,7 +279,7 @@ func (j *Job) infoLocked() Info {
 // promptRe matches a trailing interactive prompt: a short last line ending in a
 // colon or question mark, a [y/n]-style choice, or a password request. This is a
 // deliberately conservative best-effort heuristic (spec IN-1).
-var promptRe = regexp.MustCompile(`(?i)(\[y/n\]|\(yes/no\)|password.*:|passphrase.*:|[:?>]\s*)$`)
+var promptRe = regexp.MustCompile(`(?i)(\[y/n\]|\(yes/no\)|password.*:|passphrase.*:|[:?>])\s*$`)
 
 // detectPromptLocked returns the prompt text if the job appears to be waiting
 // for input: it has produced output, has been silent briefly, and the tail
@@ -252,10 +288,20 @@ func (j *Job) detectPromptLocked() (string, bool) {
 	if j.lastOutput.IsZero() || time.Since(j.lastOutput) < 150*time.Millisecond {
 		return "", false
 	}
+	if !j.lastInput.IsZero() && !j.lastOutput.After(j.lastInput) {
+		return "", false
+	}
 	// Prompts usually have no trailing newline, so they sit in the cleaner's
 	// in-progress line. Prefer that; fall back to the last committed line.
 	tail := j.cleaner.Pending()
+	hadPending := tail != ""
+	if j.lastOutput.After(j.promptInput) && j.promptEpoch == j.lineEpoch && j.promptPrefix != "" && strings.HasPrefix(tail, j.promptPrefix) {
+		tail = strings.TrimPrefix(tail, j.promptPrefix)
+	}
 	if strings.TrimSpace(tail) == "" {
+		if hadPending {
+			return "", false
+		}
 		total := j.clean.Total()
 		from := total - 256
 		if from < 0 {
@@ -272,7 +318,8 @@ func (j *Job) detectPromptLocked() (string, bool) {
 		return "", false
 	}
 	if promptRe.MatchString(tail) {
-		return strings.TrimRight(tail, " "), true
+		prompt := strings.Trim(tail, " \t")
+		return j.redactor.Redact(prompt), true
 	}
 	return "", false
 }

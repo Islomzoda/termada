@@ -260,6 +260,9 @@ func (s *Session) tryReconnect(rc interface{ Reconnect() error }) bool {
 			return false
 		}
 		job := s.current
+		if job != nil {
+			s.sessionFlush()
+		}
 		s.current = nil
 		s.outputStarted = false
 		s.scan = s.scan[:0]
@@ -338,6 +341,7 @@ func (s *Session) consume(p []byte) {
 		}
 		job.appendOutput(s.scan[:idx])
 		s.sessionAppend(s.scan[:idx])
+		s.sessionFlush()
 		job.finalize(code, "", "")
 		s.scan = append([]byte(nil), rest...)
 		s.current = nil
@@ -355,6 +359,19 @@ func (s *Session) sessionAppend(p []byte) {
 	cleaned := s.cleaner.Clean(p)
 	if len(cleaned) > 0 {
 		_, _ = s.clean.Write([]byte(s.redactor.Redact(string(cleaned))))
+	}
+}
+
+// sessionFlush commits a command's final unterminated line once its completion
+// marker proves that no later carriage return can rewrite it. Interactive
+// prompts remain pending while the command is running and are surfaced as
+// structured stream state instead.
+func (s *Session) sessionFlush() {
+	if !s.ready {
+		return
+	}
+	if tail := s.cleaner.Flush(); len(tail) > 0 {
+		_, _ = s.clean.Write([]byte(s.redactor.Redact(string(tail))))
 	}
 }
 
@@ -410,7 +427,13 @@ func (s *Session) writeInput(job *Job, b []byte) error {
 	if len(b) > maxSessionInputBytes {
 		return errs.New(errs.InvalidArgument, "input exceeds %d byte limit", maxSessionInputBytes)
 	}
-	return s.writeCurrent(job, b, interactiveWriteTimeout, true)
+	sentAt, promptPrefix, promptEpoch := job.inputBoundary()
+	if err := s.writeCurrent(job, b, interactiveWriteTimeout, true); err != nil {
+		return err
+	}
+	submitted := bytes.ContainsAny(b, "\r\n")
+	job.recordInput(sentAt, promptPrefix, promptEpoch, submitted)
+	return nil
 }
 
 type shellWriteResult struct {
@@ -511,6 +534,25 @@ func (s *Session) currentJob() *Job {
 	return s.current
 }
 
+func (s *Session) streamSnapshot(offset int64, limit int) SessionStreamResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	chunk, next, gap, hasMore := s.clean.ReadFromLimit(offset, limit)
+	res := SessionStreamResult{
+		Chunk:      string(chunk),
+		NextCursor: output.EncodeCursor(next),
+		Gap:        gap,
+		Closed:     s.closed,
+		HasMore:    hasMore,
+	}
+	if s.current != nil {
+		info := s.current.info()
+		res.AwaitingInput = info.AwaitingInput
+		res.Prompt = info.Prompt
+	}
+	return res
+}
+
 func (s *Session) isClosed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -530,6 +572,12 @@ func (s *Session) terminate(status Status, reason string) {
 	if !s.closed {
 		s.closed = true
 		job = s.current
+		if job != nil {
+			s.sessionFlush()
+		}
+		if s.clean != nil {
+			s.clean.Close()
+		}
 		s.current = nil
 		s.outputStarted = false
 	}

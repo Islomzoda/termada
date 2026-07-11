@@ -54,6 +54,20 @@ func TestHandlerServesNonceCSPWithoutInlineEventHandlers(t *testing.T) {
 	if strings.Contains(body, "localStorage") || !strings.Contains(body, "sessionStorage") {
 		t.Fatal("dashboard token must be scoped to the browser tab, not persisted in localStorage")
 	}
+	for _, required := range []string{
+		`class="termnotice"`,
+		`aria-live="polite"`,
+		`m.awaiting_input`,
+		`m.prompt`,
+		`m.gap`,
+		`queueTermInput`,
+		`inputQueue:Promise.resolve()`,
+		`!info.inputFailed&&Object.prototype.hasOwnProperty.call`,
+	} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("dashboard is missing interactive prompt support %q", required)
+		}
+	}
 
 	_, secondBody := request()
 	secondNonce := regexp.MustCompile(`nonce="([^"]+)"`).FindStringSubmatch(secondBody)

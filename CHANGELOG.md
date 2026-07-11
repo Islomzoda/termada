@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-07-11
+
+### Added
+- Add binary-safe remote `file_read` and `file_write` over SFTP for SSH
+  sessions.
+- Add authenticated policy editing in the dashboard, including rule creation,
+  updates and deletion.
+- Add MCP long-polling, timeout budgets and protocol negotiation, with clearer
+  agent instructions and more human-readable command results.
+
 ### Security
 - Require the dashboard token for every TCP `/api/*` route and `/metrics`, with
   loopback Host/Origin checks retained as defense in depth. The legacy
@@ -148,7 +158,7 @@ All notable changes to this project are documented here. The format is based on
 - **No-Go installer:** `curl … | sh` downloads the prebuilt binary (SHA-256
   verified) — no Go required.
 - **Dashboard:** this release introduced token-less local-trust access (historical
-  behavior removed by the strict TCP authentication in [Unreleased]), a 📜
+  behavior removed by the strict TCP authentication in [0.8.0]), a 📜
   History/replay timeline over the hash-chained audit (with filter), a read-only
   Policies panel, and a status legend.
 - **SSH agent / on-disk-key auth:** a server you can already `ssh` into needs no
@@ -323,7 +333,7 @@ self-update, Windows cross-compilation.
 - **Plugins** (§29): out-of-process plugin executables are discovered from the
   plugins dir, queried for their tools, and surfaced to agents over MCP as
   `<plugin>.<tool>`. Plugins run with a minimal inherited environment but retain
-  the daemon user's OS permissions; [Unreleased] makes this trusted,
+  the daemon user's OS permissions; [0.8.0] makes this trusted,
   non-sandboxed boundary explicit and adds enforcement limits.
 - **Windows cross-compilation**: the tree now builds for windows/amd64 (and
   linux/darwin × amd64/arm64). The ConPTY PTY backend and Windows signals are

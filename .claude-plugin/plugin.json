@@ -1,7 +1,7 @@
 {
   "name": "termada",
   "description": "Reliable, transparent terminal runtime for AI agents — persistent local/SSH sessions, async jobs, interactive prompts, structured output, and a human dashboard with policy/approval/audit. Bundles the termada MCP server config and the usage skill. Requires the `termada` binary on PATH (brew install Islomzoda/tap/termada, or a GitHub release).",
-  "version": "0.7.5",
+  "version": "0.8.0",
   "author": {
     "name": "Islomzoda",
     "url": "https://github.com/Islomzoda"

@@ -69,6 +69,7 @@ type Session struct {
 	closeOnce      sync.Once
 	current        *Job
 	scan           []byte
+	outputStarted  bool // the current job's begin marker has been consumed
 	closed         bool
 	ready          bool // init finished; session-terminal buffer starts capturing
 	onResetPending int
@@ -140,9 +141,9 @@ func (s *Session) exec(command []string, mode string) (*Job, error) {
 }
 
 // startJob attaches an existing job to the session and writes its command plus
-// completion marker to the shell. It returns immediately (async, spec EX-2); the
-// reader finalizes the job when the marker appears. Used both for fresh jobs and
-// for jobs released from the confirmation queue.
+// boundary markers to the shell. It returns immediately (async, spec EX-2); the
+// reader finalizes the job when the completion marker appears. Used both for
+// fresh jobs and for jobs released from the confirmation queue.
 func (s *Session) startJob(job *Job, line string) error {
 	s.mu.Lock()
 	if s.closed {
@@ -162,18 +163,22 @@ func (s *Session) startJob(job *Job, line string) error {
 		return errs.New(errs.NotFound, "job is already terminal")
 	}
 	s.current = job
+	s.outputStarted = false
 	s.mu.Unlock()
 
-	// Command and marker share ONE shell input line so the marker printf is not
+	// Command and markers share ONE shell input line so the marker printf is not
 	// left in the PTY input queue where a command that reads stdin (e.g. `read`)
-	// would consume it. After the command runs, printf emits:
+	// would consume it. The begin marker separates shell/readline UI emitted while
+	// accepting the line from actual command output. After the command runs, the
+	// second printf emits:
 	//   RS "TERMADA:" <marker> ":" <exit> RS
-	payload := line + "; " +
+	payload := fmt.Sprintf("printf '\\036TERMADA-BEGIN:%s\\036'; ", job.marker) + line + "; " +
 		fmt.Sprintf("printf '\\036TERMADA:%s:%%d\\036' \"$?\"\n", job.marker)
 	if err := s.writeCurrent(job, []byte(payload), commandWriteTimeout, false); err != nil {
 		s.mu.Lock()
 		if s.current == job {
 			s.current = nil
+			s.outputStarted = false
 		}
 		s.mu.Unlock()
 		job.finalize(-1, StatusFailed, "pty write: "+err.Error())
@@ -256,6 +261,7 @@ func (s *Session) tryReconnect(rc interface{ Reconnect() error }) bool {
 		}
 		job := s.current
 		s.current = nil
+		s.outputStarted = false
 		s.scan = s.scan[:0]
 		s.mu.Unlock()
 		if job != nil {
@@ -285,6 +291,24 @@ func (s *Session) consume(p []byte) {
 			// No job running: discard idle shell chatter.
 			s.scan = s.scan[:0]
 			return
+		}
+		if !s.outputStarted {
+			begin := markerBegin(job.marker)
+			idx := bytes.Index(s.scan, begin)
+			if idx < 0 {
+				// Interactive shells may emit prompt/readline control traffic after
+				// the previous completion marker and while accepting this command.
+				// It is outside the command boundary: discard it, retaining only a
+				// possible split begin marker.
+				discardTo := partialMarkerStart(s.scan, begin)
+				if discardTo > 0 {
+					s.scan = append([]byte(nil), s.scan[discardTo:]...)
+				}
+				return
+			}
+			s.scan = append([]byte(nil), s.scan[idx+len(begin):]...)
+			s.outputStarted = true
+			continue
 		}
 		open := markerOpen(job.marker)
 		idx := bytes.Index(s.scan, open)
@@ -317,6 +341,7 @@ func (s *Session) consume(p []byte) {
 		job.finalize(code, "", "")
 		s.scan = append([]byte(nil), rest...)
 		s.current = nil
+		s.outputStarted = false
 		// Loop again in case more data trails the marker.
 	}
 }
@@ -335,6 +360,10 @@ func (s *Session) sessionAppend(p []byte) {
 
 func markerOpen(marker string) []byte {
 	return append([]byte{markerDelim}, []byte("TERMADA:"+marker+":")...)
+}
+
+func markerBegin(marker string) []byte {
+	return append(append([]byte{markerDelim}, []byte("TERMADA-BEGIN:"+marker)...), markerDelim)
 }
 
 // partialMarkerStart returns the index up to which scan can be safely flushed as
@@ -502,6 +531,7 @@ func (s *Session) terminate(status Status, reason string) {
 		s.closed = true
 		job = s.current
 		s.current = nil
+		s.outputStarted = false
 	}
 	s.mu.Unlock()
 	if job != nil {

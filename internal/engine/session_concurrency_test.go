@@ -70,7 +70,8 @@ func (s *earlyReconnectShell) Write(p []byte) (int, error) {
 		start += len("TERMADA:")
 		if end := bytes.Index(p[start:], []byte(":%d")); end >= 0 {
 			marker := string(p[start : start+end])
-			s.reads <- scriptedRead{data: []byte("\x1eTERMADA:" + marker + ":0\x1e")}
+			response := append(markerBegin(marker), []byte("\x1eTERMADA:"+marker+":0\x1e")...)
+			s.reads <- scriptedRead{data: response}
 		}
 	}
 	return len(p), nil

@@ -12,6 +12,34 @@ import (
 	"github.com/termada/termada/internal/policy"
 )
 
+type quotaTransitionShell struct {
+	writeStarted chan struct{}
+	releaseWrite chan struct{}
+	startedOnce  sync.Once
+	releaseOnce  sync.Once
+}
+
+func newQuotaTransitionShell() *quotaTransitionShell {
+	return &quotaTransitionShell{writeStarted: make(chan struct{}), releaseWrite: make(chan struct{})}
+}
+
+func (s *quotaTransitionShell) Read([]byte) (int, error) {
+	return 0, fmt.Errorf("quota transition test shell is write-only")
+}
+
+func (s *quotaTransitionShell) Write(p []byte) (int, error) {
+	s.startedOnce.Do(func() { close(s.writeStarted) })
+	<-s.releaseWrite
+	return len(p), nil
+}
+
+func (s *quotaTransitionShell) Close() error {
+	s.releaseOnce.Do(func() { close(s.releaseWrite) })
+	return nil
+}
+
+func (s *quotaTransitionShell) Signal(string) error { return nil }
+
 func TestPerAgentQuota(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MaxJobsPerAgent = 2
@@ -273,6 +301,75 @@ func TestGlobalJobQuotasConcurrent(t *testing.T) {
 			}
 			if started+rejected != goroutines {
 				t.Fatalf("accounting: started=%d + rejected=%d != %d", started, rejected, goroutines)
+			}
+		})
+	}
+}
+
+func TestStartReservationDoesNotDoubleCountVisibleJob(t *testing.T) {
+	for _, mode := range []string{ModeForeground, ModeBackground} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.MaxForegroundJobs = 2
+			cfg.MaxBackgroundJobs = 2
+			m := NewManager(cfg)
+			t.Cleanup(m.Shutdown)
+
+			shell := newQuotaTransitionShell()
+			sess := &Session{
+				ID:       "transition-session",
+				Owner:    "agent",
+				Target:   "local",
+				Mode:     "shell",
+				cfg:      SessionConfig{OutputRetentionBytes: cfg.OutputRetentionBytes},
+				redactor: m.redactor,
+				shell:    shell,
+			}
+			m.mu.Lock()
+			m.sessions[sess.ID] = sess
+			m.mu.Unlock()
+
+			result := make(chan error, 1)
+			go func() {
+				_, err := m.Start("agent", sess.ID, []string{"sleep", "5"}, mode)
+				result <- err
+			}()
+			select {
+			case <-shell.writeStarted:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Start did not reach the shell write")
+			}
+
+			m.mu.Lock()
+			if mode == ModeBackground {
+				// Pin Start between marking the job background and replacing its
+				// reservation with the registry entry.
+				shell.releaseOnce.Do(func() { close(shell.releaseWrite) })
+				deadline := time.Now().Add(5 * time.Second)
+				for {
+					job := sess.currentJob()
+					if job != nil && job.isBackground() {
+						break
+					}
+					if time.Now().After(deadline) {
+						m.mu.Unlock()
+						t.Fatal("Start did not classify the job as background")
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+			used := m.activeForeground() + m.reservedForeground
+			if mode == ModeBackground {
+				used = m.activeBackground() + m.reservedBackground
+			}
+			m.mu.Unlock()
+			shell.releaseOnce.Do(func() { close(shell.releaseWrite) })
+
+			if used != 1 {
+				t.Fatalf("one transitioning %s job consumes %d quota slots, want 1", mode, used)
+			}
+			if err := <-result; err != nil {
+				t.Fatalf("Start: %v", err)
 			}
 		})
 	}

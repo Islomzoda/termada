@@ -74,7 +74,7 @@ func (s *lifecycleShell) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	marker := string(p[start : start+endOffset])
-	response := []byte("\x1eTERMADA:" + marker + ":0\x1e")
+	response := append(markerBegin(marker), []byte("\x1eTERMADA:"+marker+":0\x1e")...)
 	select {
 	case s.responses <- response:
 	case <-s.closed:

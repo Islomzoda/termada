@@ -100,8 +100,9 @@ type Manager struct {
 	pending            map[string]*pendingConfirm // confirmation_id -> pending exec
 	recipes            map[string]Recipe
 	agents             map[string]*AgentStat // agent id -> activity stats
-	reservedForeground int                   // approved confirmations transitioning into a foreground session job
-	reservedBackground int                   // approved confirmations transitioning into a background session job
+	reservedForeground int                   // admitted foreground starts not yet represented by the live-job scan
+	reservedBackground int                   // admitted background starts not yet represented by the live-job scan
+	reservedQuotaJobs  map[string]struct{}   // registered confirmation jobs represented by a start reservation
 	reservedSessions   int
 	reservedByOwner    map[string]int
 	reservedJobs       int
@@ -126,6 +127,7 @@ func NewManager(cfg Config) *Manager {
 		agents:            map[string]*AgentStat{},
 		reservedByOwner:   map[string]int{},
 		reservedByAgent:   map[string]int{},
+		reservedQuotaJobs: map[string]struct{}{},
 		recipeStepTimeout: 30 * time.Minute,
 	}
 }
@@ -499,26 +501,43 @@ func ownerLockIndex(owner string) uint32 {
 	return hash % 32
 }
 
-// activeForeground counts sessions whose current job holds a foreground slot —
+// activeForeground counts registered live jobs that hold a foreground slot —
 // i.e. everything except jobs marked background, which are gated by
 // MaxBackgroundJobs instead so a handful of long-lived dev servers can't block
 // every other exec on the daemon (spec-adjacent to LR-1's "dev servers are
-// first-class" stance).
+// first-class" stance). The caller holds m.mu, so a start reservation is
+// atomically replaced by its registered job and can never be counted twice.
 func (m *Manager) activeForeground() int {
 	n := 0
-	for _, s := range m.sessions {
-		if j := s.currentJob(); j != nil && !j.isBackground() {
+	for _, j := range m.jobs {
+		if _, reserved := m.reservedQuotaJobs[j.ID]; reserved {
+			continue
+		}
+		j.mu.Lock()
+		active := j.status == StatusRunning
+		background := j.background
+		j.mu.Unlock()
+		if active && !background {
 			n++
 		}
 	}
 	return n
 }
 
-// activeBackground counts sessions whose current job is marked background.
+// activeBackground counts registered live jobs marked background. See
+// activeForeground for why reservations and jobs share m.mu as the transition
+// boundary.
 func (m *Manager) activeBackground() int {
 	n := 0
-	for _, s := range m.sessions {
-		if j := s.currentJob(); j != nil && j.isBackground() {
+	for _, j := range m.jobs {
+		if _, reserved := m.reservedQuotaJobs[j.ID]; reserved {
+			continue
+		}
+		j.mu.Lock()
+		active := j.status == StatusRunning
+		background := j.background
+		j.mu.Unlock()
+		if active && background {
 			n++
 		}
 	}
@@ -970,6 +989,10 @@ func (m *Manager) resolveConfirm(cid string, approved bool, reason, by string) e
 			}
 			m.reservedForeground++
 		}
+		// Unlike ordinary starts, confirmation jobs are already present in m.jobs.
+		// Exclude this job from the live scan until its reservation is released,
+		// otherwise activation briefly counts the same quota slot twice.
+		m.reservedQuotaJobs[pc.Job.ID] = struct{}{}
 	}
 	if pc.timer != nil {
 		pc.timer.Stop()
@@ -991,6 +1014,7 @@ func (m *Manager) resolveConfirm(cid string, approved bool, reason, by string) e
 		}()
 		defer func() {
 			m.mu.Lock()
+			delete(m.reservedQuotaJobs, pc.Job.ID)
 			if pc.Mode == ModeBackground {
 				m.reservedBackground--
 			} else {

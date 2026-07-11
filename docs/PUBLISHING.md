@@ -19,6 +19,12 @@ Pushing a `v*` tag starts `.github/workflows/release.yml`. The workflow:
    Linux/amd64 GHCR image and the Homebrew formula;
 5. signs `checksums.txt` when both release-signing secrets are configured.
 
+Before invoking GoReleaser, the workflow validates that the signing secrets are
+configured as a pair. With both secrets present, it runs the configured signing
+pipe. With neither present, it passes `--skip=sign`, so an unsigned release
+contains `checksums.txt` and no `checksums.txt.sig`. If exactly one secret is
+present, the release fails before any artifact is published.
+
 The workflow uses these repository secrets:
 
 - `HOMEBREW_TAP_TOKEN`: a token that can write to
@@ -58,10 +64,11 @@ git push origin vX.Y.Z
 ```
 
 After Actions completes, verify that the release contains `checksums.txt`, its
-signature when signing is enabled, every expected platform archive, packages and
-the GHCR image. Exercise `install.sh` and Unix `termada update` against the new
-release, and confirm that Windows reports the documented manual-install path,
-before announcing it.
+non-empty signature when signing is enabled (and no signature asset when it is
+disabled), every expected platform archive, packages and the GHCR image.
+Exercise `install.sh` and Unix `termada update` against the new release, and
+confirm that Windows reports the documented manual-install path, before
+announcing it.
 
 ## MCP registry
 

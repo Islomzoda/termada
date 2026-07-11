@@ -97,12 +97,12 @@ checksum:
 
 # Sign checksums.txt with the release ed25519 key so the in-binary self-update can
 # verify it (selfupdate.VerifyEd25519 against the embedded ReleasePublicKey).
-# Safe whether or not the key is provisioned: with the repo secrets
-# TERMADA_RELEASE_PRIVKEY (+ TERMADA_RELEASE_PUBKEY, embedded via ldflags above)
-# set, this produces a real signature self-update enforces; without them
-# `sign-checksums` writes an empty .sig that self-update never reads (no embedded
-# pubkey), so unsigned releases keep working. To activate signing, just add the
-# two repo secrets (and pass them through in release.yml's env).
+# With both TERMADA_RELEASE_PRIVKEY and TERMADA_RELEASE_PUBKEY configured, this
+# produces a real signature that self-update enforces using the embedded public
+# key. The release workflow validates that the pair is complete. When neither
+# secret is configured, it invokes GoReleaser with --skip=sign, so unsigned
+# releases contain checksums.txt but no checksums.txt.sig. The helper itself also
+# rejects missing or incomplete key pairs if it is invoked directly.
 signs:
   - id: checksums
     artifacts: checksum

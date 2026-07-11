@@ -813,13 +813,6 @@ func cmdSignChecksums(args []string) {
 	if err := signChecksumsFile(args[0], priv, pub); err != nil {
 		fatal(err)
 	}
-	if priv == "" {
-		// No key provisioned yet: write an empty .sig so the release pipeline keeps
-		// working. self-update only checks the signature when a public key is
-		// embedded (also key-gated), so an empty/unverified .sig is never read.
-		fmt.Fprintln(os.Stderr, "TERMADA_RELEASE_PRIVKEY not set — writing an empty (unsigned) .sig")
-		return
-	}
 	fmt.Printf("wrote %s.sig\n", args[0])
 }
 
@@ -828,7 +821,7 @@ func signChecksumsFile(path, priv, pub string) error {
 		return fmt.Errorf("TERMADA_RELEASE_PRIVKEY and TERMADA_RELEASE_PUBKEY must be set together")
 	}
 	if priv == "" {
-		return os.WriteFile(path+".sig", nil, 0o644)
+		return fmt.Errorf("TERMADA_RELEASE_PRIVKEY and TERMADA_RELEASE_PUBKEY are required to sign checksums")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

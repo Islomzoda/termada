@@ -77,22 +77,45 @@ func TestVersionMetadataStaysInSync(t *testing.T) {
 }
 
 func TestSignChecksumsRequiresMatchingKeyPair(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "checksums.txt")
-	if err := os.WriteFile(path, []byte("checksums"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	privText := base64.StdEncoding.EncodeToString(priv)
 	pubText := base64.StdEncoding.EncodeToString(pub)
-	if err := signChecksumsFile(path, privText, ""); err == nil {
-		t.Fatal("private key without public key was accepted")
+	_, otherPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
 	}
-	_, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
-	if err := signChecksumsFile(path, base64.StdEncoding.EncodeToString(otherPriv), pubText); err == nil {
-		t.Fatal("mismatched signing keys were accepted")
+
+	tests := []struct {
+		name string
+		priv string
+		pub  string
+	}{
+		{name: "no keys"},
+		{name: "private key only", priv: privText},
+		{name: "public key only", pub: pubText},
+		{name: "mismatched keys", priv: base64.StdEncoding.EncodeToString(otherPriv), pub: pubText},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "checksums.txt")
+			if err := os.WriteFile(path, []byte("checksums"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := signChecksumsFile(path, tt.priv, tt.pub); err == nil {
+				t.Fatal("invalid signing configuration was accepted")
+			}
+			if _, err := os.Stat(path + ".sig"); !os.IsNotExist(err) {
+				t.Fatalf("failed signing created a signature file: %v", err)
+			}
+		})
+	}
+
+	path := filepath.Join(t.TempDir(), "checksums.txt")
+	if err := os.WriteFile(path, []byte("checksums"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	if err := signChecksumsFile(path, privText, pubText); err != nil {
 		t.Fatal(err)

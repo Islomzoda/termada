@@ -27,16 +27,33 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Select release signing mode
+        id: signing
+        shell: bash
+        env:
+          TERMADA_RELEASE_PRIVKEY: ${{ secrets.TERMADA_RELEASE_PRIVKEY }}
+          TERMADA_RELEASE_PUBKEY: ${{ secrets.TERMADA_RELEASE_PUBKEY }}
+        run: |
+          if [[ -n "$TERMADA_RELEASE_PRIVKEY" && -n "$TERMADA_RELEASE_PUBKEY" ]]; then
+            echo "args=release --clean" >> "$GITHUB_OUTPUT"
+            echo "Release checksums will be signed."
+          elif [[ -z "$TERMADA_RELEASE_PRIVKEY" && -z "$TERMADA_RELEASE_PUBKEY" ]]; then
+            echo "args=release --clean --skip=sign" >> "$GITHUB_OUTPUT"
+            echo "Release checksums will be unsigned; skipping GoReleaser signs."
+          else
+            echo "::error::TERMADA_RELEASE_PRIVKEY and TERMADA_RELEASE_PUBKEY must be configured together"
+            exit 1
+          fi
       - uses: goreleaser/goreleaser-action@v6
         with:
           # Pin the snapshot-tested release tool for reproducible tag builds.
           version: 'v2.17.0'
-          args: release --clean
+          args: ${{ steps.signing.outputs.args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           # Release signing (optional): add these repo secrets to make self-update
-          # require a valid ed25519 signature on checksums.txt. Empty = unsigned
-          # releases keep working (self-update verifies the checksum only).
+          # require a valid ed25519 signature on checksums.txt. When both are
+          # absent, the workflow skips the signing pipe and publishes no .sig.
           TERMADA_RELEASE_PRIVKEY: ${{ secrets.TERMADA_RELEASE_PRIVKEY }}
           TERMADA_RELEASE_PUBKEY: ${{ secrets.TERMADA_RELEASE_PUBKEY }}

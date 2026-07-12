@@ -6,6 +6,39 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-12
+
+### Added
+- Add a conversation-first dashboard that groups jobs under agent-to-target
+  session trees and presents each command as request, terminal response and
+  result turns.
+- Add an explicit `Dialog | Terminal` view switch, inline program prompts and
+  one-click policy decisions with clear actor, target, rule and deadline
+  context.
+- Expose job, session and pending-confirmation target, mode and lifecycle
+  timestamps, including millisecond fields for deterministic ordering.
+
+### Changed
+- Keep the raw session terminal as an advanced direct-console view while
+  routing prompt replies through the exact waiting job.
+- Render active and recent jobs together with human-readable Russian statuses,
+  responsive mobile controls and persistent API error feedback.
+
+### Fixed
+- Keep interactive prompts visible in both dialog and terminal modes, serialize
+  quick replies with raw terminal input and allow an empty Enter response.
+- Preserve chat chronology after an operator reply, bound rendered output and
+  resume SSE streams from their last cursor without duplicating retained data.
+- Disable repeated approval submissions while a decision is in flight and make
+  failed decisions retryable instead of silently disappearing.
+
+### Security
+- Register secret session replies with the shared redactor before PTY input and
+  never render or audit their plaintext.
+- Derive approval actors from authenticated transports instead of request JSON.
+- Record a durable, metadata-only human-input authorization before PTY side
+  effects, so audit failure is fail-closed without inviting duplicate retries.
+
 ## [0.8.1] — 2026-07-11
 
 ### Fixed

@@ -35,7 +35,7 @@ import (
 
 // version is overridable via -ldflags "-X main.version=..." at release build time
 // (goreleaser injects the git tag); the constant here is the dev-build fallback.
-var version = "0.8.1"
+var version = "0.9.0"
 
 func main() {
 	if len(os.Args) < 2 {

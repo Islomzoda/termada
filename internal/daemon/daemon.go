@@ -458,7 +458,7 @@ func udsGuard(cliToken string, mgr *engine.Manager, h http.Handler) http.Handler
 			return
 		}
 		if operator {
-			r = controlplane.WithOperatorPrincipal(r)
+			r = controlplane.WithOperatorPrincipalSource(r, "cli")
 		}
 		h.ServeHTTP(w, r)
 	})
@@ -878,7 +878,7 @@ func tokenAuth(token string, h http.Handler) http.Handler {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			r = controlplane.WithOperatorPrincipal(r)
+			r = controlplane.WithOperatorPrincipalSource(r, "dashboard")
 		}
 		h.ServeHTTP(w, r)
 	})

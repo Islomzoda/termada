@@ -313,17 +313,21 @@ type pendingConfirm struct {
 	Reason   string
 	Matched  string
 	Created  time.Time
+	Deadline time.Time
 	resolved bool
 	timer    *time.Timer
 }
 
 // SessionInfo is the JSON-facing snapshot of a session.
 type SessionInfo struct {
-	SessionID  string `json:"session_id"`
-	Target     string `json:"target"`
-	Mode       string `json:"mode"`
-	Owner      string `json:"owner"`
-	ActiveJobs int    `json:"active_jobs"`
+	SessionID     string `json:"session_id"`
+	Target        string `json:"target"`
+	Mode          string `json:"mode"`
+	Owner         string `json:"owner"`
+	ActiveJobs    int    `json:"active_jobs"`
+	CreatedUnix   int64  `json:"created_unix,omitempty"`
+	CreatedUnixMS int64  `json:"created_unix_ms,omitempty"`
+	CurrentJobID  string `json:"current_job_id,omitempty"`
 }
 
 // CreateSession creates a persistent-shell session for the given owner.
@@ -861,7 +865,7 @@ func (m *Manager) enqueueConfirm(owner string, sess *Session, command []string, 
 	job := newConfirmJob(sess, command, mode)
 	cid := ids.New("cnf")
 	job.setConfirmID(cid)
-	pc := &pendingConfirm{ID: cid, Job: job, Owner: owner, Sess: sess, Argv: command, Mode: mode,
+	pc := &pendingConfirm{ID: cid, Job: job, Owner: owner, Sess: sess, Argv: command, Mode: job.Mode,
 		Reason: dec.Reason, Matched: dec.Matched, Created: time.Now()}
 	if err := m.registerPending(pc); err != nil {
 		return nil, err
@@ -881,14 +885,12 @@ func (m *Manager) enqueueConfirm(owner string, sess *Session, command []string, 
 
 	timeout := time.Duration(m.cfg.ConfirmTimeoutMS) * time.Millisecond
 	if timeout > 0 {
-		timer := time.AfterFunc(timeout, func() {
-			_ = m.resolveConfirm(cid, false, "timed out", "system")
-		})
 		m.mu.Lock()
-		if pc.resolved {
-			timer.Stop()
-		} else {
-			pc.timer = timer
+		if !pc.resolved {
+			pc.Deadline = time.Now().Add(timeout)
+			pc.timer = time.AfterFunc(time.Until(pc.Deadline), func() {
+				_ = m.resolveConfirm(cid, false, "timed out", "system")
+			})
 		}
 		m.mu.Unlock()
 	}
@@ -1049,7 +1051,7 @@ func (m *Manager) resolveConfirm(cid string, approved bool, reason, by string) e
 	}
 	pc.Job.finalize(-1, StatusFailed, "confirmation "+reason+" (by "+by+")")
 	persistErr := m.persist()
-	if err := m.publish(bus.Event{Type: bus.EvConfirmResolved, JobID: pc.Job.ID, AgentID: pc.Owner,
+	if err := m.publish(bus.Event{Type: bus.EvConfirmResolved, JobID: pc.Job.ID, AgentID: pc.Owner, SessionID: pc.Sess.ID,
 		Data: map[string]any{"confirmation_id": cid, "approved": false, "by": by, "reason": reason}}); err != nil {
 		if persistErr != nil {
 			return errs.New(errs.Internal, "command denied but audit recording and terminal state persistence failed: audit: %v; persistence: %v", err, persistErr)
@@ -1074,13 +1076,20 @@ func (m *Manager) Deny(confirmID, by string) error {
 
 // PendingInfo describes a command awaiting confirmation.
 type PendingInfo struct {
-	ConfirmationID string   `json:"confirmation_id"`
-	JobID          string   `json:"job_id"`
-	AgentID        string   `json:"agent_id"`
-	SessionID      string   `json:"session_id"`
-	Command        []string `json:"command"`
-	Matched        string   `json:"matched"`
-	WaitingMS      int64    `json:"waiting_ms"`
+	ConfirmationID  string   `json:"confirmation_id"`
+	JobID           string   `json:"job_id"`
+	AgentID         string   `json:"agent_id"`
+	SessionID       string   `json:"session_id"`
+	Target          string   `json:"target,omitempty"`
+	Command         []string `json:"command"`
+	Mode            string   `json:"mode,omitempty"`
+	Matched         string   `json:"matched"`
+	Reason          string   `json:"reason,omitempty"`
+	WaitingMS       int64    `json:"waiting_ms"`
+	RequestedUnix   int64    `json:"requested_unix,omitempty"`
+	ExpiresUnix     int64    `json:"expires_unix,omitempty"`
+	RequestedUnixMS int64    `json:"requested_unix_ms,omitempty"`
+	ExpiresUnixMS   int64    `json:"expires_unix_ms,omitempty"`
 }
 
 // ListPending returns all commands awaiting confirmation.
@@ -1090,15 +1099,28 @@ func (m *Manager) ListPending() []PendingInfo {
 	out := []PendingInfo{}
 	for _, pc := range m.pending {
 		out = append(out, PendingInfo{
-			ConfirmationID: pc.ID,
-			JobID:          pc.Job.ID,
-			AgentID:        pc.Owner,
-			SessionID:      pc.Sess.ID,
-			Command:        pc.Argv,
-			Matched:        pc.Matched,
-			WaitingMS:      time.Since(pc.Created).Milliseconds(),
+			ConfirmationID:  pc.ID,
+			JobID:           pc.Job.ID,
+			AgentID:         pc.Owner,
+			SessionID:       pc.Sess.ID,
+			Target:          pc.Sess.Target,
+			Command:         pc.Argv,
+			Mode:            pc.Job.Mode,
+			Matched:         pc.Matched,
+			Reason:          pc.Reason,
+			WaitingMS:       time.Since(pc.Created).Milliseconds(),
+			RequestedUnix:   unixSeconds(pc.Created),
+			ExpiresUnix:     unixSeconds(pc.Deadline),
+			RequestedUnixMS: unixMilliseconds(pc.Created),
+			ExpiresUnixMS:   unixMilliseconds(pc.Deadline),
 		})
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].RequestedUnixMS == out[j].RequestedUnixMS {
+			return out[i].ConfirmationID < out[j].ConfirmationID
+		}
+		return out[i].RequestedUnixMS < out[j].RequestedUnixMS
+	})
 	return out
 }
 
@@ -1358,6 +1380,13 @@ func (m *Manager) Tail(owner, jobID, cursor string, human bool) (*TailResult, er
 // that idle shell — executed as a command, unaudited and unchecked by policy —
 // instead of answering the (now-gone) prompt it was meant for.
 func (m *Manager) Write(owner, jobID, input string, appendNewline, secret, human bool) error {
+	return m.WriteAttributed(owner, jobID, input, appendNewline, secret, human, "", "")
+}
+
+// WriteAttributed is Write with trusted human-operator attribution supplied by
+// the transport. Agent writes leave actor/source empty and are not emitted as
+// human replies.
+func (m *Manager) WriteAttributed(owner, jobID, input string, appendNewline, secret, human bool, actor, source string) error {
 	job, err := m.getJob(owner, jobID)
 	if err != nil {
 		return err
@@ -1383,6 +1412,9 @@ func (m *Manager) Write(owner, jobID, input string, appendNewline, secret, human
 	if inputBytes > maxSessionInputBytes {
 		return errs.New(errs.InvalidArgument, "input exceeds %d byte limit", maxSessionInputBytes)
 	}
+	if err := m.requireHumanInputAudit(human); err != nil {
+		return err
+	}
 	if secret {
 		if err := m.redactor.AddLiteral(input); err != nil {
 			return errs.New(errs.Internal, "cannot safely register secret for redaction: %v", err)
@@ -1392,7 +1424,48 @@ func (m *Manager) Write(owner, jobID, input string, appendNewline, secret, human
 	if appendNewline {
 		data = append(data, '\n')
 	}
+	if err := m.authorizeHumanInput(human, job.sess.Owner, job.SessionID, job.ID, len(input), appendNewline, secret, actor, source); err != nil {
+		return err
+	}
 	return job.sess.writeInput(job, data)
+}
+
+func (m *Manager) requireHumanInputAudit(human bool) error {
+	if human && m.auditOK != nil && !m.auditOK() {
+		return errs.New(errs.Internal, "audit log unavailable - refusing human input (fail-closed)")
+	}
+	return nil
+}
+
+func (m *Manager) authorizeHumanInput(human bool, owner, sessionID, jobID string, byteCount int, appendNewline, secret bool, actor, source string) error {
+	if !human {
+		return nil
+	}
+	if actor == "" {
+		actor = "operator"
+	}
+	if source == "" {
+		source = "internal"
+	}
+	scope := "job"
+	message := "human input authorized for job"
+	if jobID == "" {
+		scope = "session_terminal"
+		message = "human input authorized for idle session terminal"
+	}
+	// Never include the input value, even when secret=false. This event is a
+	// durable authorization envelope recorded before any PTY side effect. It does
+	// not claim that delivery succeeded; the API result remains authoritative.
+	if err := m.publish(bus.Event{
+		Type: bus.EvHumanInputAuthorized, AgentID: owner, SessionID: sessionID, JobID: jobID, Message: message,
+		Data: map[string]any{
+			"actor": actor, "source": source, "scope": scope, "byte_count": byteCount,
+			"append_newline": appendNewline, "secret": secret, "delivery": "not_recorded",
+		},
+	}); err != nil {
+		return errs.New(errs.Internal, "audit log unavailable - refusing human input before PTY write: %v", err)
+	}
+	return nil
 }
 
 // Hold sets the human-intervention flags for a job (nil = unchanged). Used by
@@ -1487,11 +1560,22 @@ func (m *Manager) ListJobs(owner, filter string) []Info {
 		keep(j.createdAt, j.info()) // createdAt is immutable after newJob
 	}
 	for _, in := range m.recovered {
-		keep(time.Time{}, in) // recovered jobs have no live timestamp — sort oldest
+		at := time.Time{}
+		if in.CreatedUnixMS > 0 {
+			at = time.UnixMilli(in.CreatedUnixMS)
+		} else if in.CreatedUnix > 0 {
+			at = time.Unix(in.CreatedUnix, 0)
+		}
+		keep(at, in)
 	}
 	// Newest first, so a default (capped) listing shows what just happened —
 	// deterministic order instead of Go's randomized map iteration.
-	sort.Slice(rows, func(i, j int) bool { return rows[i].at.After(rows[j].at) })
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].at.Equal(rows[j].at) {
+			return rows[i].info.JobID > rows[j].info.JobID
+		}
+		return rows[i].at.After(rows[j].at)
+	})
 	out := make([]Info, len(rows))
 	for i, r := range rows {
 		out[i] = r.info
@@ -1513,17 +1597,28 @@ func (m *Manager) ListSessionsFor(owner string) []SessionInfo {
 			continue
 		}
 		active := 0
-		if s.currentJob() != nil {
+		currentJobID := ""
+		if current := s.currentJob(); current != nil {
 			active = 1
+			currentJobID = current.ID
 		}
 		out = append(out, SessionInfo{
-			SessionID:  s.ID,
-			Target:     s.Target,
-			Mode:       s.Mode,
-			Owner:      s.Owner,
-			ActiveJobs: active,
+			SessionID:     s.ID,
+			Target:        s.Target,
+			Mode:          s.Mode,
+			Owner:         s.Owner,
+			ActiveJobs:    active,
+			CreatedUnix:   unixSeconds(s.CreatedAt),
+			CreatedUnixMS: unixMilliseconds(s.CreatedAt),
+			CurrentJobID:  currentJobID,
 		})
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedUnixMS == out[j].CreatedUnixMS {
+			return out[i].SessionID > out[j].SessionID
+		}
+		return out[i].CreatedUnixMS > out[j].CreatedUnixMS
+	})
 	return out
 }
 
@@ -1621,6 +1716,7 @@ func (m *Manager) getSession(id string) (*Session, error) {
 type SessionStreamResult struct {
 	Chunk         string `json:"chunk"`
 	NextCursor    string `json:"next_cursor"`
+	JobID         string `json:"job_id,omitempty"`
 	Gap           bool   `json:"gap,omitempty"`
 	Closed        bool   `json:"closed"`
 	HasMore       bool   `json:"has_more,omitempty"`
@@ -1658,6 +1754,20 @@ func (m *Manager) SessionWriteInput(sessionID, input string, appendNewline, huma
 
 // SessionWriteInputFor scopes direct PTY input to the authenticated owner.
 func (m *Manager) SessionWriteInputFor(owner, sessionID, input string, appendNewline, human bool) error {
+	return m.SessionWrite(owner, sessionID, input, appendNewline, false, human)
+}
+
+// SessionWrite sends input directly to a session's PTY. Secret input is
+// registered with the shared redactor before it reaches the shell, matching the
+// guarantees of Write for job-scoped input. Owner remains empty only for the
+// trusted operator path.
+func (m *Manager) SessionWrite(owner, sessionID, input string, appendNewline, secret, human bool) error {
+	return m.SessionWriteAttributed(owner, sessionID, input, appendNewline, secret, human, "", "")
+}
+
+// SessionWriteAttributed is SessionWrite with trusted human-operator
+// attribution supplied by the transport.
+func (m *Manager) SessionWriteAttributed(owner, sessionID, input string, appendNewline, secret, human bool, actor, source string) error {
 	s, err := m.getSessionFor(owner, sessionID)
 	if err != nil {
 		return err
@@ -1680,9 +1790,24 @@ func (m *Manager) SessionWriteInputFor(owner, sessionID, input string, appendNew
 	if inputBytes > maxSessionInputBytes {
 		return errs.New(errs.InvalidArgument, "input exceeds %d byte limit", maxSessionInputBytes)
 	}
+	if err := m.requireHumanInputAudit(human); err != nil {
+		return err
+	}
+	if secret {
+		if err := m.redactor.AddLiteral(input); err != nil {
+			return errs.New(errs.Internal, "cannot safely register secret for redaction: %v", err)
+		}
+	}
 	data := []byte(input)
 	if appendNewline {
 		data = append(data, '\n')
+	}
+	jobID := ""
+	if cur != nil {
+		jobID = cur.ID
+	}
+	if err := m.authorizeHumanInput(human, s.Owner, s.ID, jobID, len(input), appendNewline, secret, actor, source); err != nil {
+		return err
 	}
 	if cur == nil {
 		return s.writeCurrent(nil, data, interactiveWriteTimeout, false)

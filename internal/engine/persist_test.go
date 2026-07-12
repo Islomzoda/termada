@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,39 @@ import (
 	"github.com/termada/termada/internal/errs"
 	"github.com/termada/termada/internal/policy"
 )
+
+func TestRecoveredJobsUseMillisecondTimestampAndStableTieBreak(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	base := time.Now().Truncate(time.Second)
+	stored := []Info{
+		{JobID: "job_legacy", Owner: "agent", Status: StatusExited, CreatedUnix: base.Add(-time.Second).Unix()},
+		{JobID: "job_a", Owner: "agent", Status: StatusExited, CreatedUnix: base.Unix(), CreatedUnixMS: base.Add(500 * time.Millisecond).UnixMilli()},
+		{JobID: "job_z", Owner: "agent", Status: StatusExited, CreatedUnix: base.Unix(), CreatedUnixMS: base.Add(500 * time.Millisecond).UnixMilli()},
+		{JobID: "job_older_ms", Owner: "agent", Status: StatusExited, CreatedUnix: base.Unix(), CreatedUnixMS: base.Add(100 * time.Millisecond).UnixMilli()},
+	}
+	encoded, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal registry: %v", err)
+	}
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatalf("write registry: %v", err)
+	}
+	m := NewManager(DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	if err := m.EnablePersistence(path); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	jobs := m.ListJobs("agent", "all")
+	if len(jobs) != len(stored) {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+	want := []string{"job_z", "job_a", "job_older_ms", "job_legacy"}
+	for i, jobID := range want {
+		if jobs[i].JobID != jobID {
+			t.Fatalf("jobs[%d] = %s, want %s; all=%+v", i, jobs[i].JobID, jobID, jobs)
+		}
+	}
+}
 
 func TestPersistAndRecoverOrphaned(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "registry.json")

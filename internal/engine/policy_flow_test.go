@@ -76,3 +76,35 @@ func TestPolicyConfirmDeny(t *testing.T) {
 		t.Fatalf("pending should be empty after deny")
 	}
 }
+
+func TestPendingInfoUsesActualDeadlineAndNormalizedMode(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConfirmTimeoutMS = 5_000
+	m := NewManager(cfg)
+	t.Cleanup(m.Shutdown)
+	m.SetPolicy(policy.NewEngine(map[string]policy.Policy{
+		"p": {Confirm: []string{"echo*"}},
+	}), map[string]string{"agent": "p"})
+
+	job, err := m.Start("agent", "", []string{"echo", "pending"}, "")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Deny(job.Snapshot().ConfirmationID, "cleanup") })
+	pending := m.ListPending()
+	if len(pending) != 1 {
+		t.Fatalf("pending = %+v, want one", pending)
+	}
+	m.mu.Lock()
+	actualDeadline := m.pending[pending[0].ConfirmationID].Deadline
+	m.mu.Unlock()
+	if pending[0].Mode != ModeAuto || pending[0].Mode != job.Snapshot().Mode {
+		t.Fatalf("pending mode = %q, job mode = %q", pending[0].Mode, job.Snapshot().Mode)
+	}
+	if pending[0].ExpiresUnixMS != actualDeadline.UnixMilli() || pending[0].ExpiresUnix != actualDeadline.Unix() {
+		t.Fatalf("pending deadline = %+v, actual = %s", pending[0], actualDeadline)
+	}
+	if pending[0].RequestedUnixMS <= 0 || pending[0].RequestedUnixMS/1000 != pending[0].RequestedUnix {
+		t.Fatalf("pending request timestamps = %+v", pending[0])
+	}
+}

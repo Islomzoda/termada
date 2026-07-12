@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/termada/termada/internal/audit"
 	"github.com/termada/termada/internal/bus"
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/fleet"
@@ -79,6 +80,24 @@ func newTestServer(t *testing.T) (*http.ServeMux, *engine.Manager) {
 	return New(m, b, nil, fl, v, nil, "test").Mux(), m
 }
 
+func newAuditedTestServer(t *testing.T) (*http.ServeMux, *engine.Manager, *audit.Logger, string) {
+	t.Helper()
+	m := engine.NewManager(engine.DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	b := bus.New(100)
+	m.SetBus(b)
+	path := filepath.Join(t.TempDir(), "audit.log")
+	logger, err := audit.Open(path, m.Redactor())
+	if err != nil {
+		t.Fatalf("open audit: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+	cancel := b.SubscribeReliable(logger.FromBus)
+	t.Cleanup(cancel)
+	m.SetAuditHealth(logger.Healthy)
+	return New(m, b, logger, nil, nil, nil, "test").Mux(), m, logger, path
+}
+
 func firstSSEEvent(t *testing.T, s *Server, path string) map[string]any {
 	t.Helper()
 	mux := s.Mux()
@@ -136,6 +155,22 @@ func doOperator(t *testing.T, mux *http.ServeMux, method, path, body string) (in
 		r = httptest.NewRequest(method, path, strings.NewReader(body))
 	}
 	r = WithOperatorPrincipal(r)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, r)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec.Code, out
+}
+
+func doOperatorSource(t *testing.T, mux *http.ServeMux, source, method, path, body string) (int, map[string]any) {
+	t.Helper()
+	var r *http.Request
+	if body == "" {
+		r = httptest.NewRequest(method, path, nil)
+	} else {
+		r = httptest.NewRequest(method, path, strings.NewReader(body))
+	}
+	r = WithOperatorPrincipalSource(r, source)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, r)
 	var out map[string]any
@@ -585,6 +620,614 @@ func TestTerminalStreamsExposePromptBeforeInput(t *testing.T) {
 	idleEvent := firstSSEEvent(t, s, "/api/session/stream?session_id="+sess.ID)
 	if awaiting, _ := idleEvent["awaiting_input"].(bool); awaiting || idleEvent["prompt"] != "" {
 		t.Fatalf("initial idle stream state retained a stale prompt: %v", idleEvent)
+	}
+}
+
+func TestSessionStreamStateOnlyEventCarriesCurrentJobID(t *testing.T) {
+	m := engine.NewManager(engine.DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	sess, err := m.CreateSession("agent", "local", "shell")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	job, err := m.Start("agent", sess.ID, []string{"bash", "-c", "printf 'Approve? '; read -r answer"}, engine.ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
+	tail, err := m.SessionTail(sess.ID, "")
+	if err != nil {
+		t.Fatalf("session tail: %v", err)
+	}
+	if tail.JobID != job.ID || !tail.AwaitingInput || tail.Prompt != "Approve?" {
+		t.Fatalf("atomic session state = %+v, want current job prompt", tail)
+	}
+
+	s := New(m, nil, nil, nil, nil, nil, "test")
+	event := firstSSEEvent(t, s, "/api/session/stream?session_id="+sess.ID+"&cursor="+tail.NextCursor)
+	if chunk, _ := event["chunk"].(string); chunk != "" {
+		t.Fatalf("state-only event unexpectedly carried output: %v", event)
+	}
+	if event["job_id"] != job.ID || event["awaiting_input"] != true || event["prompt"] != "Approve?" {
+		t.Fatalf("state-only event lost current job identity: %v", event)
+	}
+
+	if err := m.SessionWriteInput(sess.ID, "n", true, true); err != nil {
+		t.Fatalf("complete job: %v", err)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("job did not finish after input")
+	}
+}
+
+func TestStatusExposesExecutionContext(t *testing.T) {
+	mux, m := newTestServer(t)
+	sess, err := m.CreateSession("agent", "local", "shell")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	job, err := m.Start("agent", sess.ID, []string{"bash", "-c", "printf 'Value: '; read -r value"}, engine.ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Kill("", job.ID) })
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
+
+	code, status := doOperator(t, mux, http.MethodGet, "/api/status", "")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d %v", code, status)
+	}
+	sessions, _ := status["sessions"].([]any)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %v, want one", sessions)
+	}
+	session, _ := sessions[0].(map[string]any)
+	if session["target"] != "local" || session["current_job_id"] != job.ID {
+		t.Fatalf("session context = %v", session)
+	}
+	if created, _ := session["created_unix"].(float64); created <= 0 {
+		t.Fatalf("session created_unix = %v", session["created_unix"])
+	}
+	if createdMS, _ := session["created_unix_ms"].(float64); createdMS <= 0 || int64(createdMS)/1000 != int64(session["created_unix"].(float64)) {
+		t.Fatalf("session millisecond timestamp = %v", session)
+	}
+
+	jobs, _ := status["jobs"].([]any)
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %v, want one", jobs)
+	}
+	jobInfo, _ := jobs[0].(map[string]any)
+	if jobInfo["target"] != "local" || jobInfo["mode"] != engine.ModeForeground {
+		t.Fatalf("job context = %v", jobInfo)
+	}
+	if created, _ := jobInfo["created_unix"].(float64); created <= 0 {
+		t.Fatalf("job created_unix = %v", jobInfo["created_unix"])
+	}
+	if started, _ := jobInfo["started_unix"].(float64); started <= 0 {
+		t.Fatalf("job started_unix = %v", jobInfo["started_unix"])
+	}
+	for secondsField, millisecondsField := range map[string]string{
+		"created_unix": "created_unix_ms",
+		"started_unix": "started_unix_ms",
+	} {
+		seconds, _ := jobInfo[secondsField].(float64)
+		milliseconds, _ := jobInfo[millisecondsField].(float64)
+		if milliseconds <= 0 || int64(milliseconds)/1000 != int64(seconds) {
+			t.Fatalf("job timestamp %s/%s = %v", secondsField, millisecondsField, jobInfo)
+		}
+	}
+	if _, ok := jobInfo["ended_unix"]; ok {
+		t.Fatalf("running job unexpectedly has ended_unix: %v", jobInfo)
+	}
+	if err := m.SessionWriteInput(sess.ID, "done", true, true); err != nil {
+		t.Fatalf("complete job: %v", err)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("job did not finish after input")
+	}
+	code, listed := doOperator(t, mux, http.MethodGet, "/api/exec/list?filter=all", "")
+	if code != http.StatusOK {
+		t.Fatalf("list jobs = %d %v", code, listed)
+	}
+	finishedJobs, _ := listed["jobs"].([]any)
+	if len(finishedJobs) != 1 {
+		t.Fatalf("finished jobs = %v, want one", finishedJobs)
+	}
+	finished, _ := finishedJobs[0].(map[string]any)
+	if ended, _ := finished["ended_unix"].(float64); ended <= 0 {
+		t.Fatalf("finished job ended_unix = %v", finished["ended_unix"])
+	}
+	if endedMS, _ := finished["ended_unix_ms"].(float64); endedMS <= 0 || int64(endedMS)/1000 != int64(finished["ended_unix"].(float64)) {
+		t.Fatalf("finished job millisecond timestamp = %v", finished)
+	}
+}
+
+func TestStatusExposesPendingApprovalContext(t *testing.T) {
+	mux, m := newTestServer(t)
+	m.SetPolicy(policy.NewEngine(map[string]policy.Policy{
+		"review": {Confirm: []string{"echo*"}},
+	}), map[string]string{"agent": "review"})
+	sess, err := m.CreateSession("agent", "local", "shell")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	job, err := m.Start("agent", sess.ID, []string{"echo", "needs approval"}, engine.ModeBackground)
+	if err != nil {
+		t.Fatalf("start confirmation: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Deny(job.Snapshot().ConfirmationID, "test cleanup") })
+
+	code, status := doOperator(t, mux, http.MethodGet, "/api/status", "")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d %v", code, status)
+	}
+	pendingList, _ := status["pending"].([]any)
+	if len(pendingList) != 1 {
+		t.Fatalf("pending = %v, want one", pendingList)
+	}
+	pending, _ := pendingList[0].(map[string]any)
+	if pending["target"] != "local" || pending["reason"] != "matched confirm rule" || pending["mode"] != engine.ModeBackground {
+		t.Fatalf("pending context = %v", pending)
+	}
+	requested, _ := pending["requested_unix"].(float64)
+	expires, _ := pending["expires_unix"].(float64)
+	if requested <= 0 || expires <= requested {
+		t.Fatalf("pending timing requested=%v expires=%v", requested, expires)
+	}
+	requestedMS, _ := pending["requested_unix_ms"].(float64)
+	expiresMS, _ := pending["expires_unix_ms"].(float64)
+	if requestedMS <= 0 || expiresMS <= requestedMS || int64(requestedMS)/1000 != int64(requested) || int64(expiresMS)/1000 != int64(expires) {
+		t.Fatalf("pending millisecond timing = %v", pending)
+	}
+}
+
+func TestAPISessionWriteSecretIsRedactedEverywhere(t *testing.T) {
+	mux, m, auditLog, auditPath := newAuditedTestServer(t)
+	sess, err := m.CreateSession("agent", "local", "shell")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	job, err := m.Start("agent", sess.ID, []string{"bash", "-c", "printf 'Secret: '; read -r value; printf 'seen=%s\\n' \"$value\""}, engine.ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	const secret = "session-write-secret-value"
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"session_id": sess.ID,
+		"input":      secret,
+		"secret":     true,
+	})
+	if code, out := doOperatorSource(t, mux, "dashboard", http.MethodPost, "/api/session/write", string(body)); code != http.StatusOK {
+		t.Fatalf("session write = %d %v", code, out)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("job did not finish after secret input")
+	}
+
+	jobOutput, err := m.PollFor("", job.ID, "", true)
+	if err != nil {
+		t.Fatalf("poll job: %v", err)
+	}
+	sessionOutput, err := m.SessionTail(sess.ID, "")
+	if err != nil {
+		t.Fatalf("tail session: %v", err)
+	}
+	for surface, output := range map[string]string{
+		"job":     jobOutput.StdoutChunk,
+		"session": sessionOutput.Chunk,
+	} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("%s output leaked secret: %q", surface, output)
+		}
+		if !strings.Contains(output, "REDACTED") {
+			t.Fatalf("%s output omitted redaction marker: %q", surface, output)
+		}
+	}
+	events, err := json.Marshal(m.Bus().Recent(100))
+	if err != nil {
+		t.Fatalf("encode events: %v", err)
+	}
+	if strings.Contains(string(events), secret) {
+		t.Fatalf("event bus leaked secret: %s", events)
+	}
+	records, err := auditLog.Tail(100)
+	if err != nil {
+		t.Fatalf("tail audit: %v", err)
+	}
+	var inputRecord *audit.Record
+	for i := range records {
+		if records[i].Type == bus.EvHumanInputAuthorized {
+			inputRecord = &records[i]
+		}
+	}
+	if inputRecord == nil {
+		t.Fatalf("audit omitted %s: %+v", bus.EvHumanInputAuthorized, records)
+	}
+	if inputRecord.SessionID != sess.ID || inputRecord.JobID != job.ID || inputRecord.Data["actor"] != "dashboard" || inputRecord.Data["source"] != "dashboard" {
+		t.Fatalf("input attribution = %+v", inputRecord)
+	}
+	if inputRecord.Data["scope"] != "job" || inputRecord.Data["delivery"] != "not_recorded" || inputRecord.Data["secret"] != true || inputRecord.Data["append_newline"] != true || int(inputRecord.Data["byte_count"].(float64)) != len(secret) {
+		t.Fatalf("input metadata = %+v", inputRecord.Data)
+	}
+	if _, ok := inputRecord.Data["input"]; ok {
+		t.Fatalf("audit metadata includes raw input field: %+v", inputRecord.Data)
+	}
+	auditBytes, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	if strings.Contains(string(auditBytes), secret) {
+		t.Fatalf("audit file leaked secret: %s", auditBytes)
+	}
+}
+
+func TestAPIExecWriteAuditsMetadataButNeverPlaintext(t *testing.T) {
+	mux, m, auditLog, auditPath := newAuditedTestServer(t)
+	job, err := m.Start("agent", "", []string{"bash", "-c", "printf 'Reply: '; read -r value"}, engine.ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
+	const reply = "ordinary-reply-never-audit"
+	body, _ := json.Marshal(map[string]any{"job_id": job.ID, "input": reply})
+	if code, out := doOperatorSource(t, mux, "cli", http.MethodPost, "/api/exec/write", string(body)); code != http.StatusOK {
+		t.Fatalf("exec write = %d %v", code, out)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("job did not finish after input")
+	}
+
+	records, err := auditLog.Tail(100)
+	if err != nil {
+		t.Fatalf("tail audit: %v", err)
+	}
+	var inputRecord *audit.Record
+	for i := range records {
+		if records[i].Type == bus.EvHumanInputAuthorized {
+			inputRecord = &records[i]
+		}
+	}
+	if inputRecord == nil || inputRecord.JobID != job.ID || inputRecord.SessionID != job.SessionID {
+		t.Fatalf("exec input attribution = %+v", inputRecord)
+	}
+	if inputRecord.Data["actor"] != "cli" || inputRecord.Data["source"] != "cli" || inputRecord.Data["scope"] != "job" || inputRecord.Data["delivery"] != "not_recorded" || inputRecord.Data["secret"] != false {
+		t.Fatalf("exec input metadata = %+v", inputRecord.Data)
+	}
+	auditBytes, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	if strings.Contains(string(auditBytes), reply) {
+		t.Fatalf("audit file recorded ordinary input plaintext: %s", auditBytes)
+	}
+}
+
+func TestAPIIdleSessionInputIsMetadataAuditedWithoutCommand(t *testing.T) {
+	mux, m, auditLog, auditPath := newAuditedTestServer(t)
+	sess, err := m.CreateSession("agent", "local", "shell")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	const command = "printf raw-idle-audit-marker"
+	body, _ := json.Marshal(map[string]any{"session_id": sess.ID, "input": command})
+	if code, out := doOperatorSource(t, mux, "dashboard", http.MethodPost, "/api/session/write", string(body)); code != http.StatusOK {
+		t.Fatalf("idle session write = %d %v", code, out)
+	}
+
+	records, err := auditLog.Tail(100)
+	if err != nil {
+		t.Fatalf("tail audit: %v", err)
+	}
+	var inputRecord *audit.Record
+	for i := range records {
+		if records[i].Type == bus.EvHumanInputAuthorized {
+			inputRecord = &records[i]
+		}
+	}
+	if inputRecord == nil {
+		t.Fatalf("audit omitted idle terminal input: %+v", records)
+	}
+	if inputRecord.SessionID != sess.ID || inputRecord.JobID != "" || inputRecord.Data["scope"] != "session_terminal" || inputRecord.Data["delivery"] != "not_recorded" {
+		t.Fatalf("idle terminal attribution = %+v", inputRecord)
+	}
+	if inputRecord.Data["actor"] != "dashboard" || inputRecord.Data["source"] != "dashboard" || int(inputRecord.Data["byte_count"].(float64)) != len(command) {
+		t.Fatalf("idle terminal metadata = %+v", inputRecord.Data)
+	}
+	auditBytes, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	if strings.Contains(string(auditBytes), command) || strings.Contains(string(auditBytes), "raw-idle-audit-marker") {
+		t.Fatalf("audit file recorded raw idle command: %s", auditBytes)
+	}
+}
+
+func TestAPIApprovalActorComesFromAuthenticatedPrincipal(t *testing.T) {
+	for _, action := range []string{"approve", "deny"} {
+		t.Run(action, func(t *testing.T) {
+			mux, m, auditLog, auditPath := newAuditedTestServer(t)
+			m.SetPolicy(policy.NewEngine(map[string]policy.Policy{
+				"review": {Confirm: []string{"echo*"}},
+			}), map[string]string{"agent": "review"})
+			job, err := m.Start("agent", "", []string{"echo", action}, engine.ModeForeground)
+			if err != nil {
+				t.Fatalf("start confirmation: %v", err)
+			}
+			body := `{"confirmation_id":"` + job.Snapshot().ConfirmationID + `","by":"spoofed-body-actor"}`
+			code, out := doOperatorSource(t, mux, "dashboard", http.MethodPost, "/api/"+action, body)
+			if code != http.StatusOK {
+				t.Fatalf("%s = %d %v", action, code, out)
+			}
+			select {
+			case <-job.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s job did not finish", action)
+			}
+
+			records, err := auditLog.Tail(100)
+			if err != nil {
+				t.Fatalf("tail audit: %v", err)
+			}
+			var resolved *audit.Record
+			for i := range records {
+				if records[i].Type == bus.EvConfirmResolved {
+					resolved = &records[i]
+				}
+			}
+			if resolved == nil || resolved.Data["by"] != "dashboard" || resolved.SessionID == "" || resolved.JobID != job.ID {
+				t.Fatalf("resolved approval attribution = %+v", resolved)
+			}
+			auditBytes, err := os.ReadFile(auditPath)
+			if err != nil {
+				t.Fatalf("read audit: %v", err)
+			}
+			if strings.Contains(string(auditBytes), "spoofed-body-actor") {
+				t.Fatalf("request body spoofed audit actor: %s", auditBytes)
+			}
+		})
+	}
+}
+
+func TestAPIHumanInputFailsClosedWhenAuditIsUnhealthy(t *testing.T) {
+	mux, m, auditLog, _ := newAuditedTestServer(t)
+	sess, err := m.CreateSession("agent", "local", "shell")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	job, err := m.Start("agent", sess.ID, []string{"bash", "-c", "printf 'Value: '; read -r value"}, engine.ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
+	m.SetAuditHealth(func() bool { return false })
+	body := `{"session_id":"` + sess.ID + `","input":"must-not-reach-pty"}`
+	if code, _ := doOperatorSource(t, mux, "dashboard", http.MethodPost, "/api/session/write", body); code == http.StatusOK {
+		t.Fatal("human input succeeded while audit was unhealthy")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("audit-unhealthy input reached PTY")
+	}
+	m.SetAuditHealth(auditLog.Healthy)
+	cleanup := `{"session_id":"` + sess.ID + `","input":"cleanup"}`
+	if code, out := doOperatorSource(t, mux, "dashboard", http.MethodPost, "/api/session/write", cleanup); code != http.StatusOK {
+		t.Fatalf("cleanup write = %d %v", code, out)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("job did not finish after cleanup")
+	}
+}
+
+func TestAPIHumanInputPreWriteAuditFailureDoesNotReachPTY(t *testing.T) {
+	mux, m, auditLog, _ := newAuditedTestServer(t)
+	sess, err := m.CreateSession("agent", "local", "shell")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	job, err := m.Start("agent", sess.ID, []string{"bash", "-c", "printf 'Value: '; read -r value"}, engine.ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
+	cancelFailure := m.Bus().SubscribeReliable(func(event bus.Event) error {
+		if event.Type == bus.EvHumanInputAuthorized {
+			return errors.New("forced authorization audit failure")
+		}
+		return nil
+	})
+	body := `{"session_id":"` + sess.ID + `","input":"must-not-reach-pty"}`
+	if code, _ := doOperatorSource(t, mux, "dashboard", http.MethodPost, "/api/session/write", body); code == http.StatusOK {
+		cancelFailure()
+		t.Fatal("input succeeded after pre-write audit authorization failed")
+	}
+	cancelFailure()
+	time.Sleep(100 * time.Millisecond)
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("pre-write audit failure still allowed PTY input")
+	}
+	// The durable envelope may have reached another reliable sink before one sink
+	// failed, but it explicitly does not claim delivery.
+	records, err := auditLog.Tail(100)
+	if err != nil {
+		t.Fatalf("tail audit: %v", err)
+	}
+	foundAuthorization := false
+	for _, record := range records {
+		if record.Type == bus.EvHumanInputAuthorized {
+			foundAuthorization = true
+			if record.Data["delivery"] != "not_recorded" {
+				t.Fatalf("failed authorization claimed delivery: %+v", record)
+			}
+		}
+	}
+	if !foundAuthorization {
+		t.Fatal("healthy audit sink did not retain the attempted authorization")
+	}
+	cleanup := `{"session_id":"` + sess.ID + `","input":"cleanup"}`
+	if code, out := doOperatorSource(t, mux, "dashboard", http.MethodPost, "/api/session/write", cleanup); code != http.StatusOK {
+		t.Fatalf("cleanup write = %d %v", code, out)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("job did not finish after cleanup")
+	}
+}
+
+func TestAPIHumanInputAuthorizationPrecedesFastCompletion(t *testing.T) {
+	mux, m, auditLog, _ := newAuditedTestServer(t)
+	job, err := m.Start("agent", "", []string{"bash", "-c", "printf 'Go: '; read -r value"}, engine.ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
+	// There is intentionally no post-write input event. A failure on the first
+	// event caused by the completed process must not turn a successful input API
+	// response into a retriable error after the PTY side effect.
+	cancelFailure := m.Bus().SubscribeReliable(func(event bus.Event) error {
+		if event.Type == bus.EvJobFinished {
+			return errors.New("forced post-write audit failure")
+		}
+		return nil
+	})
+	t.Cleanup(cancelFailure)
+	body := `{"job_id":"` + job.ID + `","input":"done"}`
+	if code, out := doOperatorSource(t, mux, "dashboard", http.MethodPost, "/api/exec/write", body); code != http.StatusOK {
+		t.Fatalf("exec write reported a retriable error after PTY write: %d %v", code, out)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("fast job did not finish")
+	}
+
+	var records []audit.Record
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		records, err = auditLog.Tail(100)
+		if err != nil {
+			t.Fatalf("tail audit: %v", err)
+		}
+		for _, record := range records {
+			if record.Type == bus.EvJobFinished {
+				goto haveFinished
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("audit omitted fast job completion")
+
+haveFinished:
+	authorizedAt, finishedAt := -1, -1
+	humanEvents := 0
+	for i, record := range records {
+		if strings.HasPrefix(record.Type, "human_input.") {
+			humanEvents++
+			if record.Type == bus.EvHumanInputAuthorized {
+				authorizedAt = i
+			}
+		}
+		if record.Type == bus.EvJobFinished && record.JobID == job.ID {
+			finishedAt = i
+		}
+	}
+	if authorizedAt < 0 || finishedAt < 0 || authorizedAt >= finishedAt {
+		t.Fatalf("causal audit order authorization=%d finished=%d records=%+v", authorizedAt, finishedAt, records)
+	}
+	if humanEvents != 1 {
+		t.Fatalf("input generated %d human audit events, want authorization envelope only: %+v", humanEvents, records)
+	}
+}
+
+func TestAPISessionWriteSecretFailsClosedWhenRedactorIsFull(t *testing.T) {
+	mux, m := newTestServer(t)
+	sess, err := m.CreateSession("agent", "local", "shell")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	job, err := m.Start("agent", sess.ID, []string{"bash", "-c", "printf 'Value: '; read -r value; printf 'seen=%s\\n' \"$value\""}, engine.ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
+	if err := m.Redactor().AddLiteral(strings.Repeat("x", 4<<20)); err != nil {
+		t.Fatalf("fill redactor: %v", err)
+	}
+	failedBody := `{"session_id":"` + sess.ID + `","input":"must-not-reach-pty","secret":true}`
+	if code, _ := doOperator(t, mux, http.MethodPost, "/api/session/write", failedBody); code == http.StatusOK {
+		t.Fatal("secret write succeeded after redactor reached capacity")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("failed secret registration still wrote input to the PTY")
+	}
+	cleanupBody := `{"session_id":"` + sess.ID + `","input":"cleanup"}`
+	if code, out := doOperator(t, mux, http.MethodPost, "/api/session/write", cleanupBody); code != http.StatusOK {
+		t.Fatalf("cleanup write = %d %v", code, out)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("job did not finish after cleanup input")
 	}
 }
 

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -8,157 +8,145 @@
 <script src="vendor/xterm.js"></script>
 <script src="vendor/xterm-addon-fit.js"></script>
 <style>
-  :root{--bg:#0a0c10;--panel:#11151c;--panel2:#161b22;--border:#272e3a;--fg:#e6edf3;
-        --muted:#8b949e;--green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff;--accent:#a371f7}
+  :root{--bg:#0b0f14;--panel:#111820;--panel2:#18212b;--panel3:#202b36;--border:#2d3946;--fg:#eef2f6;
+    --muted:#93a1af;--green:#3ecf8e;--red:#ff6b6b;--yellow:#f2b84b;--blue:#5ca8ff;--cyan:#5ed4d0;--shadow:rgba(0,0,0,.28)}
   *{box-sizing:border-box}
   html,body{height:100%;margin:0}
-  body{background:var(--bg);color:var(--fg);font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
-       display:grid;grid-template-rows:auto 1fr;height:100vh;overflow:hidden}
-  header{display:flex;align-items:center;gap:14px;padding:10px 18px;border-bottom:1px solid var(--border);background:var(--panel)}
+  body{background:var(--bg);color:var(--fg);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    display:grid;grid-template-rows:auto 1fr;height:100vh;overflow:hidden}
+  code,pre,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  button,input,textarea{font:inherit}
+  button{min-height:32px;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:5px 10px;cursor:pointer}
+  button:hover:not(:disabled){border-color:#607286;background:var(--panel3)}
+  button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+  button:disabled{opacity:.55;cursor:wait}
+  button.primary,button.on{background:#123c31;border-color:#2f9c73;color:#b6f3d8}
+  button.danger{background:#3c1d22;border-color:#9c4148;color:#ffc3c3}
+  button.warn{background:#3b2f17;border-color:#8d6c28;color:#ffdda0}
+  button.ghost{background:transparent}
+  button.mini{min-height:26px;padding:2px 7px;font-size:11px}
+  .spacer{flex:1}.muted{color:var(--muted)}
+  .mobile-only{display:none}
+  header{display:flex;align-items:center;gap:14px;padding:9px 16px;border-bottom:1px solid var(--border);background:var(--panel)}
   header h1{font-size:15px;margin:0;letter-spacing:1px}
   .dot{width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block;margin-right:6px}
-  .dot.live{background:var(--green);box-shadow:0 0 6px var(--green)}
-  .spacer{flex:1}
-  .stat{color:var(--muted)} .stat b{color:var(--fg)}
-  button{font:inherit;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:5px 10px;cursor:pointer}
-  button:hover{border-color:var(--muted)}
-  button.danger{background:#3d1418;border-color:var(--red);color:#ffb4ab}
-  button.on{background:#16301d;border-color:var(--green);color:#7ee787}
-  button.warn{background:#3a2d10;border-color:var(--yellow);color:#e3b341}
-  .layout{display:grid;grid-template-columns:300px 1fr;min-height:0}
-  aside{border-right:1px solid var(--border);background:var(--panel);overflow:auto;padding:10px}
-  aside h2{font-size:10.5px;text-transform:uppercase;letter-spacing:1.2px;color:var(--muted);margin:14px 4px 6px}
-  aside h2:first-child{margin-top:2px}
-  .item{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px;cursor:pointer;border:1px solid transparent}
-  .item:hover{background:var(--panel2)} .item.sel{background:var(--panel2);border-color:var(--blue)}
-  .item .cmd{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .badge{font-size:10px;padding:1px 6px;border-radius:9px;border:1px solid var(--border);color:var(--muted)}
-  .st-running{color:var(--blue);border-color:var(--blue)} .st-exited{color:var(--green);border-color:var(--green)}
-  .st-killed,.st-failed,.st-timed_out,.st-orphaned{color:var(--red);border-color:var(--red)}
-  .st-awaiting_input,.st-awaiting_confirmation{color:var(--yellow);border-color:var(--yellow)}
-  .st-backgrounded{color:var(--accent);border-color:var(--accent)}
-  .empty{color:var(--muted);font-style:italic;padding:4px 8px}
-  .legend{margin:6px 4px 2px;font-size:11px} .legend summary{cursor:pointer;color:var(--muted);user-select:none}
-  .legend summary:hover{color:var(--fg)} .leg{display:flex;gap:7px;align-items:center;margin:5px 2px;color:var(--muted)}
-  .leg .badge{flex-shrink:0}
-  .pol{margin:5px 4px;font-size:11px} .pol .pr{color:var(--muted);margin-top:2px;line-height:1.6}
-  .pol .tag{font-size:9px;padding:0 4px;border-radius:7px;border:1px solid var(--border)}
-  #gate{display:none;position:fixed;inset:0;z-index:1000;background:rgba(10,12,16,.93);align-items:center;justify-content:center}
-  .gate-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:26px 28px;max-width:460px;width:90%;text-align:center;box-shadow:0 12px 48px rgba(0,0,0,.5)}
-  .gate-h{font-size:18px;font-weight:600;margin-bottom:10px}
-  .gate-card p{color:var(--muted);font-size:12.5px;line-height:1.5;margin:8px 0}
-  .gate-card code{background:var(--panel2);padding:1px 5px;border-radius:4px;color:var(--fg)}
-  .gate-card input{width:100%;margin:14px 0 10px;padding:9px 11px;font-family:ui-monospace,Menlo,monospace}
-  .gate-card button{width:100%;padding:9px;font-size:13px}
-  #history{display:none;position:fixed;inset:0;z-index:1000;background:rgba(10,12,16,.93);align-items:center;justify-content:center}
-  .hist-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;width:min(920px,94%);max-height:86vh;display:flex;flex-direction:column;padding:14px 16px}
-  .hist-top{display:flex;align-items:center;gap:10px;margin-bottom:8px}
-  .hist-top input{flex:0 0 230px;padding:5px 8px;font-size:12px}
-  .hist-list{overflow:auto;flex:1;font-size:12px;border-top:1px solid var(--border)}
-  .hist-foot{font-size:10.5px;margin-top:8px}
-  .arow{display:grid;grid-template-columns:72px 120px 160px 1fr;gap:8px;padding:4px;border-bottom:1px solid var(--border);align-items:baseline}
-  .arow .at{color:var(--muted)} .arow .aa{color:var(--blue)} .arow .ay{color:var(--muted)} .arow .am{white-space:pre-wrap;word-break:break-word}
-  .approve-card{background:#2a210c;border:1px solid var(--yellow);border-radius:8px;padding:8px;margin:4px}
-  .approve-card .cmd{color:#ffd;word-break:break-all;margin-bottom:6px}
-  .approve-card .row{display:flex;gap:6px}
-  main{display:grid;grid-template-rows:auto 1fr;min-height:0;min-width:0}
-  .tabs{display:flex;gap:4px;padding:8px 10px 0;background:var(--panel);border-bottom:1px solid var(--border);overflow-x:auto}
-  .tab{display:flex;align-items:center;gap:8px;padding:7px 12px;border:1px solid var(--border);border-bottom:none;
-       border-radius:7px 7px 0 0;background:var(--panel2);cursor:pointer;white-space:nowrap;color:var(--muted)}
-  .tab.active{background:var(--bg);color:var(--fg)}
-  .tab .ic{opacity:.7} .tab .x{color:var(--muted)} .tab .x:hover{color:var(--red)}
-  .termwrap{position:relative;min-height:0;min-width:0;background:#000}
-  .termhost{position:absolute;inset:0;display:none;flex-direction:column}
-  .termhost.active{display:flex}
-  .termctl{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--border)}
-  .termctl .grip{flex:1;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .termnotice{display:none;align-items:flex-start;gap:10px;padding:8px 12px;background:#2a210c;border-bottom:1px solid var(--yellow);color:#fff4c2}
-  .termnotice.visible{display:flex}
-  .termnotice.error{background:#3d1418;border-color:var(--red);color:#ffb4ab}
-  .termnotice .notice-label{flex:0 0 auto;font-size:10.5px;font-weight:700;color:var(--yellow);white-space:nowrap}
-  .termnotice.error .notice-label{color:var(--red)}
-  .termnotice .notice-text{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;max-height:84px;overflow:auto}
-  .termel{flex:1;min-height:0;padding:6px 8px}
-  .nudge{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);padding:30px}
-  .nudge>div{max-width:520px;text-align:center;line-height:1.65;font-size:13px}
-  .feed{font-size:11.5px}
-  .feed .e{display:flex;gap:6px;padding:3px 4px;border-top:1px solid var(--border)}
-  .feed .t{color:var(--muted);min-width:58px}
-  .feed .ty{color:var(--accent)}
-  .hold-tag{font-size:10px;color:var(--yellow)}
-  button.mini{padding:2px 7px;font-size:11px}
-  .sdot{font-size:10px;margin-right:4px}
-  #server-form,#policy-form{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:8px;margin:4px 0;display:none}
-  #server-form input,#server-form textarea,#policy-form input,#policy-form textarea{width:100%;margin:3px 0;background:#0d1117;color:var(--fg);
-    border:1px solid var(--border);border-radius:6px;padding:6px;font:inherit}
-  #server-form textarea,#policy-form textarea{height:54px;resize:vertical}
-  #server-form .row,#policy-form .row{display:flex;gap:6px;margin-top:6px}
-  #sf-msg,#pf-msg{margin-top:6px;font-size:11px}
-  .pol .ctl{float:right} .pol .ctl button{padding:1px 6px;font-size:10px;margin-left:3px}
-  .pol .tag.cfg{color:var(--muted)}
-  .sf-hint{font-size:10.5px;color:var(--muted);line-height:1.5;margin:5px 2px 2px;opacity:.85}
-  h2 .mini{float:right;margin-top:-2px}
-  .item.srv{flex-wrap:wrap}
-  .srv-name{flex-basis:100%;display:flex;align-items:center;gap:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .srv-name .muted{font-size:11px}
-  .amini{font-size:11px;color:var(--muted);padding:0 8px 6px 24px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .agent-name{font-weight:600;color:var(--blue)}
-  @media(max-width:760px){
-    .layout{grid-template-columns:1fr}
-    aside{max-height:42vh;border-right:none;border-bottom:1px solid var(--border)}
-    header{flex-wrap:wrap;gap:8px}
+  .dot.live{background:var(--green);box-shadow:0 0 7px color-mix(in srgb,var(--green) 65%,transparent)}
+  .stat{color:var(--muted);white-space:nowrap}.stat b{color:var(--fg)}
+  .layout{display:grid;grid-template-columns:340px minmax(0,1fr);min-height:0}
+  aside{border-right:1px solid var(--border);background:var(--panel);overflow:auto;padding:10px 10px 22px}
+  aside h2{display:flex;align-items:center;gap:7px;font-size:10.5px;text-transform:uppercase;letter-spacing:1.1px;color:var(--muted);margin:15px 5px 7px}
+  aside h2:first-child{margin-top:3px}
+  .section-count{margin-left:auto;font-weight:600;color:var(--fg)}
+  .empty{color:var(--muted);padding:10px;font-style:normal}
+  .item{width:100%;display:flex;align-items:center;gap:8px;text-align:left;padding:8px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--fg);cursor:pointer}
+  .item:hover{background:var(--panel2)}.item.sel{background:#17283a;border-color:#396a99}
+  .item .cmd{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .item.srv{flex-wrap:wrap;cursor:default}
+  .session-node{margin-top:3px}.session-node .route{font-weight:650}.session-node .agent{font-size:11px;color:var(--muted)}
+  .job-node{position:relative;margin-left:18px;width:calc(100% - 18px);padding-left:18px}
+  .job-node:before{content:"";position:absolute;left:5px;top:-9px;bottom:50%;width:8px;border-left:1px solid #42505f;border-bottom:1px solid #42505f}
+  .job-main{min-width:0;flex:1}.job-title{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px}
+  .job-meta{display:flex;gap:6px;color:var(--muted);font-size:10.5px;margin-top:2px}
+  .badge{flex:0 0 auto;font-size:10px;padding:1px 6px;border-radius:9px;border:1px solid var(--border);color:var(--muted);white-space:nowrap}
+  .st-running{color:var(--blue);border-color:#3971a9}.st-exited{color:var(--green);border-color:#287c5d}
+  .st-killed,.st-failed,.st-timed_out,.st-orphaned{color:var(--red);border-color:#8d3d45}
+  .st-awaiting_input,.st-awaiting_confirmation{color:var(--yellow);border-color:#8d6c28}
+  .st-backgrounded{color:var(--cyan);border-color:#367c7a}
+  .approve-card{border:1px solid #8d6c28;background:#251f14;border-radius:7px;padding:11px;margin:6px 0;box-shadow:0 6px 18px var(--shadow)}
+  .approve-head{display:flex;gap:8px;align-items:flex-start}.approve-head b{font-size:12px;color:#ffe0a3}.approve-wait{margin-left:auto;color:var(--muted);font-size:10.5px}
+  .approve-route{margin:6px 0;color:var(--fg)}.approve-card .cmd{padding:7px 8px;background:#0d1218;border:1px solid var(--border);border-radius:5px;color:#f5f7fa;word-break:break-word;white-space:pre-wrap}
+  .approve-rule{font-size:10.5px;color:var(--muted);margin:6px 0}.approve-card .row{display:flex;gap:7px}.approve-card .row button{flex:1;min-height:38px}
+  .inline-error{color:#ffc3c3;font-size:11px;margin-top:7px;white-space:pre-wrap}
+  .legend{margin:6px 5px 2px;font-size:11px}.legend summary{cursor:pointer;color:var(--muted);user-select:none}.legend summary:hover{color:var(--fg)}
+  .leg{display:flex;gap:7px;align-items:center;margin:6px 2px;color:var(--muted)}.leg .badge{flex-shrink:0}
+  main{display:grid;grid-template-rows:auto 1fr;min-height:0;min-width:0;background:var(--bg)}
+  .tabs{display:flex;gap:4px;padding:7px 10px 0;background:var(--panel);border-bottom:1px solid var(--border);overflow-x:auto;min-height:43px}
+  .tab{display:flex;align-items:center;gap:8px;min-height:35px;padding:6px 10px;border:1px solid var(--border);border-bottom:none;border-radius:6px 6px 0 0;background:var(--panel2);white-space:nowrap;color:var(--muted)}
+  .tab.active{background:var(--bg);color:var(--fg);border-top-color:#4b8bc8}.tab .x{min-width:24px;min-height:24px;border:0;background:transparent;padding:0;color:var(--muted)}.tab .x:hover{color:var(--red)}
+  .termwrap{position:relative;min-height:0;min-width:0;background:var(--bg)}
+  .termhost{position:absolute;inset:0;display:none;flex-direction:column;min-width:0}.termhost.active{display:flex}
+  .termctl{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--border);min-height:54px}
+  .termctl .grip{flex:1;min-width:0}.context-route{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.context-sub{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .view-switch{display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;flex:0 0 auto}.view-switch button{min-height:30px;border:0;border-radius:0;background:transparent;padding:4px 9px;color:var(--muted)}.view-switch button+button{border-left:1px solid var(--border)}.view-switch button.active{background:var(--panel3);color:var(--fg)}
+  .chatview{display:flex;flex:1;min-height:0;flex-direction:column;background:var(--bg)}
+  .transcript{flex:1;overflow:auto;padding:24px clamp(14px,4vw,58px);scrollbar-gutter:stable;outline:none}
+  .turn{max-width:980px;margin:0 auto 18px;display:grid;grid-template-columns:34px minmax(0,1fr);column-gap:11px}
+  .avatar{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:#233244;border:1px solid #3e5268;font-size:11px;font-weight:750;color:#cde4ff}
+  .avatar.terminal{background:#17362c;border-color:#2e7057;color:#b6f3d8}.avatar.system{background:#3a2d17;border-color:#7d5f28;color:#ffe0a3}
+  .msg-head{display:flex;align-items:baseline;gap:8px;margin-bottom:5px}.msg-head b{font-size:12px}.msg-head span{font-size:10.5px;color:var(--muted)}
+  .message{border:1px solid var(--border);border-radius:7px;background:var(--panel);overflow:hidden;box-shadow:0 5px 15px var(--shadow)}
+  .request-text{padding:11px 13px;font-size:12px}.request-command{margin:0;padding:11px 13px;background:#080b0f;border-top:1px solid var(--border);white-space:pre-wrap;overflow-wrap:anywhere;color:#f2f5f8;font-size:12px}
+  .output-shell{position:relative}.chat-output{margin:0;min-height:92px;max-height:none;padding:13px 14px;background:#080b0f;color:#dce5ed;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;tab-size:4}
+  .output-empty{color:var(--muted)}.output-gap{display:none;padding:7px 12px;background:#362b16;color:#ffdda0;border-bottom:1px solid #8d6c28;font-size:11px}.output-gap.visible{display:block}
+  .result-line{display:flex;align-items:center;flex-wrap:wrap;min-width:0;gap:8px;padding:8px 12px;border-top:1px solid var(--border);color:var(--muted);font-size:11px}.result-line[hidden]{display:none}.result-line strong{color:var(--fg)}.result-reason{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
+  .termnotice{display:none;margin:0;padding:0 14px 14px;background:var(--bg)}.termnotice.visible{display:block}.termnotice.error .prompt-box{border-color:#8d3d45;background:#32191d}
+  .prompt-box{max-width:980px;margin:0 auto;border:1px solid #9b762b;border-radius:7px;background:#2b2315;padding:12px;box-shadow:0 -5px 18px var(--shadow)}
+  .prompt-title{display:flex;align-items:center;gap:8px;color:#ffe0a3;font-weight:700}.notice-label{font-size:10px;border:1px solid #8d6c28;border-radius:9px;padding:1px 6px}.notice-text{margin:7px 0 10px;color:var(--fg);white-space:pre-wrap;overflow-wrap:anywhere;max-height:90px;overflow:auto}
+  .prompt-actions{display:flex;gap:8px}.prompt-actions input{flex:1;min-width:0;background:#0d1218;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px 10px}.prompt-actions button{min-height:38px}.prompt-hint{font-size:10.5px;color:var(--muted);margin-top:7px}
+  .terminalview{display:none;flex:1;min-height:0;background:#000}.termhost.mode-terminal .chatview{display:none}.termhost.mode-terminal .terminalview{display:flex}.termel{flex:1;min-height:0;padding:6px 8px}
+  .tab-open{display:flex;align-items:center;gap:8px;min-height:32px;padding:0;border:0;background:transparent;color:inherit}.tab-open:hover:not(:disabled){background:transparent;border-color:transparent}
+  .nudge{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);padding:30px}.nudge>div{max-width:460px;text-align:center}.nudge-title{font-size:18px;color:var(--fg);margin-bottom:7px}
+  .feed{font-size:11.5px}.feed .e{display:grid;grid-template-columns:58px 100px minmax(0,1fr);gap:6px;padding:4px;border-top:1px solid var(--border)}.feed .t{color:var(--muted)}.feed .ty{color:var(--cyan)}
+  .hold-tag{font-size:10px;color:var(--yellow)}.sdot{font-size:10px;margin-right:4px}
+  .pol{margin:6px 5px;font-size:11px}.pol .pr{color:var(--muted);margin-top:3px;line-height:1.6}.pol .tag{font-size:9px;padding:0 4px;border-radius:7px;border:1px solid var(--border)}.pol .ctl{float:right}.pol .ctl button{min-height:22px;padding:1px 6px;font-size:10px;margin-left:3px}.pol .tag.cfg{color:var(--muted)}
+  #server-form,#policy-form{background:var(--panel2);border:1px solid var(--border);border-radius:7px;padding:8px;margin:4px 0;display:none}
+  #server-form input,#server-form textarea,#policy-form input,#policy-form textarea,.gate-card input,.hist-top input{width:100%;margin:3px 0;background:#0d1218;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:7px}
+  #server-form textarea,#policy-form textarea{height:54px;resize:vertical}#server-form .row,#policy-form .row{display:flex;gap:6px;margin-top:6px}#sf-msg,#pf-msg{margin-top:6px;font-size:11px}.sf-hint{font-size:10.5px;color:var(--muted);line-height:1.5;margin:5px 2px 2px}.srv-name{flex-basis:100%;display:flex;align-items:center;gap:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.srv-name .muted{font-size:11px}.amini{font-size:11px;color:var(--muted);padding:0 8px 6px 24px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.agent-name{font-weight:650;color:var(--blue)}
+  #gate,#history{display:none;position:fixed;inset:0;z-index:1000;background:rgba(7,10,14,.92);align-items:center;justify-content:center}
+  .gate-card,.hist-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 18px 56px rgba(0,0,0,.5)}.gate-card{padding:24px;max-width:460px;width:90%;text-align:center}.gate-h{font-size:18px;font-weight:700;margin-bottom:10px}.gate-card p{color:var(--muted);font-size:12.5px}.gate-card button{width:100%;margin-top:8px}.hist-card{width:min(980px,94%);max-height:88vh;display:flex;flex-direction:column;padding:14px 16px}.hist-top{display:flex;align-items:center;gap:10px;margin-bottom:8px}.hist-top input{flex:0 0 260px}.hist-list{overflow:auto;flex:1;font-size:12px;border-top:1px solid var(--border)}.hist-foot{font-size:10.5px;margin-top:8px}.arow{display:grid;grid-template-columns:76px 130px 150px 1fr;gap:8px;padding:6px 4px;border-bottom:1px solid var(--border);align-items:baseline}.arow .at,.arow .ay{color:var(--muted)}.arow .aa{color:var(--blue)}.arow .am{white-space:pre-wrap;word-break:break-word}
+  #toast{display:none;position:fixed;right:18px;bottom:18px;z-index:1200;max-width:420px;padding:10px 12px;border:1px solid var(--border);border-radius:7px;background:var(--panel3);box-shadow:0 12px 36px rgba(0,0,0,.45)}#toast.visible{display:block}#toast.error{border-color:#8d3d45;color:#ffc3c3}#toast.ok{border-color:#287c5d;color:#b6f3d8}
+  @media(max-width:780px){
+    body{grid-template-rows:auto 1fr}header{gap:8px;padding:8px 10px}header .header-count,#ver{display:none}header h1{font-size:13px}.header-action{width:38px;min-width:38px;padding:5px}.header-action .wide-label{display:none}.mobile-only{display:inline}.layout{grid-template-columns:1fr;grid-template-rows:minmax(150px,36vh) minmax(0,1fr)}aside{border-right:none;border-bottom:1px solid var(--border);padding:8px}.tabs{min-height:39px;padding-top:4px}.termctl{padding:8px 10px;flex-wrap:wrap}.termctl .grip{flex-basis:calc(100% - 170px)}.termctl .takeover{order:3;width:100%;display:flex;gap:6px;overflow-x:auto}.transcript{padding:15px 10px}.turn{grid-template-columns:28px minmax(0,1fr);column-gap:8px}.avatar{width:26px;height:26px}.termnotice{padding:0 10px 10px}.prompt-actions{flex-wrap:wrap}.prompt-actions input{flex-basis:100%}.prompt-actions button{flex:1;min-height:44px}.approve-card .row button{min-height:44px}.hist-top{flex-wrap:wrap}.hist-top input{flex-basis:100%}.arow{grid-template-columns:68px 1fr}.arow .ay{display:none}.arow .am{grid-column:1/-1}.feed{display:none}
   }
 </style>
 </head>
 <body>
 <div id="gate">
   <div class="gate-card">
-    <div class="gate-h">🔒 Termada dashboard</div>
-    <p>This dashboard is local-only and needs the <b>access token</b> printed when the daemon started.</p>
-    <p class="muted">Easiest: run <code>termada dashboard</code> — it prints (and can open) the full link. Or copy the <code>?token=…</code> URL from the <code>termada serve</code> output and paste the token below.</p>
-    <input id="gate-token" placeholder="paste token here" autocomplete="off" spellcheck="false">
-    <button class="on" data-action="submit-gate">Unlock</button>
-    <p class="muted">Stored only for this browser tab.</p>
+    <div class="gate-h">Termada</div>
+    <p>Введите локальный токен доступа, который показал <code>termada serve</code>.</p>
+    <input id="gate-token" placeholder="Токен доступа" autocomplete="off" spellcheck="false">
+    <button class="primary" data-action="submit-gate">Открыть</button>
+    <p class="muted">Токен хранится только в этой вкладке.</p>
   </div>
 </div>
 <header>
   <h1>▦ TERMADA</h1>
-  <span class="stat"><span class="dot" id="dot"></span><span id="conn">connecting…</span></span>
-  <span class="stat">sess <b id="s-sess">0</b></span>
-  <span class="stat">active <b id="s-jobs">0</b></span>
-  <span class="stat">pending <b id="s-pend">0</b></span>
+  <span class="stat"><span class="dot" id="dot"></span><span id="conn">подключение…</span></span>
+  <span class="stat header-count">диалоги <b id="s-sess">0</b></span>
+  <span class="stat header-count">активно <b id="s-jobs">0</b></span>
+  <span class="stat header-count">ждут вас <b id="s-pend">0</b></span>
   <span class="spacer"></span>
   <span class="stat" id="ver"></span>
-  <button data-action="open-history">📜 History</button>
-  <button class="danger" data-action="stop-all">⏹ Stop All</button>
+  <button class="header-action" data-action="open-history" aria-label="История"><span class="wide-label">История</span><span class="mobile-only" aria-hidden="true">↺</span></button>
+  <button class="danger header-action" data-action="stop-all" aria-label="Остановить всё"><span class="wide-label">Остановить всё</span><span class="mobile-only" aria-hidden="true">■</span></button>
 </header>
 <div id="history">
   <div class="hist-card">
-    <div class="hist-top"><b>History — what agents did</b>
+    <div class="hist-top"><b>История действий</b>
       <span class="muted" id="hist-meta"></span>
       <span style="flex:1"></span>
-      <input id="hist-filter" placeholder="filter (agent, command, type)…">
-      <button data-action="close-history">✕</button></div>
-    <div id="hist-list" class="hist-list"><div class="empty">loading…</div></div>
-    <div class="muted hist-foot">Tamper-evident, hash-chained audit log. Verify with <code>termada audit verify</code>.</div>
+      <input id="hist-filter" placeholder="Агент, команда или событие">
+      <button data-action="close-history" aria-label="Закрыть историю">✕</button></div>
+    <div id="hist-list" class="hist-list"><div class="empty">Загрузка…</div></div>
+    <div class="muted hist-foot">Целостность журнала: <code>termada audit verify</code>.</div>
   </div>
 </div>
 <div class="layout">
   <aside>
+    <h2>Требует внимания <span class="section-count" id="attention-count">0</span></h2>
     <div id="approvals"></div>
-    <h2>Sessions (click → live terminal)</h2><div id="sessions"><div class="empty">none</div></div>
-    <h2>Jobs (click → terminal)</h2><div id="jobs"><div class="empty">none</div></div>
-    <details class="legend"><summary>What do the statuses mean?</summary>
-      <div class="leg"><span class="badge st-running">running</span> executing right now</div>
-      <div class="leg"><span class="badge st-exited">exited</span> finished (exit code 0 = success)</div>
-      <div class="leg"><span class="badge st-backgrounded">backgrounded</span> still running; control handed back to the agent (long job)</div>
-      <div class="leg"><span class="badge st-awaiting_input">awaiting_input</span> blocked, waiting for typed input</div>
-      <div class="leg"><span class="badge st-awaiting_confirmation">awaiting_confirmation</span> a risky command needs your approval ↑</div>
-      <div class="leg"><span class="badge st-killed">killed / failed / timed_out</span> stopped before finishing</div>
-      <div class="leg"><span class="badge st-orphaned">orphaned</span> daemon restarted — process &amp; output were lost</div>
-      <div class="leg"><span class="muted">Finished &amp; failed jobs don't stay in this list — find them under 📜 History.</span></div>
+    <h2>Диалоги <span class="section-count" id="dialog-count">0</span></h2>
+    <div id="sessions"><div class="empty">Активных диалогов нет</div></div>
+    <div id="jobs" hidden></div>
+    <details class="legend"><summary>Что означают статусы</summary>
+      <div class="leg"><span class="badge st-running">Выполняется</span> команда работает</div>
+      <div class="leg"><span class="badge st-awaiting_input">Нужен ответ</span> программа ждёт вас</div>
+      <div class="leg"><span class="badge st-awaiting_confirmation">Нужно разрешение</span> команда ещё не запущена</div>
+      <div class="leg"><span class="badge st-exited">Готово</span> команда завершилась успешно</div>
+      <div class="leg"><span class="badge st-failed">Ошибка</span> выполнение не завершено</div>
     </details>
-    <h2>Servers <button class="mini" data-action="toggle-server-form">+ add</button></h2>
+    <h2>Серверы <button class="mini" data-action="toggle-server-form">+ добавить</button></h2>
     <div id="server-form">
       <input id="sf-name" placeholder="name  (e.g. prod)">
       <input id="sf-host" placeholder="host or IP">
@@ -173,8 +161,8 @@
       <div id="sf-msg" class="muted"></div>
     </div>
     <div id="servers"><div class="empty">none</div></div>
-    <h2>Agents</h2><div id="agents"><div class="empty">none connected yet</div></div>
-    <h2>Policies <button class="mini" data-action="toggle-policy-form">+ add</button></h2>
+    <h2>Агенты</h2><div id="agents"><div class="empty">Нет подключений</div></div>
+    <h2>Политики <button class="mini" data-action="toggle-policy-form">+ добавить</button></h2>
     <div id="policy-form">
       <input id="pf-name" placeholder="name  (e.g. restricted)">
       <textarea id="pf-allow" placeholder="allow — one glob per line. If set, this is a WHITELIST: anything not matched is denied."></textarea>
@@ -186,17 +174,17 @@
       <div id="pf-msg" class="muted"></div>
     </div>
     <div id="policies"><div class="empty">—</div></div>
-    <h2>Activity</h2><div id="feed" class="feed"></div>
+    <h2>События</h2><div id="feed" class="feed"></div>
   </aside>
   <main>
-    <div class="tabs" id="tabs"></div>
+    <div class="tabs" id="tabs" role="toolbar" aria-label="Открытые диалоги"></div>
     <div class="termwrap" id="termwrap">
-      <div class="nudge" id="nudge"><div>Click a <b>session</b> to open its live terminal — the full shell, everything it
-        runs, in real time. You can type straight into it.<br><br>
-        Or click a <b>job</b> to watch one command and take over its input/output.</div></div>
+      <div class="nudge" id="nudge"><div><div class="nudge-title">Выберите диалог</div>
+        Слева видно, кто отправил запрос, куда он направлен и какой ответ сейчас ожидается.</div></div>
     </div>
   </main>
 </div>
+<div id="toast" role="status" aria-live="polite"></div>
 <script nonce="__CSP_NONCE__">
 // Token: taken from ?token= on first visit, kept only for this browser tab, and
 // stripped from the address bar so it doesn't linger in history. If there's no
@@ -219,7 +207,10 @@ async function api(path, opts={}){
   opts.headers = Object.assign({'Content-Type':'application/json'}, authHeaders(), opts.headers||{});
   const r = await fetch(path, opts);
   if(r.status===401){ showGate(); throw new Error('unauthorized'); }
-  return r.json().catch(()=>({}));
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok&&!data.error) data.error={code:'http_'+r.status,message:'HTTP '+r.status};
+  if(data&&typeof data==='object') Object.defineProperty(data,'_status',{value:r.status,enumerable:false});
+  return data;
 }
 // The complete TCP API is token-gated; static assets remain readable so this
 // prompt can collect the token without exposing operational data.
@@ -239,23 +230,53 @@ function submitGate(){
 function esc(s){return (s==null?'':String(s)).replace(/[&<>"']/g,c=>({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 }[c]));}
-function cmd(c){return Array.isArray(c)?c.join(' '):(c||'');}
+function shellArg(v){v=String(v==null?'':v);return /^[a-zA-Z0-9_@%+=:,./-]+$/.test(v)?v:"'"+v.replace(/'/g,"'\\''")+"'";}
+function cmd(c){return Array.isArray(c)?c.map(shellArg).join(' '):(c||'');}
+function displayCommand(c){if(Array.isArray(c)&&c.length>=3&&/^(?:bash|sh|zsh)$/.test(c[0])&&/^-?[lc]+$/.test(c[1]))return c.slice(2).join(' ');return cmd(c);}
+function commandRunner(c){return Array.isArray(c)&&c.length>=2&&/^(?:bash|sh|zsh)$/.test(c[0])&&/^-?[lc]+$/.test(c[1])?c[0]+' '+c[1]:'';}
+function approvalReason(reason){if(!reason)return'';if(/ambiguous shell or wrapper/i.test(reason))return'Команда запускается через shell и требует ручной проверки';if(/matched confirm rule/i.test(reason))return'Команда совпала с правилом обязательного подтверждения';return reason;}
 function short(s,n){s=s||'';return s.length>n?s.slice(0,n)+'…':s;}
 function relTime(unix){ if(!unix)return''; const d=Math.max(0,Math.floor(Date.now()/1000-unix));
-  if(d<5)return'just now'; if(d<60)return d+'s ago'; if(d<3600)return Math.floor(d/60)+'m ago';
-  if(d<86400)return Math.floor(d/3600)+'h ago'; return Math.floor(d/86400)+'d ago'; }
+  if(d<5)return'сейчас'; if(d<60)return d+' сек назад'; if(d<3600)return Math.floor(d/60)+' мин назад';
+  if(d<86400)return Math.floor(d/3600)+' ч назад'; return Math.floor(d/86400)+' дн назад'; }
+function timeSec(obj,name='created'){return obj&&obj[name+'_unix_ms']?obj[name+'_unix_ms']/1000:(obj&&obj[name+'_unix'])||0;}
+function timeMS(obj,name='created'){return obj&&obj[name+'_unix_ms']||((obj&&obj[name+'_unix'])||0)*1000;}
+function targetName(target){return !target||target==='local'?'Этот Mac':target;}
+function duration(ms){if(!ms)return'';if(ms<1000)return ms+' мс';if(ms<60000)return(Math.round(ms/100)/10)+' сек';return(Math.round(ms/6000)/10)+' мин';}
+function initials(name){const p=String(name||'AI').replace(/[^a-zA-Zа-яА-Я0-9]+/g,' ').trim().split(/\s+/);return(p.length>1?p[0][0]+p[1][0]:String(name||'AI').slice(0,2)).toUpperCase();}
+function errorText(r,fallback){return r&&r.error?(r.error.message||r.error.code||fallback):fallback;}
+function showToast(message,kind='ok'){const el=document.getElementById('toast');el.textContent=message;el.className='visible '+kind;clearTimeout(showToast.timer);showToast.timer=setTimeout(()=>{el.className='';},4500);}
 const TERMINAL = ['exited','killed','failed','timed_out','orphaned'];
+const STATUS_LABELS={running:'Выполняется',awaiting_input:'Нужен ответ',awaiting_confirmation:'Нужно разрешение',backgrounded:'В фоне',exited:'Готово',killed:'Остановлено',failed:'Ошибка',timed_out:'Время вышло',orphaned:'Результат неизвестен'};
+function statusLabel(j){if(!j)return'Ожидание';if(j.status==='exited'&&j.exit_code!=null&&j.exit_code!==0)return'Ошибка · код '+j.exit_code;return STATUS_LABELS[j.status]||j.status||'Ожидание';}
+function statusClass(j){if(!j)return'running';if(j.status==='exited'&&j.exit_code!=null&&j.exit_code!==0)return'failed';return j.status||'running';}
+function secretPrompt(prompt){return /pass(word|phrase)|парол|секрет|secret|token|токен|private\s*key|ключ/i.test(prompt||'');}
+function binaryPrompt(prompt){return /\[[^\]]*(?:y\s*\/\s*n|yes\s*\/\s*no|д\s*\/\s*н)[^\]]*\]|\((?:y\s*\/\s*n|yes\s*\/\s*no|да\s*\/\s*нет)\)|continue\?|proceed\?|allow\?|разрешить\?|продолжить\?/i.test(prompt||'');}
 
-// ---- generic live terminal ------------------------------------------------
-const terms = {};   // key -> {term, fit, es, host, tab}
+// ---- live conversation + advanced terminal -------------------------------
+const terms = {};
 let active = null;
 
-function makeTerm(key, icon, title, grip, controlsHTML, streamPath, onInput){
+function makeTerm(config){
+  const {key,icon,title,kind,job,session,controlsHTML,streamPath,onInput,promptInput}=config;
   if(terms[key]){ focusTab(key); return terms[key]; }
+  const actor=(job&&job.owner)||(session&&session.owner)||'agent';
+  const target=targetName((job&&job.target)||(session&&session.target));
+  const command=job?displayCommand(job.command):'',runner=job?commandRunner(job.command):'';
+  const created=timeSec(job||session);
   const host=document.createElement('div'); host.className='termhost';
-  host.innerHTML=`<div class="termctl"><span class="grip">${esc(grip)}</span>${controlsHTML}</div>
-    <div class="termnotice" role="status" aria-live="polite"><span class="notice-label"></span><span class="notice-text"></span></div>
-    <div class="termel"></div>`;
+  host.innerHTML=`<div class="termctl"><div class="grip"><div class="context-route">${esc(actor)} → ${esc(target)}</div>
+      <div class="context-sub">${kind==='job'?'Запрос '+esc(short(job.job_id,12)):'Диалог '+esc(short(session.session_id,12))}${created?' · '+esc(relTime(created)):''}</div></div>
+    <div class="view-switch" aria-label="Режим просмотра"><button class="active" data-action="set-view" data-key="${esc(key)}" data-view="dialog">Диалог</button><button data-action="set-view" data-key="${esc(key)}" data-view="terminal">Терминал</button></div>
+    <span class="takeover">${controlsHTML||''}</span></div>
+    <div class="chatview"><div class="transcript" role="region" aria-label="Хронология запроса" tabindex="0">
+      <div class="turn request-turn"><div class="avatar">${esc(initials(actor))}</div><div><div class="msg-head"><b>${kind==='job'?'Запрос агента':'Сессия агента'}</b><span>${esc(actor)} → ${esc(target)}${created?' · '+esc(relTime(created)):''}</span></div>
+        <div class="message"><div class="request-text">${kind==='job'?'Выполнить '+(runner?'через '+esc(runner)+' ':'')+'на '+esc(target):'Живой вывод сессии на '+esc(target)}</div>${command?'<pre class="request-command">'+esc(command)+'</pre>':''}</div></div></div>
+      <div class="turn response-turn"><div class="avatar terminal">&gt;_</div><div><div class="msg-head"><b>Ответ терминала</b><span class="stream-state">подключение…</span></div>
+        <div class="message output-shell"><div class="output-gap">Часть раннего вывода уже недоступна</div><pre class="chat-output output-empty">Ожидание вывода…</pre>
+          ${job?`<div class="result-line"><span class="badge st-${esc(statusClass(job))}">${esc(statusLabel(job))}</span><strong class="result-detail">${job.duration_ms?esc(duration(job.duration_ms)):''}</strong><span class="result-reason">${job.reason?esc(job.reason):''}</span></div>`:'<div class="result-line"><span class="badge st-running">Сессия активна</span><span class="result-reason">Прямой поток терминала</span></div>'}</div></div></div>
+    </div></div><div class="termnotice" role="status" aria-live="assertive"><div class="prompt-box"><div class="prompt-title"><span class="notice-label"></span><span class="prompt-heading"></span></div><div class="notice-text"></div><div class="prompt-actions"></div><div class="prompt-hint"></div></div></div>
+    <div class="terminalview"><div class="termel"></div></div>`;
   document.getElementById('termwrap').appendChild(host);
 
   const term=new Terminal({convertEol:true,cursorBlink:true,fontSize:12.5,scrollback:8000,
@@ -265,70 +286,97 @@ function makeTerm(key, icon, title, grip, controlsHTML, streamPath, onInput){
   if(FitAddon){ fit=new FitAddon(); term.loadAddon(fit); }
 
   const tab=document.createElement('div'); tab.className='tab'; tab.id='tab-'+cssId(key);
-  tab.innerHTML=`<span class="ic">${esc(icon)}</span><span>${esc(title)}</span><span class="x">✕</span>`;
-  tab.onclick=()=>focusTab(key);
-  tab.querySelector('.x').onclick=(e)=>{e.stopPropagation();closeTerm(key);};
+  tab.innerHTML=`<button type="button" class="tab-open" aria-pressed="false"><span class="ic">${esc(icon)}</span><span>${esc(title)}</span></button><button type="button" class="x" aria-label="Закрыть">✕</button>`;
+  tab.querySelector('.tab-open').addEventListener('click',()=>focusTab(key));
+  tab.querySelector('.x').addEventListener('click',(e)=>{e.stopPropagation();closeTerm(key);});
   document.getElementById('tabs').appendChild(tab);
 
-  const info={term,fit,es:null,host,tab,streamPath,inputQueue:Promise.resolve(),inputFailed:false,promptText:''};
-  if(onInput) term.onData(d=>queueTermInput(info,onInput,d));
+  const info={key,kind,job,session,term,fit,es:null,host,tab,streamPath,onInput,promptInput:promptInput||onInput,view:'dialog',cursor:'',output:'',outputEl:host.querySelector('.chat-output'),inputQueue:Promise.resolve(),inputFailed:false,promptText:'',sendingPrompt:false};
+  if(onInput) term.onData(d=>{void queueTermInput(info,onInput,d,{appendNewline:false,secret:false,clearNotice:true}).catch(()=>{});});
   terms[key]=info; connectTermStream(info); focusTab(key); return info;
 }
 function setTermNotice(info,kind,message){
   if(!info||!info.host) return;
   const notice=info.host.querySelector('.termnotice');
   if(!notice) return;
-  const beforeVisible=notice.classList.contains('visible');
-  const beforeKind=notice.dataset.kind||'';
-  const beforeText=notice.querySelector('.notice-text').textContent;
   const text=message||'';
-  if(kind==='prompt'&&text) info.promptText=text;
-  else if(!text&&kind!=='error') info.promptText='';
-  notice.className='termnotice'+(text?' visible '+kind:'');
-  notice.dataset.kind=text?kind:'';
-  notice.querySelector('.notice-label').textContent=kind==='error'?'INPUT FAILED':'⌨ INPUT REQUIRED';
-  notice.querySelector('.notice-text').textContent=text;
-  if((beforeVisible!==!!text||beforeKind!==(text?kind:'')||beforeText!==text)&&info.fit){
-    setTimeout(()=>{try{info.fit.fit();}catch(_){}} ,0);
+  if(kind==='prompt'&&text){info.promptText=text;if(info.kind==='session'&&!info.promptJobID){const current=lastSessions[info.session.session_id];info.promptJobID=current&&current.current_job_id||'';}}
+  else if(!text&&kind!=='error'){info.promptText='';info.promptJobID='';}
+  const prompt=kind==='error'?info.promptText:text;
+  notice.className='termnotice'+(text?' visible '+kind:'');notice.dataset.kind=text?kind:'';
+  notice.querySelector('.notice-label').textContent=kind==='error'?'Ошибка':'Нужен ответ';
+  notice.querySelector('.prompt-heading').textContent=kind==='error'?'Ответ не отправлен':'Программа ждёт ваш ответ';
+  notice.querySelector('.notice-text').textContent=kind==='error'?text:prompt;
+  const actions=notice.querySelector('.prompt-actions'),hint=notice.querySelector('.prompt-hint');actions.innerHTML='';hint.textContent='';
+  if(text&&prompt){
+    if(binaryPrompt(prompt)){
+      actions.innerHTML=`<button class="primary" data-action="answer-prompt" data-key="${esc(info.key)}" data-answer="y">Да (Y)</button><button data-action="answer-prompt" data-key="${esc(info.key)}" data-answer="n">Нет (N)</button>`;
+      hint.textContent='Кнопки отправят программе Y или N.';
+    }else{
+      const secret=secretPrompt(prompt);info.promptSecret=secret;
+      actions.innerHTML=`<input class="prompt-input" type="${secret?'password':'text'}" data-key="${esc(info.key)}" placeholder="${secret?'Секретный ответ':'Введите ответ'}" autocomplete="off" spellcheck="false"><button class="primary" data-action="send-prompt" data-key="${esc(info.key)}">${secret?'Отправить секрет':'Отправить'}</button>`;
+      hint.textContent=secret?'Значение будет скрыто и добавлено в фильтр секретов.':'Ответ будет отправлен в ожидающую программу.';
+    }
   }
 }
-function queueTermInput(info,onInput,data){
+function queueTermInput(info,onInput,data,options={}){
   if(info.inputFailed){
     info.inputFailed=false; info.inputQueue=Promise.resolve();
     setTermNotice(info,info.promptText?'prompt':'',info.promptText);
   }
   const next=info.inputQueue.then(async()=>{
-    const result=await onInput(data);
+    const result=await onInput(data,options);
     if(result&&result.error) throw new Error(result.error.message||result.error.code||'input rejected');
-    if(/[\r\n]/.test(data)) setTermNotice(info,'','');
+    if(options.clearNotice&&/[\r\n]/.test(data)) setTermNotice(info,'','');
+    return result;
   });
   info.inputQueue=next.catch(err=>{
     info.inputFailed=true;
-    setTermNotice(info,'error','Could not send input: '+(err&&err.message?err.message:String(err)));
+    setTermNotice(info,'error','Не удалось отправить ввод: '+(err&&err.message?err.message:String(err)));
     throw err;
   });
   void info.inputQueue.catch(()=>{});
+  return next;
 }
 function connectTermStream(info){
   if(info.es){ try{info.es.close();}catch(_){ } }
-  const es=new EventSource(withToken(info.streamPath));
+  if(info.job&&info.job.status==='orphaned'){
+    appendChatOutput(info,'Вывод недоступен: daemon был перезапущен до завершения команды.');
+    info.host.querySelector('.stream-state').textContent='архив';
+    updateResult(info,info.job);
+    return;
+  }
+  let path=info.streamPath;if(info.cursor) path+=(path.includes('?')?'&':'?')+'cursor='+encodeURIComponent(info.cursor);
+  const es=new EventSource(withToken(path));
   info.es=es;
   es.onmessage=ev=>{ let m; try{m=JSON.parse(ev.data);}catch(_){return;}
-    if(m.error){ setTermNotice(info,'error','Terminal stream error: '+m.error); return; }
+    if(ev.lastEventId) info.cursor=ev.lastEventId;
+    if(m.error){ setTermNotice(info,'error','Ошибка потока: '+m.error); return; }
+    if(Object.prototype.hasOwnProperty.call(m,'job_id'))info.promptJobID=m.job_id||'';
     if(!info.inputFailed&&Object.prototype.hasOwnProperty.call(m,'awaiting_input')){
-      setTermNotice(info,m.awaiting_input?'prompt':'',m.awaiting_input?(m.prompt||'Input is required'):'');
+      setTermNotice(info,m.awaiting_input?'prompt':'',m.awaiting_input?(m.prompt||'Требуется ввод'):'');
     }
-    if(m.gap) info.term.write('\r\n\x1b[33m── output gap: earlier terminal data expired ──\x1b[0m\r\n');
-    if(m.chunk) info.term.write(m.chunk);
-    if(m.done){ setTermNotice(info,'',''); info.term.write('\r\n\x1b[2m── '+(m.status||'ended')+' ──\x1b[0m\r\n'); es.close(); } };
+    if(m.gap){info.host.querySelector('.output-gap').classList.add('visible');info.term.write('\r\n\x1b[33m── часть раннего вывода недоступна ──\x1b[0m\r\n');}
+    if(m.chunk){appendChatOutput(info,m.chunk);info.term.write(m.chunk);}
+    info.host.querySelector('.stream-state').textContent=m.done?'завершено':'в реальном времени';
+    if(m.status) updateResult(info,Object.assign({},info.job||{},{status:m.status}));
+    if(m.done){setTermNotice(info,'','');if(!info.output)appendChatOutput(info,info.kind==='session'?'Сессия закрыта.':'Команда завершилась без текстового вывода.');if(info.kind==='session')updateSessionResult(info,false);info.term.write('\r\n\x1b[2m── '+(m.status||'завершено')+' ──\x1b[0m\r\n');es.close();}
+  };
+  es.onerror=()=>{const state=info.host.querySelector('.stream-state');if(state)state.textContent='переподключение…';};
 }
+function appendChatOutput(info,chunk){const max=160000;info.output+=chunk;if(info.output.length>max)info.output='[... ранний вывод скрыт ...]\n'+info.output.slice(-max);const out=info.outputEl||info.host.querySelector('.chat-output');if(!out)return;out.classList.remove('output-empty');out.textContent=info.output;const sc=info.host.querySelector('.transcript');if(sc&&sc.scrollHeight-sc.scrollTop-sc.clientHeight<160)sc.scrollTop=sc.scrollHeight;}
+function lastMatch(root,selector){const all=root.querySelectorAll(selector);return all.length?all[all.length-1]:null;}
+function updateResult(info,job){if(!info||!job)return;info.job=Object.assign({},info.job||{},job);const line=lastMatch(info.host,'.result-line'),badge=line&&line.querySelector('.badge'),detail=line&&line.querySelector('.result-detail'),reason=line&&line.querySelector('.result-reason');if(badge){badge.className='badge st-'+statusClass(info.job);badge.textContent=statusLabel(info.job);}if(detail)detail.textContent=info.job.duration_ms?duration(info.job.duration_ms):'';if(reason)reason.textContent=info.job.reason||'';}
+function updateSessionResult(info,activeNow){const line=lastMatch(info.host,'.result-line'),badge=line&&line.querySelector('.badge'),reason=line&&line.querySelector('.result-reason');if(badge){badge.className='badge '+(activeNow?'st-running':'st-exited');badge.textContent=activeNow?'Сессия активна':'Сессия закрыта';}if(reason)reason.textContent=activeNow?'Прямой поток терминала':'Поток завершён';}
+function appendResponseTurn(info){const transcript=info.host.querySelector('.transcript'),previous=lastMatch(transcript,'.response-turn .result-line');if(previous)previous.hidden=true;const turn=document.createElement('div');turn.className='turn response-turn';turn.innerHTML='<div class="avatar terminal">&gt;_</div><div><div class="msg-head"><b>Продолжение ответа</b><span class="stream-state">в реальном времени</span></div><div class="message output-shell"><pre class="chat-output output-empty">Ожидание продолжения…</pre><div class="result-line"><span class="badge"></span><strong class="result-detail"></strong><span class="result-reason"></span></div></div></div>';transcript.appendChild(turn);info.output='';info.outputEl=turn.querySelector('.chat-output');if(info.job)updateResult(info,info.job);else updateSessionResult(info,true);}
 function cssId(k){return k.replace(/[^a-z0-9]/gi,'_');}
 function focusTab(key){
   active=key;
-  for(const k in terms){ terms[k].host.classList.toggle('active',k===key); terms[k].tab.classList.toggle('active',k===key); }
-  const t=terms[key]; if(t&&t.fit) setTimeout(()=>{try{t.fit.fit();t.term.focus();}catch(_){}} ,30);
+  for(const k in terms){const on=k===key;terms[k].host.classList.toggle('active',on);terms[k].tab.classList.toggle('active',on);terms[k].tab.querySelector('.tab-open').setAttribute('aria-pressed',String(on));}
+  const t=terms[key];if(t&&t.view==='terminal'&&t.fit)setTimeout(()=>{try{t.fit.fit();t.term.focus();}catch(_){}} ,30);
   document.getElementById('nudge').style.display=active?'none':'flex';
 }
+function setTermView(key,view){const info=terms[key];if(!info)return;info.view=view;info.host.classList.toggle('mode-terminal',view==='terminal');info.host.querySelectorAll('.view-switch button').forEach(b=>b.classList.toggle('active',b.dataset.view===view));if(view==='terminal'&&info.fit)setTimeout(()=>{try{info.fit.fit();info.term.focus();}catch(_){}} ,20);else{const log=info.host.querySelector('.transcript');if(log)log.focus();}}
 function closeTerm(key){
   const t=terms[key]; if(!t) return;
   try{t.es.close();}catch(_){}
@@ -337,30 +385,27 @@ function closeTerm(key){
     if(rest.length) focusTab(rest[0]); else document.getElementById('nudge').style.display='flex'; }
 }
 
-// session terminal: the whole shell, live; type straight into it
 function openSession(id){
-  makeTerm('sess:'+id, '▸', short(id,16), 'session '+id+'  ·  operator console (type to run/answer)',
-    '', '/api/session/stream?session_id='+encodeURIComponent(id),
-    d=>api('/api/session/write',{method:'POST',body:JSON.stringify({session_id:id,input:d,append_newline:false,human:true})}));
+  const session=lastSessions[id]||{session_id:id,target:'local',owner:'agent'};
+  makeTerm({key:'sess:'+id,icon:'▸',title:(session.owner||'agent')+' → '+targetName(session.target),kind:'session',session,controlsHTML:'',streamPath:'/api/session/stream?session_id='+encodeURIComponent(id),
+    onInput:(d,o={})=>api('/api/session/write',{method:'POST',body:JSON.stringify({session_id:id,input:d,append_newline:!!o.appendNewline,human:true,secret:!!o.secret})}),
+    promptInput:(d,o={})=>{const info=terms['sess:'+id],jobID=info&&info.promptJobID;if(!jobID)return Promise.resolve({error:{message:'Запрос уже завершён или сменился. Обновите диалог.'}});return api('/api/exec/write',{method:'POST',body:JSON.stringify({job_id:jobID,input:d,append_newline:!!o.appendNewline,human:true,secret:!!o.secret})});}});
 }
-// job terminal: one command, with takeover controls
 function openJob(job){
   const id=job.job_id;
-  const controls=`<span class="hold-tag" id="ht-${esc(id)}"></span>
-    <button id="hi-${esc(id)}" data-action="toggle-hold" data-id="${esc(id)}" data-kind="input">Block agent ⌨</button>
-    <button id="ho-${esc(id)}" data-action="toggle-hold" data-id="${esc(id)}" data-kind="output">Pause agent ⏸</button>
-    <button class="danger" data-action="kill-job" data-id="${esc(id)}">kill</button>`;
-  makeTerm('job:'+id, '●', short(cmd(job.command),20), cmd(job.command), controls,
-    '/api/exec/stream?job_id='+encodeURIComponent(id),
-    d=>api('/api/exec/write',{method:'POST',body:JSON.stringify({job_id:id,input:d,append_newline:false,human:true})}));
+  const controls=`<span class="hold-tag" id="ht-${esc(id)}"></span><button class="ghost" id="hi-${esc(id)}" data-action="toggle-hold" data-id="${esc(id)}" data-kind="input" aria-pressed="false">Блокировать ввод агента</button><button class="ghost" id="ho-${esc(id)}" data-action="toggle-hold" data-id="${esc(id)}" data-kind="output" aria-pressed="false">Пауза ответа</button><button class="danger" data-action="kill-job" data-id="${esc(id)}">Остановить</button>`;
+  makeTerm({key:'job:'+id,icon:'●',title:short(displayCommand(job.command),24),kind:'job',job,controlsHTML:controls,streamPath:'/api/exec/stream?job_id='+encodeURIComponent(id),
+    onInput:(d,o={})=>api('/api/exec/write',{method:'POST',body:JSON.stringify({job_id:id,input:d,append_newline:!!o.appendNewline,human:true,secret:!!o.secret})}),promptInput:(d,o={})=>api('/api/exec/write',{method:'POST',body:JSON.stringify({job_id:id,input:d,append_newline:!!o.appendNewline,human:true,secret:!!o.secret})})});
 }
 async function openJobById(id){ let j=lastJobs[id]; if(j) openJob(j); }
+function appendOperatorReply(info,value,secret){const transcript=info.host.querySelector('.transcript'),turn=document.createElement('div');turn.className='turn';turn.innerHTML='<div class="avatar system">ВЫ</div><div><div class="msg-head"><b>Ваш ответ</b><span>только что</span></div><div class="message"><div class="request-text"></div></div></div>';turn.querySelector('.request-text').textContent=secret?'Ответ отправлен и скрыт':(value===''?'Нажат Enter':value);transcript.appendChild(turn);appendResponseTurn(info);transcript.scrollTop=transcript.scrollHeight;}
+async function sendPromptAnswer(key,answer){const info=terms[key];if(!info||info.sendingPrompt)return;const input=info.host.querySelector('.prompt-input');if(answer==null&&!input)return;const value=answer!=null?answer:input.value,secret=answer==null&&!!info.promptSecret,send=info.promptInput||info.onInput;info.sendingPrompt=true;info.host.querySelectorAll('.prompt-actions button,.prompt-actions input').forEach(x=>x.disabled=true);try{await queueTermInput(info,send,value,{appendNewline:true,secret,clearNotice:false});appendOperatorReply(info,value,secret);info.inputFailed=false;setTermNotice(info,'','');showToast(secret?'Секретный ответ отправлен':'Ответ отправлен');}catch(err){info.inputFailed=true;setTermNotice(info,'error',err&&err.message?err.message:String(err));}finally{info.sendingPrompt=false;}}
 async function toggleHold(id,kind){
   const info=lastJobs[id]||{}; const cur=kind==='input'?info.hold_input:info.hold_output;
   const body={job_id:id}; body[kind==='input'?'hold_input':'hold_output']=!cur;
-  await api('/api/exec/hold',{method:'POST',body:JSON.stringify(body)}); refresh();
+  const r=await api('/api/exec/hold',{method:'POST',body:JSON.stringify(body)});if(r&&r.error){showToast(errorText(r,'Не удалось изменить режим'),'error');return;}refresh();
 }
-async function killJob(id){ await api('/api/exec/kill',{method:'POST',body:JSON.stringify({job_id:id})}); refresh(); }
+async function killJob(id){const r=await api('/api/exec/kill',{method:'POST',body:JSON.stringify({job_id:id})});if(r&&r.error){showToast(errorText(r,'Не удалось остановить'),'error');return;}showToast('Команда остановлена');refresh();}
 
 // ---- server management (human-only, via dashboard) ------------------------
 let srvStatus={};
@@ -407,43 +452,51 @@ async function removeServer(name){
   delete srvStatus[name]; refresh();
 }
 
-// ---- sidebar / status -----------------------------------------------------
-let lastJobs={};
+// ---- inbox tree / status --------------------------------------------------
+let lastJobs={},lastSessions={},lastPending=[];
+const approvalState={};
+function approvalWait(p){const expires=timeSec(p,'expires');if(expires){const left=Math.max(0,expires-Date.now()/1000);return left?Math.ceil(left/60)+' мин до автоотказа':'срок истёк';}return p.waiting_ms?duration(p.waiting_ms)+' ожидания':'';}
+function renderAttention(pending,jobs){
+  lastPending=pending;
+  const prompts=jobs.filter(j=>j.awaiting_input&&j.status!=='awaiting_confirmation');
+  document.getElementById('attention-count').textContent=pending.length+prompts.length;
+  const approvals=pending.map(p=>{const state=approvalState[p.confirmation_id]||{},target=targetName(p.target||(lastSessions[p.session_id]||{}).target),reason=approvalReason(p.reason||'');
+    return `<div class="approve-card" role="group" aria-label="Разрешение для ${esc(p.agent_id||'агента')}"><div class="approve-head"><b>Нужно разрешение</b><span class="approve-wait">${esc(approvalWait(p))}</span></div>
+      <div class="approve-route"><b>${esc(p.agent_id||'agent')}</b> → ${esc(target)}</div><div class="cmd mono">${esc(displayCommand(p.command))}</div>
+      ${reason||p.matched?`<div class="approve-rule">${reason?'Причина: '+esc(reason):''}${p.matched?(reason?' · ':'')+'Правило: '+esc(p.matched):''}</div>`:''}
+      <div class="row"><button class="primary" data-action="resolve" data-kind="approve" data-id="${esc(p.confirmation_id)}" ${state.busy?'disabled':''}>${state.busy?'Отправка…':'Разрешить один раз'}</button>
+      <button class="danger" data-action="resolve" data-kind="deny" data-id="${esc(p.confirmation_id)}" ${state.busy?'disabled':''}>Отклонить</button></div>${state.error?`<div class="inline-error">${esc(state.error)}</div>`:''}</div>`;
+  }).join('');
+  const promptCards=prompts.map(j=>`<div class="approve-card"><div class="approve-head"><b>Нужен ваш ответ</b><span class="approve-wait">${esc(timeSec(j)?relTime(timeSec(j)):'')}</span></div>
+    <div class="approve-route"><b>${esc(j.owner||'agent')}</b> → ${esc(targetName(j.target))}</div><div class="cmd mono">${esc(displayCommand(j.command))}</div>
+    <div class="approve-rule">${esc(j.prompt||'Программа ожидает ввод')}</div><div class="row"><button class="primary" data-action="open-job" data-id="${esc(j.job_id)}">Открыть и ответить</button></div></div>`).join('');
+  document.getElementById('approvals').innerHTML=approvals+promptCards||'<div class="empty">Сейчас от вас ничего не требуется</div>';
+}
+function renderDialogTree(sessions,jobs){
+  const groups={};
+  sessions.forEach(raw=>{const s=Object.assign({_live:true},raw);lastSessions[s.session_id]=s;groups[s.session_id]={session:s,jobs:[]};});
+  jobs.forEach(j=>{if(!j.session_id)return;let g=groups[j.session_id];if(!g){const s={session_id:j.session_id,target:j.target,owner:j.owner,created_unix:j.created_unix,created_unix_ms:j.created_unix_ms,active_jobs:0};lastSessions[s.session_id]=s;g=groups[j.session_id]={session:s,jobs:[]};}if(j.status!=='awaiting_confirmation')g.jobs.push(j);});
+  const rows=Object.values(groups).sort((a,b)=>Math.max(timeMS(b.session),...b.jobs.map(j=>timeMS(j)))-Math.max(timeMS(a.session),...a.jobs.map(j=>timeMS(j))));
+  document.getElementById('dialog-count').textContent=rows.length;
+  document.getElementById('sessions').innerHTML=rows.length?rows.map(g=>{const s=g.session,js=g.jobs.sort((a,b)=>timeMS(b)-timeMS(a)),busy=js.filter(j=>!TERMINAL.includes(j.status)).length,openAction=s._live?'open-session':'open-job',openID=s._live?s.session_id:(js[0]&&js[0].job_id)||'';
+    return `<div class="dialog-group"><button class="item session-node ${active===(s._live?'sess:':'job:')+openID?'sel':''}" data-action="${openAction}" data-id="${esc(openID)}"><span>▾</span><span class="cmd"><span class="route">${esc(s.owner||'agent')} → ${esc(targetName(s.target))}</span><br><span class="agent">${busy?busy+' активн.':'нет активных запросов'}</span></span><span class="badge ${busy?'st-running':''}">${busy?'В работе':'Диалог'}</span></button>
+      ${js.slice(0,12).map(j=>`<button class="item job-node ${active==='job:'+j.job_id?'sel':''}" data-action="open-job" data-id="${esc(j.job_id)}"><span class="job-main"><span class="job-title">${esc(displayCommand(j.command))}</span><span class="job-meta"><span>${esc(timeSec(j)?relTime(timeSec(j)):'')}</span>${j.hold_input?'<span>ввод агента заблокирован</span>':''}${j.hold_output?'<span>ответ на паузе</span>':''}</span></span><span class="badge st-${esc(statusClass(j))}">${esc(statusLabel(j))}</span></button>`).join('')}</div>`;
+  }).join(''):'<div class="empty">Активных и недавних диалогов нет</div>';
+}
 async function refresh(){
-  let s;
-  try{ s=await api('/api/status'); document.getElementById('conn').textContent='connected'; document.getElementById('dot').classList.add('live'); }
+  let s,listed;
+  try{[s,listed]=await Promise.all([api('/api/status'),api('/api/exec/list?filter=all')]);if(s.error)throw new Error(errorText(s,'status error'));document.getElementById('conn').textContent='подключено';document.getElementById('dot').classList.add('live');}
   catch(e){
-    document.getElementById('conn').textContent = gated ? 'locked' : 'offline';
+    document.getElementById('conn').textContent = gated ? 'закрыто' : 'нет связи';
     document.getElementById('dot').classList.remove('live'); return; }
   document.getElementById('ver').textContent='v'+(s.version||'?');
 
-  const jobs=s.jobs||[]; lastJobs={}; jobs.forEach(j=>lastJobs[j.job_id]=j);
-  // A command parked for approval is also in s.pending and shown as an Approval
-  // card, so it must NOT also count as an "active" job or it's counted twice.
+  const jobs=(listed&&listed.jobs)||s.jobs||[];lastJobs={};lastSessions={};jobs.forEach(j=>lastJobs[j.job_id]=j);(s.sessions||[]).forEach(x=>lastSessions[x.session_id]=x);
   const active_jobs=jobs.filter(j=>!TERMINAL.includes(j.status)&&j.status!=='awaiting_confirmation');
   document.getElementById('s-sess').textContent=(s.sessions||[]).length;
   document.getElementById('s-jobs').textContent=active_jobs.length;
-  document.getElementById('s-pend').textContent=(s.pending||[]).length;
-
-  document.getElementById('approvals').innerHTML=(s.pending||[]).map(p=>`
-    <div class="approve-card"><div style="color:var(--yellow);font-size:11px">⚠ APPROVAL NEEDED · ${esc(p.agent_id||'')}</div>
-      <div class="cmd">${esc(cmd(p.command))}</div>
-      <div class="row"><button class="on" data-action="resolve" data-kind="approve" data-id="${esc(p.confirmation_id)}">approve</button>
-      <button class="danger" data-action="resolve" data-kind="deny" data-id="${esc(p.confirmation_id)}">deny</button></div></div>`).join('');
-
-  document.getElementById('sessions').innerHTML=(s.sessions||[]).length ? (s.sessions||[]).map(x=>`
-    <div class="item ${active==='sess:'+x.session_id?'sel':''}" data-action="open-session" data-id="${esc(x.session_id)}">
-      <span class="cmd">▸ ${esc(short(x.session_id,18))}</span><span class="badge">${esc(x.owner||'—')}</span>
-      <span class="badge ${x.active_jobs?'st-running':''}">${x.active_jobs?'busy':'idle'}</span></div>`).join('') : '<div class="empty">none</div>';
-
-  // awaiting_confirmation commands are surfaced as Approval cards above; don't
-  // also list them here (and they aren't a real job terminal yet).
-  const jobList=jobs.filter(j=>j.status!=='awaiting_confirmation');
-  document.getElementById('jobs').innerHTML=jobList.length ? jobList.map(j=>`
-    <div class="item ${active==='job:'+j.job_id?'sel':''}" data-action="open-job" data-id="${esc(j.job_id)}">
-      <span class="cmd">${esc(cmd(j.command))}</span>
-      ${j.hold_input?'<span class="hold-tag">⌨</span>':''}${j.hold_output?'<span class="hold-tag">⏸</span>':''}
-      <span class="badge st-${esc(j.status)}">${esc(j.status)}</span></div>`).join('') : '<div class="empty">none</div>';
+  document.getElementById('s-pend').textContent=(s.pending||[]).length+jobs.filter(j=>j.awaiting_input&&j.status!=='awaiting_confirmation').length;
+  renderAttention(s.pending||[],jobs);renderDialogTree(s.sessions||[],jobs);
 
   document.getElementById('servers').innerHTML=(s.servers&&s.servers.length)? s.servers.map(x=>{
     const st=srvStatus[x.name]||x.status||'';
@@ -454,15 +507,15 @@ async function refresh(){
     let c={ok:'#3fb950',testing:'#d29922'}[st]||(st?'#f85149':'#8b949e');
     if(stale) c='#8b949e';
     const dot=st==='testing'?'…':'●';
-    const checked=x.checked_unix?'checked '+relTime(x.checked_unix):'not checked yet';
+    const checked=x.checked_unix?'проверено '+relTime(x.checked_unix):'ещё не проверен';
     return `<div class="item srv" title="${esc((st||'click test')+' · '+checked)}">
       <span class="srv-name"><span class="sdot" style="color:${c}">${dot}</span><b>${esc(x.name)}</b>
         <span class="muted">${esc(x.user)}@${esc(x.host)}${st?' · '+esc(st):''}${stale?' · <span style="color:var(--yellow)">stale</span>':''}</span></span>
       ${(x.tags||[]).map(t=>'<span class="badge">'+esc(t)+'</span>').join('')}
       <span style="flex:1"></span>
-      <button class="mini" data-action="test-server" data-name="${esc(x.name)}">test</button>
+      <button class="mini" data-action="test-server" data-name="${esc(x.name)}">проверить</button>
       ${x.managed?`<button class="mini" data-action="remove-server" data-name="${esc(x.name)}">✕</button>`:''}
-    </div>`; }).join('') : '<div class="empty">none yet — click <b>+ add</b></div>';
+    </div>`; }).join('') : '<div class="empty">Серверов пока нет</div>';
 
   // agents: who connected, how often, what they did
   document.getElementById('agents').innerHTML=(s.agents&&s.agents.length)? s.agents.map(a=>{
@@ -472,22 +525,21 @@ async function refresh(){
     const titleAttr=`first seen ${relTime(a.first_seen_unix)}${hist?'\nrecent:\n'+hist:''}`;
     return `<div class="item srv" title="${esc(titleAttr)}">
         <span class="srv-name agent-name"><span class="sdot" style="color:${online?'#3fb950':'#8b949e'}">●</span>${esc(a.id)}
-          <span class="muted">${online?'online':'idle · '+ago}</span></span>
-        <span class="badge">×${esc(a.connections||0)} conn</span>
-        <span class="badge">${esc(a.jobs||0)} jobs</span>
-        ${a.sessions?`<span class="badge">${esc(a.sessions)} sess</span>`:''}
-        ${a.denied?`<span class="badge st-failed">${esc(a.denied)} denied</span>`:''}
+          <span class="muted">${online?'в сети':'неактивен · '+ago}</span></span>
+        <span class="badge">${esc(a.jobs||0)} запросов</span>
+        ${a.sessions?`<span class="badge">${esc(a.sessions)} диалогов</span>`:''}
+        ${a.denied?`<span class="badge st-failed">${esc(a.denied)} отклонено</span>`:''}
       </div>${a.last_command?`<div class="amini" title="${esc(hist)}">↳ ${esc(a.last_command)} · ${a.last_command_unix?relTime(a.last_command_unix):ago}</div>`:''}`;
-  }).join('') : '<div class="empty">none connected yet</div>';
+  }).join('') : '<div class="empty">Нет подключений</div>';
 
-  for(const key in terms){ if(!key.startsWith('job:')) continue; const id=key.slice(4); const j=lastJobs[id]; if(!j) continue;
+  for(const key in terms){if(key.startsWith('sess:')){const session=lastSessions[key.slice(5)];if(session)terms[key].session=session;updateSessionResult(terms[key],!!(session&&session._live));continue;}if(!key.startsWith('job:'))continue;const id=key.slice(4);const j=lastJobs[id];if(!j)continue;
     const hi=document.getElementById('hi-'+id), ho=document.getElementById('ho-'+id), ht=document.getElementById('ht-'+id);
-    if(hi) hi.className=j.hold_input?'on':''; if(ho) ho.className=j.hold_output?'warn':'';
-    if(ht) ht.textContent=(j.hold_input?'agent input BLOCKED ':'')+(j.hold_output?'agent output PAUSED':'');
-    if(!terms[key].inputFailed) setTermNotice(terms[key],j.awaiting_input?'prompt':'',j.awaiting_input?(j.prompt||'Input is required'):''); }
+    if(hi){hi.className=j.hold_input?'on':'ghost';hi.setAttribute('aria-pressed',String(!!j.hold_input));}if(ho){ho.className=j.hold_output?'warn':'ghost';ho.setAttribute('aria-pressed',String(!!j.hold_output));}
+    if(ht)ht.textContent=(j.hold_input?'Ввод агента заблокирован ':'')+(j.hold_output?'Ответ на паузе':'');
+    updateResult(terms[key],j);if(!terms[key].inputFailed)setTermNotice(terms[key],j.awaiting_input?'prompt':'',j.awaiting_input?(j.prompt||'Требуется ввод'):''); }
 }
-async function resolve(kind,id){ await api('/api/'+kind,{method:'POST',body:JSON.stringify({confirmation_id:id,by:'dashboard'})}); refresh(); }
-async function stopAll(){ if(!confirm('Kill ALL active jobs?'))return; await api('/api/stop_all',{method:'POST'}); refresh(); }
+async function resolve(kind,id){if(!id||approvalState[id]&&approvalState[id].busy)return;approvalState[id]={busy:true,error:''};renderAttention(lastPending,Object.values(lastJobs));try{const r=await api('/api/'+kind,{method:'POST',body:JSON.stringify({confirmation_id:id,by:'dashboard'})});if(r&&r.error)throw new Error(errorText(r,'Решение не принято'));delete approvalState[id];showToast(kind==='approve'?'Команда разрешена и запускается':'Команда отклонена');await refresh();}catch(err){approvalState[id]={busy:false,error:err&&err.message?err.message:String(err)};renderAttention(lastPending,Object.values(lastJobs));showToast('Не удалось применить решение','error');}}
+async function stopAll(){if(!confirm('Остановить все активные команды?'))return;const r=await api('/api/stop_all',{method:'POST'});if(r&&r.error){showToast(errorText(r,'Не удалось остановить команды'),'error');return;}showToast('Остановлено команд: '+(r.killed||0));refresh();}
 
 // ---- policies (add / edit / delete the allow/deny/confirm rules) ----------
 let lastPolicies={};
@@ -559,23 +611,27 @@ function renderAudit(){
   let recs=auditRecs.slice();
   if(q) recs=recs.filter(r=>JSON.stringify(r).toLowerCase().includes(q));
   recs.reverse(); // newest first
-  document.getElementById('hist-meta').textContent=recs.length+(q?(' / '+auditRecs.length):'')+' records';
+  document.getElementById('hist-meta').textContent=recs.length+(q?(' / '+auditRecs.length):'')+' записей';
   const list=document.getElementById('hist-list');
   list.innerHTML = recs.length ? recs.map(r=>{
     const t=r.time?new Date(r.time).toLocaleTimeString():'';
+    const actor=r.data&&(r.data.actor||r.data.source)||r.agent_id||'—';
     let m=esc(r.message||'');
+    if(/^human_input\./.test(r.type||'')){const hidden=r.data&&r.data.secret,bytes=r.data&&r.data.byte_count;m=hidden?'Оператор подтвердил скрытый ответ':'Оператор инициировал отправку ответа';if(bytes!=null)m+=' · '+esc(bytes)+' байт';}
     if(r.data&&r.data.matched) m+=' <span class="muted">['+esc(r.data.matched)+']</span>';
     if(r.session_id) m+=' <span class="muted">·'+esc(short(r.session_id,12))+'</span>';
-    return `<div class="arow"><span class="at">${t}</span><span class="aa">${esc(r.agent_id||'—')}</span><span class="ay">${esc(r.type||'')}</span><span class="am">${m}</span></div>`;
-  }).join('') : '<div class="empty">no records yet</div>';
+    return `<div class="arow"><span class="at">${t}</span><span class="aa">${esc(actor)}</span><span class="ay">${esc(r.type||'')}</span><span class="am">${m}</span></div>`;
+  }).join('') : '<div class="empty">Записей пока нет</div>';
 }
 const feed=document.getElementById('feed');
 let feedES=null;
+const feedSeen=new Set();
 function startFeed(){
   if(feedES){ try{feedES.close();}catch(_){ } }
   const es=new EventSource(withToken('/api/events'));
   feedES=es;
   es.onmessage=ev=>{ let e; try{e=JSON.parse(ev.data);}catch(_){return;}
+    const eventKey=JSON.stringify([e.time,e.type,e.agent_id,e.session_id,e.job_id,e.message,e.data]);if(feedSeen.has(eventKey))return;feedSeen.add(eventKey);if(feedSeen.size>500)feedSeen.delete(feedSeen.values().next().value);
     const d=document.createElement('div'); d.className='e';
     const t=new Date(e.time||Date.now()).toLocaleTimeString();
     const ts=document.createElement('span'); ts.className='t'; ts.textContent=t;
@@ -607,13 +663,16 @@ document.addEventListener('click',e=>{
   case 'resolve': resolve(el.dataset.kind||'',id); break;
   case 'open-session': openSession(id); break;
   case 'open-job': openJobById(id); break;
+  case 'set-view': setTermView(el.dataset.key||'',el.dataset.view||'dialog'); break;
+  case 'answer-prompt': sendPromptAnswer(el.dataset.key||'',el.dataset.answer||''); break;
+  case 'send-prompt': sendPromptAnswer(el.dataset.key||'',null); break;
   case 'toggle-hold': toggleHold(id,el.dataset.kind||''); break;
   case 'kill-job': killJob(id); break;
   }
 });
 document.getElementById('gate-token').addEventListener('keydown',e=>{ if(e.key==='Enter') submitGate(); });
 document.getElementById('hist-filter').addEventListener('input',renderAudit);
-document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeHistory(); });
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeHistory();if(e.key==='Enter'&&e.target.classList&&e.target.classList.contains('prompt-input')){e.preventDefault();sendPromptAnswer(e.target.dataset.key||'',null);}});
 
 window.addEventListener('resize',()=>{ if(active&&terms[active]&&terms[active].fit){try{terms[active].fit.fit();}catch(_){}}});
 startFeed();

@@ -16,22 +16,23 @@ const maxEventBytes = 512 << 10
 
 // Event types.
 const (
-	EvAgentConnected    = "agent.connected"
-	EvSessionCreated    = "session.created"
-	EvSessionClosed     = "session.closed"
-	EvSessionReset      = "session.reset" // remote link dropped & reconnected; cwd/env lost
-	EvJobStartRequested = "job.start_requested"
-	EvJobStarted        = "job.started"
-	EvJobFinished       = "job.finished"
-	EvJobKilled         = "job.killed"
-	EvConfirmRequested  = "confirm.requested"
-	EvConfirmResolved   = "confirm.resolved"
-	EvPolicyDenied      = "policy.denied"
-	EvFleetStarted      = "fleet.started"
-	EvFleetFinished     = "fleet.finished"
-	EvPluginStarted     = "plugin.started"
-	EvPluginFinished    = "plugin.finished"
-	EvPersistenceError  = "persistence.error"
+	EvAgentConnected       = "agent.connected"
+	EvSessionCreated       = "session.created"
+	EvSessionClosed        = "session.closed"
+	EvSessionReset         = "session.reset" // remote link dropped & reconnected; cwd/env lost
+	EvJobStartRequested    = "job.start_requested"
+	EvJobStarted           = "job.started"
+	EvJobFinished          = "job.finished"
+	EvJobKilled            = "job.killed"
+	EvConfirmRequested     = "confirm.requested"
+	EvConfirmResolved      = "confirm.resolved"
+	EvHumanInputAuthorized = "human_input.authorized"
+	EvPolicyDenied         = "policy.denied"
+	EvFleetStarted         = "fleet.started"
+	EvFleetFinished        = "fleet.finished"
+	EvPluginStarted        = "plugin.started"
+	EvPluginFinished       = "plugin.finished"
+	EvPersistenceError     = "persistence.error"
 )
 
 // Event is a single observable action.

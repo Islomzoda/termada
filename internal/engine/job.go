@@ -215,7 +215,9 @@ type Info struct {
 	JobID          string   `json:"job_id"`
 	SessionID      string   `json:"session_id"`
 	Owner          string   `json:"owner,omitempty"`
+	Target         string   `json:"target,omitempty"`
 	Command        []string `json:"command"`
+	Mode           string   `json:"mode,omitempty"`
 	Status         Status   `json:"status"`
 	ExitCode       *int     `json:"exit_code,omitempty"`
 	Signal         string   `json:"signal,omitempty"`
@@ -226,6 +228,12 @@ type Info struct {
 	HoldInput      bool     `json:"hold_input"`
 	HoldOutput     bool     `json:"hold_output"`
 	DurationMS     int64    `json:"duration_ms"`
+	CreatedUnix    int64    `json:"created_unix,omitempty"`
+	StartedUnix    int64    `json:"started_unix,omitempty"`
+	EndedUnix      int64    `json:"ended_unix,omitempty"`
+	CreatedUnixMS  int64    `json:"created_unix_ms,omitempty"`
+	StartedUnixMS  int64    `json:"started_unix_ms,omitempty"`
+	EndedUnixMS    int64    `json:"ended_unix_ms,omitempty"`
 }
 
 func (j *Job) info() Info {
@@ -254,7 +262,9 @@ func (j *Job) infoLocked() Info {
 		JobID:          j.ID,
 		SessionID:      j.SessionID,
 		Owner:          j.sess.Owner,
+		Target:         j.sess.Target,
 		Command:        j.Command,
+		Mode:           j.Mode,
 		Status:         j.status,
 		ExitCode:       j.exitCode,
 		Signal:         j.signal,
@@ -262,9 +272,17 @@ func (j *Job) infoLocked() Info {
 		ConfirmationID: j.confirmID,
 		HoldInput:      j.holdInput,
 		HoldOutput:     j.holdOutput,
+		CreatedUnix:    unixSeconds(j.createdAt),
+		CreatedUnixMS:  unixMilliseconds(j.createdAt),
 	}
 	if !j.startedAt.IsZero() {
 		in.DurationMS = end.Sub(j.startedAt).Milliseconds()
+		in.StartedUnix = unixSeconds(j.startedAt)
+		in.StartedUnixMS = unixMilliseconds(j.startedAt)
+	}
+	if !j.endedAt.IsZero() {
+		in.EndedUnix = unixSeconds(j.endedAt)
+		in.EndedUnixMS = unixMilliseconds(j.endedAt)
 	}
 	if j.status == StatusRunning {
 		if prompt, ok := j.detectPromptLocked(); ok {
@@ -274,6 +292,20 @@ func (j *Job) infoLocked() Info {
 		}
 	}
 	return in
+}
+
+func unixSeconds(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+func unixMilliseconds(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixMilli()
 }
 
 // promptRe matches a trailing interactive prompt: a short last line ending in a

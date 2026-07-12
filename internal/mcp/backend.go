@@ -92,7 +92,10 @@ func (b *LocalBackend) CreateSession(owner, target, mode string) (engine.Session
 	if err != nil {
 		return engine.SessionInfo{}, err
 	}
-	return engine.SessionInfo{SessionID: sess.ID, Target: sess.Target, Mode: sess.Mode, Owner: sess.Owner}, nil
+	return engine.SessionInfo{
+		SessionID: sess.ID, Target: sess.Target, Mode: sess.Mode, Owner: sess.Owner,
+		CreatedUnix: sess.CreatedAt.Unix(), CreatedUnixMS: sess.CreatedAt.UnixMilli(),
+	}, nil
 }
 
 func (b *LocalBackend) ListSessions(owner string) []engine.SessionInfo {

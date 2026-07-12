@@ -32,7 +32,9 @@ const (
 )
 
 type requestPrincipal struct {
-	role principalRole
+	role   principalRole
+	actor  string
+	source string
 }
 
 type principalContextKey struct{}
@@ -40,12 +42,37 @@ type principalContextKey struct{}
 // WithOperatorPrincipal marks a request as authenticated by the transport's
 // operator credential. Request JSON and ordinary headers can never set this.
 func WithOperatorPrincipal(r *http.Request) *http.Request {
-	return r.WithContext(context.WithValue(r.Context(), principalContextKey{}, requestPrincipal{role: roleOperator}))
+	return WithOperatorPrincipalSource(r, "operator")
+}
+
+// WithOperatorPrincipalSource marks a request as an authenticated operator and
+// records the trusted transport that authenticated it. Only daemon middleware
+// calls this; request bodies and headers cannot choose the audit actor.
+func WithOperatorPrincipalSource(r *http.Request, source string) *http.Request {
+	if source == "" {
+		source = "operator"
+	}
+	p := requestPrincipal{role: roleOperator, actor: source, source: source}
+	return r.WithContext(context.WithValue(r.Context(), principalContextKey{}, p))
 }
 
 func isOperator(r *http.Request) bool {
 	p, _ := r.Context().Value(principalContextKey{}).(requestPrincipal)
 	return p.role == roleOperator
+}
+
+func operatorAttribution(r *http.Request) (actor, source string) {
+	p, _ := r.Context().Value(principalContextKey{}).(requestPrincipal)
+	if p.role != roleOperator {
+		return "", ""
+	}
+	if p.actor == "" {
+		p.actor = "operator"
+	}
+	if p.source == "" {
+		p.source = p.actor
+	}
+	return p.actor, p.source
 }
 
 // Server exposes the engine over HTTP/JSON.
@@ -729,7 +756,10 @@ func (s *Server) hSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, engine.SessionInfo{SessionID: sess.ID, Target: sess.Target, Mode: sess.Mode, Owner: sess.Owner})
+	writeJSON(w, engine.SessionInfo{
+		SessionID: sess.ID, Target: sess.Target, Mode: sess.Mode, Owner: sess.Owner,
+		CreatedUnix: sess.CreatedAt.Unix(), CreatedUnixMS: sess.CreatedAt.UnixMilli(),
+	})
 }
 
 func (s *Server) hSessionList(w http.ResponseWriter, r *http.Request) {
@@ -827,7 +857,8 @@ func (s *Server) hExecWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	human := isOperator(r)
-	if err := s.mgr.Write(owner, req.JobID, req.Input, appendNL, req.Secret, human); err != nil {
+	actor, source := operatorAttribution(r)
+	if err := s.mgr.WriteAttributed(owner, req.JobID, req.Input, appendNL, req.Secret, human, actor, source); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -866,6 +897,7 @@ func (s *Server) hSessionStream(w http.ResponseWriter, r *http.Request) {
 	}
 	lastAwaiting := false
 	lastPrompt := ""
+	lastJobID := ""
 	sentState := false
 	for {
 		select {
@@ -878,21 +910,23 @@ func (s *Server) hSessionStream(w http.ResponseWriter, r *http.Request) {
 			send("", map[string]any{"error": err.Error()})
 			return
 		}
-		stateChanged := !sentState || res.AwaitingInput != lastAwaiting || res.Prompt != lastPrompt
+		stateChanged := !sentState || res.JobID != lastJobID || res.AwaitingInput != lastAwaiting || res.Prompt != lastPrompt
 		if res.Chunk != "" || stateChanged {
 			send(res.NextCursor, map[string]any{
 				"chunk":          res.Chunk,
 				"gap":            res.Gap,
+				"job_id":         res.JobID,
 				"awaiting_input": res.AwaitingInput,
 				"prompt":         res.Prompt,
 			})
 		}
 		lastAwaiting = res.AwaitingInput
 		lastPrompt = res.Prompt
+		lastJobID = res.JobID
 		sentState = true
 		cursor = res.NextCursor
 		if res.Closed && !res.HasMore {
-			send(cursor, map[string]any{"done": true, "awaiting_input": false, "prompt": ""})
+			send(cursor, map[string]any{"done": true, "job_id": "", "awaiting_input": false, "prompt": ""})
 			return
 		}
 		time.Sleep(120 * time.Millisecond)
@@ -917,7 +951,8 @@ func (s *Server) hSessionWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	human := isOperator(r)
-	if err := s.mgr.SessionWriteInputFor(owner, req.SessionID, req.Input, appendNL, human); err != nil {
+	actor, source := operatorAttribution(r)
+	if err := s.mgr.SessionWriteAttributed(owner, req.SessionID, req.Input, appendNL, req.Secret, human, actor, source); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -1091,10 +1126,7 @@ func (s *Server) hApprove(w http.ResponseWriter, r *http.Request) {
 	if !decodeRequest(w, r, &req) {
 		return
 	}
-	by := req.By
-	if by == "" {
-		by = "dashboard"
-	}
+	by, _ := operatorAttribution(r)
 	if err := s.mgr.Approve(req.ConfirmID, by); err != nil {
 		writeErr(w, err)
 		return
@@ -1110,10 +1142,7 @@ func (s *Server) hDeny(w http.ResponseWriter, r *http.Request) {
 	if !decodeRequest(w, r, &req) {
 		return
 	}
-	by := req.By
-	if by == "" {
-		by = "dashboard"
-	}
+	by, _ := operatorAttribution(r)
 	if err := s.mgr.Deny(req.ConfirmID, by); err != nil {
 		writeErr(w, err)
 		return

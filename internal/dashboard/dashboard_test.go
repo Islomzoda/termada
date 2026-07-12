@@ -89,3 +89,122 @@ func TestHandlerSecurityHeadersApplyToStaticAssets(t *testing.T) {
 		t.Fatalf("X-Frame-Options = %q", got)
 	}
 }
+
+func TestDashboardContainsDialogTreeAndTerminalFallback(t *testing.T) {
+	body := dashboardBody(t)
+	for _, required := range []string{
+		`function renderDialogTree(`,
+		`class="dialog-group"`,
+		`class="route"`,
+		`/api/exec/list?filter=all`,
+		`role="region" aria-label="Хронология запроса"`,
+		`aria-live="polite"`,
+		`data-view="dialog">Диалог`,
+		`data-view="terminal">Терминал`,
+		`function setTermView(`,
+	} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("dashboard is missing dialog/tree primitive %q", required)
+		}
+	}
+}
+
+func TestDashboardApprovalActionsAreExplicitAndRecoverable(t *testing.T) {
+	body := dashboardBody(t)
+	for _, required := range []string{
+		`const approvalState={}`,
+		`data-kind="approve"`,
+		`Разрешить один раз`,
+		`data-kind="deny"`,
+		`>Отклонить</button>`,
+		`state.busy?'disabled'`,
+		`approvalState[id]&&approvalState[id].busy`,
+		`state.error?`,
+		`approvalState[id]={busy:false,error:`,
+		`if(r&&r.error)throw new Error(errorText(r,`,
+	} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("dashboard is missing approval safety primitive %q", required)
+		}
+	}
+}
+
+func TestDashboardPromptAnswersAndChatOutputStaySafeAndBounded(t *testing.T) {
+	body := dashboardBody(t)
+	for _, required := range []string{
+		`function binaryPrompt(`,
+		`data-action="answer-prompt"`,
+		`data-answer="y"`,
+		`data-answer="n"`,
+		`function secretPrompt(`,
+		`type="${secret?'password':'text'}"`,
+		`secret=answer==null&&!!info.promptSecret`,
+		`send=info.promptInput||info.onInput`,
+		`queueTermInput(info,send,value,{appendNewline:true,secret`,
+		`secret:!!o.secret`,
+		`secret?'Ответ отправлен и скрыт'`,
+		`appendResponseTurn(info)`,
+		`function appendChatOutput(`,
+		`const max=160000`,
+		`info.output.slice(-max)`,
+		`out.textContent=info.output`,
+	} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("dashboard is missing prompt/output safety primitive %q", required)
+		}
+	}
+}
+
+func TestDashboardReconnectsFromCursorAndSurfacesAPIErrors(t *testing.T) {
+	body := dashboardBody(t)
+	for _, required := range []string{
+		`cursor:''`,
+		`if(info.cursor)`,
+		`encodeURIComponent(info.cursor)`,
+		`if(ev.lastEventId) info.cursor=ev.lastEventId`,
+		`es.onerror=`,
+		`if(!r.ok&&!data.error)`,
+		`data.error={code:'http_'+r.status`,
+		`function errorText(`,
+		`class="inline-error"`,
+		`role="status" aria-live="polite"`,
+	} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("dashboard is missing reconnect/error primitive %q", required)
+		}
+	}
+}
+
+func TestDashboardPromptUsesOneSafeQueueInBothViews(t *testing.T) {
+	body := dashboardBody(t)
+	for _, required := range []string{
+		`promptInput:(d,o={})=>`,
+		`hasOwnProperty.call(m,'job_id')`,
+		`info.promptJobID=m.job_id||''`,
+		`job_id:jobID`,
+		`queueTermInput(info,send,value,`,
+		`return next;`,
+		`appendNewline:true`,
+		`value===''?'Нажат Enter'`,
+	} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("dashboard is missing ordered prompt primitive %q", required)
+		}
+	}
+	if strings.Contains(body, `.termhost.mode-terminal .termnotice{display:none}`) {
+		t.Fatal("terminal mode hides the interactive prompt")
+	}
+	if strings.Contains(body, `if(!value)return`) {
+		t.Fatal("dashboard refuses an empty Enter response")
+	}
+}
+
+func dashboardBody(t *testing.T) string {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("dashboard status = %d, want 200", rr.Code)
+	}
+	return rr.Body.String()
+}

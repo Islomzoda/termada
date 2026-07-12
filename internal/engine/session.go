@@ -546,6 +546,7 @@ func (s *Session) streamSnapshot(offset int64, limit int) SessionStreamResult {
 		HasMore:    hasMore,
 	}
 	if s.current != nil {
+		res.JobID = s.current.ID
 		info := s.current.info()
 		res.AwaitingInput = info.AwaitingInput
 		res.Prompt = info.Prompt

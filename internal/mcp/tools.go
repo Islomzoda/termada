@@ -206,17 +206,18 @@ func (s *Server) registerTools() {
 
 	s.add(toolDef{
 		Name:        "session_create",
-		Description: "Create a named persistent-shell session that preserves cwd/env between commands. Optional — if you just want persistence you can skip this and let exec_run use your per-agent default session. Create one explicitly when you want a SECOND independent shell (e.g. a separate cwd/venv) or a remote one: target=local (default) or a configured server name for a persistent remote SSH session. Session creation is capped at 32 sessions per owner and 128 total; exceeding either limit returns parallelism_exceeded.",
+		Description: "Create a named persistent-shell session that preserves cwd/env between commands. Optional — if you just want persistence you can skip this and let exec_run use your per-agent default session. Create one explicitly when you want a SECOND independent shell (e.g. a separate cwd/venv) or a remote one: target=local (default) or a configured server name for a persistent remote SSH session. Set workspace to a short project/task label so the operator dashboard keeps parallel work distinct. Session creation is capped at 32 sessions per owner and 128 total; exceeding either limit returns parallelism_exceeded.",
 		InputSchema: obj(map[string]any{
-			"target": map[string]any{"type": "string", "description": "\"local\" (default) or a configured server name for a remote SSH session"},
-			"mode":   map[string]any{"type": "string", "enum": []string{"shell"}},
+			"target":    map[string]any{"type": "string", "description": "\"local\" (default) or a configured server name for a remote SSH session"},
+			"mode":      map[string]any{"type": "string", "enum": []string{"shell"}},
+			"workspace": map[string]any{"type": "string", "description": "optional project or task label shown in the operator dashboard"},
 		}),
 		Handler: func(a map[string]any) (any, *errs.Error) {
-			sess, err := mgr.CreateSession(s.agentID, argString(a, "target"), argString(a, "mode"))
+			sess, err := mgr.CreateSession(s.agentID, argString(a, "target"), argString(a, "mode"), argString(a, "workspace"))
 			if err != nil {
 				return nil, asErr(err)
 			}
-			return map[string]any{"session_id": sess.SessionID, "target": sess.Target, "mode": sess.Mode, "owner": sess.Owner}, nil
+			return map[string]any{"session_id": sess.SessionID, "target": sess.Target, "mode": sess.Mode, "owner": sess.Owner, "workspace": sess.Workspace}, nil
 		},
 	})
 

@@ -37,6 +37,7 @@ const (
 
 // Event is a single observable action.
 type Event struct {
+	Sequence  uint64         `json:"sequence,omitempty"`
 	Time      time.Time      `json:"time"`
 	Type      string         `json:"type"`
 	AgentID   string         `json:"agent_id,omitempty"`
@@ -54,6 +55,7 @@ type Bus struct {
 	publishMu sync.Mutex
 	mu        sync.Mutex
 	nextID    int
+	nextSeq   uint64
 	subs      map[int]chan Event
 	reliable  map[int]func(Event) error
 	// ring keeps the most recent events for late subscribers / the activity feed.
@@ -81,6 +83,10 @@ func (b *Bus) Publish(e Event) error {
 	if e.Time.IsZero() {
 		e.Time = time.Now()
 	}
+	b.publishMu.Lock()
+	defer b.publishMu.Unlock()
+	b.nextSeq++
+	e.Sequence = b.nextSeq
 	encoded, err := json.Marshal(e)
 	if err != nil {
 		return fmt.Errorf("encode event: %w", err)
@@ -88,9 +94,6 @@ func (b *Bus) Publish(e Event) error {
 	if len(encoded) > maxEventBytes {
 		return fmt.Errorf("event is %d bytes, exceeds %d byte limit", len(encoded), maxEventBytes)
 	}
-	b.publishMu.Lock()
-	defer b.publishMu.Unlock()
-
 	b.mu.Lock()
 	reliable := make([]func(Event) error, 0, len(b.reliable))
 	for _, sink := range b.reliable {
@@ -127,6 +130,13 @@ func (b *Bus) Publish(e Event) error {
 	}
 	b.mu.Unlock()
 	return deliveryErr
+}
+
+// Sequence returns the latest published event sequence.
+func (b *Bus) Sequence() uint64 {
+	b.publishMu.Lock()
+	defer b.publishMu.Unlock()
+	return b.nextSeq
 }
 
 // Subscribe returns a channel of future events and a cancel function. The
@@ -189,4 +199,28 @@ func (b *Bus) Recent(n int) []Event {
 	out := make([]Event, n)
 	copy(out, b.ring[len(b.ring)-n:])
 	return out
+}
+
+// RecentAfter returns retained events newer than sequence. gap is true when
+// the requested cursor predates the retained ring and a full state refresh is
+// required before applying deltas.
+func (b *Bus) RecentAfter(sequence uint64, limit int) (events []Event, gap bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.ring) == 0 {
+		return nil, false
+	}
+	if sequence > 0 && sequence+1 < b.ring[0].Sequence {
+		gap = true
+	}
+	for _, event := range b.ring {
+		if event.Sequence > sequence {
+			events = append(events, event)
+		}
+	}
+	if limit > 0 && len(events) > limit {
+		events = events[len(events)-limit:]
+		gap = true
+	}
+	return events, gap
 }

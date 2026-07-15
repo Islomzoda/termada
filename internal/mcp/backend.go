@@ -19,7 +19,7 @@ type Backend interface {
 	Signal(owner, jobID, signal string) error
 	Kill(owner, jobID string) error
 	ListJobs(owner, filter string) []engine.Info
-	CreateSession(owner, target, mode string) (engine.SessionInfo, error)
+	CreateSession(owner, target, mode, workspace string) (engine.SessionInfo, error)
 	ListSessions(owner string) []engine.SessionInfo
 	CloseSession(owner, id string) error
 	Tail(owner, jobID, cursor string) (*engine.TailResult, error)
@@ -80,7 +80,7 @@ func (b *LocalBackend) ListJobs(owner, filter string) []engine.Info {
 	return b.m.ListJobs(owner, filter)
 }
 
-func (b *LocalBackend) CreateSession(owner, target, mode string) (engine.SessionInfo, error) {
+func (b *LocalBackend) CreateSession(owner, target, mode, workspace string) (engine.SessionInfo, error) {
 	// Remote sessions need the daemon (server inventory + vault). Reject them
 	// loudly here instead of letting the agent fall through to a silent local
 	// default session and run remote-intended commands on this host.
@@ -88,12 +88,12 @@ func (b *LocalBackend) CreateSession(owner, target, mode string) (engine.Session
 		return engine.SessionInfo{}, errs.New(errs.NotSupported,
 			"remote session to %q requires the termada daemon (none running); start it with `termada serve`. In-process mode supports target=local only", target)
 	}
-	sess, err := b.m.CreateSession(owner, target, mode)
+	sess, err := b.m.CreateSessionWithWorkspace(owner, target, mode, workspace)
 	if err != nil {
 		return engine.SessionInfo{}, err
 	}
 	return engine.SessionInfo{
-		SessionID: sess.ID, Target: sess.Target, Mode: sess.Mode, Owner: sess.Owner,
+		SessionID: sess.ID, Target: sess.Target, Mode: sess.Mode, Owner: sess.Owner, Workspace: sess.Workspace,
 		CreatedUnix: sess.CreatedAt.Unix(), CreatedUnixMS: sess.CreatedAt.UnixMilli(),
 	}, nil
 }

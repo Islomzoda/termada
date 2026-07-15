@@ -51,6 +51,7 @@ type Session struct {
 	Target    string
 	Mode      string
 	Owner     string
+	Workspace string
 	CreatedAt time.Time
 
 	cfg      SessionConfig
@@ -532,6 +533,18 @@ func (s *Session) currentJob() *Job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.current
+}
+
+// setCurrentHold changes intervention flags only while job is the live
+// foreground command. Holding s.mu keeps the current-job check atomic with the
+// reader's completion transition.
+func (s *Session) setCurrentHold(job *Job, input, output *bool) (changed, allowed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.current != job {
+		return false, false
+	}
+	return job.setHold(input, output)
 }
 
 func (s *Session) streamSnapshot(offset int64, limit int) SessionStreamResult {

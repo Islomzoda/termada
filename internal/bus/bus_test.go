@@ -78,3 +78,26 @@ func TestReliableSubscriberNeverDropsAndSurfacesErrors(t *testing.T) {
 		t.Fatalf("delivery after cancel: got %d calls, want 20", got)
 	}
 }
+
+func TestSequencesSupportCursorReplayAndGapDetection(t *testing.T) {
+	b := New(2)
+	for i := 0; i < 4; i++ {
+		if err := b.Publish(Event{Type: EvJobStarted}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := b.Sequence(); got != 4 {
+		t.Fatalf("sequence = %d, want 4", got)
+	}
+	recent := b.Recent(2)
+	if recent[0].Sequence != 3 || recent[1].Sequence != 4 {
+		t.Fatalf("recent sequences = %v, want 3,4", []uint64{recent[0].Sequence, recent[1].Sequence})
+	}
+	after, gap := b.RecentAfter(3, 10)
+	if gap || len(after) != 1 || after[0].Sequence != 4 {
+		t.Fatalf("replay after 3 = %+v gap=%v", after, gap)
+	}
+	if _, gap := b.RecentAfter(1, 10); !gap {
+		t.Fatal("cursor older than retained ring did not report a gap")
+	}
+}

@@ -40,9 +40,10 @@ type Job struct {
 	promptEpoch   uint64
 	promptPrefix  string
 
-	clean    *output.Buffer // cleaned-for-agent (cursor indexes this)
-	cleaner  *output.Cleaner
-	redactor *output.Redactor
+	clean              *output.Buffer // cleaned-for-agent (cursor indexes this)
+	cleaner            *output.Cleaner
+	redactor           *output.Redactor
+	secretReservations []*output.LiteralReservation
 
 	done chan struct{}
 }
@@ -96,15 +97,21 @@ func (j *Job) setConfirmID(id string) {
 
 // setHold updates the human-intervention flags. A nil pointer leaves that flag
 // unchanged.
-func (j *Job) setHold(input, output *bool) {
+func (j *Job) setHold(input, output *bool) (changed, allowed bool) {
 	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.status.Terminal() || j.status == StatusAwaitingConfirmation {
+		return false, false
+	}
 	if input != nil {
+		changed = changed || j.holdInput != *input
 		j.holdInput = *input
 	}
 	if output != nil {
+		changed = changed || j.holdOutput != *output
 		j.holdOutput = *output
 	}
-	j.mu.Unlock()
+	return changed, true
 }
 
 func (j *Job) holds() (input, output bool) {
@@ -166,6 +173,22 @@ func (j *Job) recordInput(at time.Time, promptPrefix string, promptEpoch uint64,
 	j.mu.Unlock()
 }
 
+// retainSecret keeps a delivered secret registered until final output has been
+// redacted. It returns false when the job already reached a terminal state, in
+// which case the caller must roll the reservation back immediately.
+func (j *Job) retainSecret(reservation *output.LiteralReservation) bool {
+	if reservation == nil {
+		return false
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.status.Terminal() {
+		return false
+	}
+	j.secretReservations = append(j.secretReservations, reservation)
+	return true
+}
+
 // finalize moves the job to a terminal state. killStatus, when non-empty,
 // overrides the terminal status (e.g. "killed", "timed_out"); reason is an
 // optional human-readable explanation.
@@ -193,6 +216,10 @@ func (j *Job) finalize(exitCode int, killStatus Status, reason string) {
 	if reason != "" {
 		j.reason = reason
 	}
+	for _, reservation := range j.secretReservations {
+		reservation.Rollback()
+	}
+	j.secretReservations = nil
 	j.clean.Close()
 	close(j.done)
 	j.mu.Unlock()
@@ -212,28 +239,30 @@ func (j *Job) Done() <-chan struct{} { return j.done }
 
 // Info is the JSON-facing snapshot of a job.
 type Info struct {
-	JobID          string   `json:"job_id"`
-	SessionID      string   `json:"session_id"`
-	Owner          string   `json:"owner,omitempty"`
-	Target         string   `json:"target,omitempty"`
-	Command        []string `json:"command"`
-	Mode           string   `json:"mode,omitempty"`
-	Status         Status   `json:"status"`
-	ExitCode       *int     `json:"exit_code,omitempty"`
-	Signal         string   `json:"signal,omitempty"`
-	Reason         string   `json:"reason,omitempty"`
-	ConfirmationID string   `json:"confirmation_id,omitempty"`
-	AwaitingInput  bool     `json:"awaiting_input"`
-	Prompt         string   `json:"prompt,omitempty"`
-	HoldInput      bool     `json:"hold_input"`
-	HoldOutput     bool     `json:"hold_output"`
-	DurationMS     int64    `json:"duration_ms"`
-	CreatedUnix    int64    `json:"created_unix,omitempty"`
-	StartedUnix    int64    `json:"started_unix,omitempty"`
-	EndedUnix      int64    `json:"ended_unix,omitempty"`
-	CreatedUnixMS  int64    `json:"created_unix_ms,omitempty"`
-	StartedUnixMS  int64    `json:"started_unix_ms,omitempty"`
-	EndedUnixMS    int64    `json:"ended_unix_ms,omitempty"`
+	JobID           string   `json:"job_id"`
+	SessionID       string   `json:"session_id"`
+	Owner           string   `json:"owner,omitempty"`
+	Target          string   `json:"target,omitempty"`
+	Workspace       string   `json:"workspace,omitempty"`
+	Command         []string `json:"command"`
+	Mode            string   `json:"mode,omitempty"`
+	Status          Status   `json:"status"`
+	ExitCode        *int     `json:"exit_code,omitempty"`
+	Signal          string   `json:"signal,omitempty"`
+	Reason          string   `json:"reason,omitempty"`
+	ConfirmationID  string   `json:"confirmation_id,omitempty"`
+	AwaitingInput   bool     `json:"awaiting_input"`
+	Prompt          string   `json:"prompt,omitempty"`
+	HoldInput       bool     `json:"hold_input"`
+	HoldOutput      bool     `json:"hold_output"`
+	DurationMS      int64    `json:"duration_ms"`
+	CreatedUnix     int64    `json:"created_unix,omitempty"`
+	StartedUnix     int64    `json:"started_unix,omitempty"`
+	EndedUnix       int64    `json:"ended_unix,omitempty"`
+	CreatedUnixMS   int64    `json:"created_unix_ms,omitempty"`
+	StartedUnixMS   int64    `json:"started_unix_ms,omitempty"`
+	EndedUnixMS     int64    `json:"ended_unix_ms,omitempty"`
+	StreamAvailable bool     `json:"stream_available"`
 }
 
 func (j *Job) info() Info {
@@ -259,21 +288,23 @@ func (j *Job) infoLocked() Info {
 		end = time.Now()
 	}
 	in := Info{
-		JobID:          j.ID,
-		SessionID:      j.SessionID,
-		Owner:          j.sess.Owner,
-		Target:         j.sess.Target,
-		Command:        j.Command,
-		Mode:           j.Mode,
-		Status:         j.status,
-		ExitCode:       j.exitCode,
-		Signal:         j.signal,
-		Reason:         j.reason,
-		ConfirmationID: j.confirmID,
-		HoldInput:      j.holdInput,
-		HoldOutput:     j.holdOutput,
-		CreatedUnix:    unixSeconds(j.createdAt),
-		CreatedUnixMS:  unixMilliseconds(j.createdAt),
+		JobID:           j.ID,
+		SessionID:       j.SessionID,
+		Owner:           j.sess.Owner,
+		Target:          j.sess.Target,
+		Workspace:       j.sess.Workspace,
+		Command:         j.Command,
+		Mode:            j.Mode,
+		Status:          j.status,
+		ExitCode:        j.exitCode,
+		Signal:          j.signal,
+		Reason:          j.reason,
+		ConfirmationID:  j.confirmID,
+		HoldInput:       j.holdInput,
+		HoldOutput:      j.holdOutput,
+		CreatedUnix:     unixSeconds(j.createdAt),
+		CreatedUnixMS:   unixMilliseconds(j.createdAt),
+		StreamAvailable: true,
 	}
 	if !j.startedAt.IsZero() {
 		in.DurationMS = end.Sub(j.startedAt).Milliseconds()

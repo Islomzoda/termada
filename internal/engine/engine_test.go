@@ -142,6 +142,82 @@ func TestExecWriteAnswersPrompt(t *testing.T) {
 	}
 }
 
+func TestSuccessfulJobSecretIsReleasedAfterDone(t *testing.T) {
+	m := newTestManager(t)
+	job, err := m.Start("agent", "", []string{"bash", "-c", "printf 'Value: '; read -r value; printf 'seen=%s\\n' \"$value\"; sleep 1"}, ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
+
+	const secret = "job-lifetime-secret-value"
+	if err := m.Write("agent", job.ID, secret, true, true, false); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	if got := m.Redactor().Redact(secret); got == secret {
+		t.Fatal("successful job secret was released while job was still running")
+	}
+	select {
+	case <-job.Done():
+		t.Fatal("job completed before running-lifetime assertion")
+	default:
+	}
+
+	deadline = time.Now().Add(3 * time.Second)
+	var runningOutput string
+	for time.Now().Before(deadline) {
+		res := poll(t, m, job.ID)
+		runningOutput = res.StdoutChunk
+		if strings.Contains(runningOutput, "REDACTED") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if strings.Contains(runningOutput, secret) || !strings.Contains(runningOutput, "REDACTED") {
+		t.Fatalf("running job output was not redacted: %q", runningOutput)
+	}
+
+	waitDone(t, job, 5*time.Second)
+	if got := m.Redactor().Redact(secret); got != secret {
+		t.Fatalf("completed job retained secret literal: %q", got)
+	}
+	if finalOutput := poll(t, m, job.ID).StdoutChunk; strings.Contains(finalOutput, secret) {
+		t.Fatalf("completed job output leaked released secret: %q", finalOutput)
+	}
+}
+
+func TestSuccessfulJobSecretDoesNotRemoveExistingPinnedLiteral(t *testing.T) {
+	m := newTestManager(t)
+	const secret = "existing-pinned-job-secret"
+	if err := m.Redactor().AddLiteral(secret); err != nil {
+		t.Fatalf("pin secret: %v", err)
+	}
+	job, err := m.Start("agent", "", []string{"bash", "-c", "printf 'Value: '; read -r value"}, ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
+	if err := m.Write("agent", job.ID, secret, true, true, false); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	waitDone(t, job, 5*time.Second)
+	if got := m.Redactor().Redact(secret); got == secret {
+		t.Fatal("job completion removed a literal pinned by AddLiteral")
+	}
+}
+
 func TestPromptMetadataIsRedacted(t *testing.T) {
 	m := newTestManager(t)
 	const secret = "prompt-secret"

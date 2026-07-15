@@ -16,10 +16,22 @@ import (
 type Redactor struct {
 	patterns []*regexp.Regexp
 
-	mu           sync.RWMutex
-	literals     []string // exact secrets, longest first to avoid partial masking
-	literalSet   map[string]struct{}
-	literalBytes int
+	mu                  sync.RWMutex
+	literals            []string // exact secrets, longest first to avoid partial masking
+	literalSet          map[string]struct{}
+	literalPinned       map[string]bool
+	literalReservations map[string]int
+	literalBytes        int
+}
+
+// LiteralReservation keeps an exact secret active until the caller knows
+// whether the operation that could expose it was delivered. A reservation is
+// resolved exactly once: Commit pins the literal permanently, while Rollback
+// removes it only when no pinned or concurrent reservation still needs it.
+type LiteralReservation struct {
+	redactor *Redactor
+	secret   string
+	once     sync.Once
 }
 
 const mask = "«REDACTED»"
@@ -56,7 +68,11 @@ var builtinPatterns = []string{
 // NewRedactor builds a redactor from the builtin patterns plus any extra
 // caller-supplied regex patterns. Invalid extra patterns are skipped.
 func NewRedactor(extra []string) *Redactor {
-	r := &Redactor{literalSet: make(map[string]struct{})}
+	r := &Redactor{
+		literalSet:          make(map[string]struct{}),
+		literalPinned:       make(map[string]bool),
+		literalReservations: make(map[string]int),
+	}
 	all := append(append([]string{}, builtinPatterns...), extra...)
 	for _, p := range all {
 		if re, err := regexp.Compile(p); err == nil {
@@ -76,8 +92,61 @@ func (r *Redactor) AddLiteral(secret string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.literalSet[secret]; ok {
+		r.literalPinned[secret] = true
 		return nil
 	}
+	if err := r.addLiteralLocked(secret); err != nil {
+		return err
+	}
+	r.literalPinned[secret] = true
+	return nil
+}
+
+// ReserveLiteral registers secret for redaction until the returned reservation
+// is committed or rolled back. The caller must resolve every non-nil
+// reservation. Concurrent reservations for the same value share one literal
+// entry without allowing one rollback to remove another operation's guard.
+func (r *Redactor) ReserveLiteral(secret string) (*LiteralReservation, error) {
+	if secret == "" {
+		return nil, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.literalSet[secret]; !ok {
+		if err := r.addLiteralLocked(secret); err != nil {
+			return nil, err
+		}
+	}
+	r.literalReservations[secret]++
+	return &LiteralReservation{redactor: r, secret: secret}, nil
+}
+
+// Commit pins the reserved literal after successful delivery. It is safe to
+// call Commit or Rollback more than once; only the first call has an effect.
+func (r *LiteralReservation) Commit() {
+	r.resolve(true)
+}
+
+// Rollback releases a reservation after failed delivery. A literal remains
+// active when it was already pinned or another reservation still references it.
+func (r *LiteralReservation) Rollback() {
+	r.resolve(false)
+}
+
+func (r *LiteralReservation) resolve(commit bool) {
+	if r == nil {
+		return
+	}
+	r.once.Do(func() {
+		if r.redactor != nil {
+			r.redactor.resolveLiteralReservation(r.secret, commit)
+		}
+		r.redactor = nil
+		r.secret = ""
+	})
+}
+
+func (r *Redactor) addLiteralLocked(secret string) error {
 	if len(r.literals) >= maxLiteralCount || len(secret) > maxLiteralBytes-r.literalBytes {
 		return ErrLiteralCapacity
 	}
@@ -90,6 +159,37 @@ func (r *Redactor) AddLiteral(secret string) error {
 		return len(r.literals[i]) > len(r.literals[j])
 	})
 	return nil
+}
+
+func (r *Redactor) resolveLiteralReservation(secret string, commit bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reservations := r.literalReservations[secret]
+	if reservations <= 0 {
+		return
+	}
+	if commit {
+		r.literalPinned[secret] = true
+	}
+	if reservations > 1 {
+		r.literalReservations[secret] = reservations - 1
+		return
+	}
+	delete(r.literalReservations, secret)
+	if r.literalPinned[secret] {
+		return
+	}
+	delete(r.literalSet, secret)
+	delete(r.literalPinned, secret)
+	r.literalBytes -= len(secret)
+	for i, literal := range r.literals {
+		if literal == secret {
+			copy(r.literals[i:], r.literals[i+1:])
+			r.literals[len(r.literals)-1] = ""
+			r.literals = r.literals[:len(r.literals)-1]
+			break
+		}
+	}
 }
 
 // Redact returns s with all matched secrets replaced by the mask.

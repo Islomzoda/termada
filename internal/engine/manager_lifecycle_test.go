@@ -29,6 +29,18 @@ type lifecycleShell struct {
 	closeCount   atomic.Int32
 }
 
+type failingWriteShell struct {
+	*lifecycleShell
+	failWrites atomic.Bool
+}
+
+func (s *failingWriteShell) Write(p []byte) (int, error) {
+	if s.failWrites.Load() {
+		return 0, io.ErrClosedPipe
+	}
+	return s.lifecycleShell.Write(p)
+}
+
 func newLifecycleShell(blockAfter int) *lifecycleShell {
 	return &lifecycleShell{
 		responses:    make(chan []byte, 4),
@@ -94,6 +106,40 @@ func (s *lifecycleShell) Close() error {
 func (s *lifecycleShell) Signal(string) error { return nil }
 
 func (s *lifecycleShell) triggerEOF() { s.eofOnce.Do(func() { close(s.eof) }) }
+
+func TestSessionSecretWriteFailureRollsBackAndIdleSuccessPinsLiteral(t *testing.T) {
+	m := NewManager(DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	shell := &failingWriteShell{lifecycleShell: newLifecycleShell(0)}
+	m.SetRemoteDialer(func(string, int, int) (ShellConn, error) { return shell, nil })
+	session, err := m.CreateSession("agent", "remote", "shell")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	const secret = "transactional-rollback-literal"
+	shell.failWrites.Store(true)
+	if err := m.SessionWriteAttributed("agent", session.ID, secret, true, true, true, "operator", "test"); err == nil {
+		t.Fatal("secret write succeeded despite forced PTY failure")
+	}
+	if got := m.Redactor().Redact(secret); got != secret {
+		t.Fatalf("failed PTY write retained secret literal: %q", got)
+	}
+
+	shell.failWrites.Store(false)
+	if err := m.SessionWriteAttributed("agent", session.ID, secret, true, true, true, "operator", "test"); err != nil {
+		t.Fatalf("retry secret write: %v", err)
+	}
+	if got := m.Redactor().Redact(secret); got == secret {
+		t.Fatal("successful PTY write did not commit secret literal")
+	}
+	if err := m.CloseSession("agent", session.ID); err != nil {
+		t.Fatalf("close idle session: %v", err)
+	}
+	if got := m.Redactor().Redact(secret); got == secret {
+		t.Fatal("idle session secret was released without a job completion boundary")
+	}
+}
 
 func TestCreateSessionClosesLateResourceAfterShutdown(t *testing.T) {
 	m := NewManager(DefaultConfig())

@@ -184,6 +184,129 @@ func TestRedactorLiteralsAreDeduplicatedBoundedAndLongestFirst(t *testing.T) {
 	}
 }
 
+func TestRedactorLiteralReservationRollbackReleasesCapacity(t *testing.T) {
+	r := NewRedactor(nil)
+	const secret = "transient-reserved-secret"
+	reservation, err := r.ReserveLiteral(secret)
+	if err != nil {
+		t.Fatalf("reserve literal: %v", err)
+	}
+	if got, want := r.Redact(secret), redactionMask(secret); got != want {
+		t.Fatalf("reserved literal redaction = %q, want %q", got, want)
+	}
+	reservation.Rollback()
+	reservation.Rollback()
+	if got := r.Redact(secret); got != secret {
+		t.Fatalf("rolled-back literal remains active: %q", got)
+	}
+	if len(r.literals) != 0 || r.literalBytes != 0 {
+		t.Fatalf("rollback retained literals=%d bytes=%d", len(r.literals), r.literalBytes)
+	}
+
+	capacityReservation, err := r.ReserveLiteral(strings.Repeat("x", maxLiteralBytes))
+	if err != nil {
+		t.Fatalf("reserve capacity literal: %v", err)
+	}
+	if _, err := r.ReserveLiteral("next-secret"); !errors.Is(err, ErrLiteralCapacity) {
+		t.Fatalf("reserve beyond capacity error = %v, want %v", err, ErrLiteralCapacity)
+	}
+	capacityReservation.Rollback()
+	next, err := r.ReserveLiteral("next-secret")
+	if err != nil {
+		t.Fatalf("reserve after rollback: %v", err)
+	}
+	next.Rollback()
+}
+
+func TestRedactorLiteralReservationDoesNotRemoveSharedOrPinnedLiteral(t *testing.T) {
+	r := NewRedactor(nil)
+	const shared = "shared-reserved-secret"
+	first, err := r.ReserveLiteral(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := r.ReserveLiteral(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Rollback()
+	if got, want := r.Redact(shared), redactionMask(shared); got != want {
+		t.Fatalf("one rollback removed a concurrent reservation: got %q, want %q", got, want)
+	}
+	second.Rollback()
+	if got := r.Redact(shared); got != shared {
+		t.Fatalf("last rollback retained unpinned literal: %q", got)
+	}
+
+	const pinned = "already-pinned-secret"
+	if err := r.AddLiteral(pinned); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := r.ReserveLiteral(pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation.Rollback()
+	if got, want := r.Redact(pinned), redactionMask(pinned); got != want {
+		t.Fatalf("rollback removed pinned literal: got %q, want %q", got, want)
+	}
+
+	const committed = "committed-reserved-secret"
+	committedReservation, err := r.ReserveLiteral(committed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committedReservation.Commit()
+	committedReservation.Rollback()
+	if got, want := r.Redact(committed), redactionMask(committed); got != want {
+		t.Fatalf("commit did not pin literal: got %q, want %q", got, want)
+	}
+}
+
+func TestRedactorConcurrentLiteralReservations(t *testing.T) {
+	r := NewRedactor(nil)
+	const secret = "concurrently-reserved-secret"
+	const workers = 32
+
+	reservations := make(chan *LiteralReservation, workers)
+	errs := make(chan error, workers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			reservation, err := r.ReserveLiteral(secret)
+			if err != nil {
+				errs <- err
+				return
+			}
+			reservations <- reservation
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("reserve literal: %v", err)
+	}
+	close(reservations)
+
+	var rollback sync.WaitGroup
+	for reservation := range reservations {
+		rollback.Add(1)
+		go func(reservation *LiteralReservation) {
+			defer rollback.Done()
+			reservation.Rollback()
+		}(reservation)
+	}
+	rollback.Wait()
+	if got := r.Redact(secret); got != secret {
+		t.Fatalf("concurrent rollbacks retained literal: %q", got)
+	}
+}
+
 func TestRedactorLiteralWorkBudgetFailsSecure(t *testing.T) {
 	r := NewRedactor(nil)
 	input := strings.Repeat("z", 32<<10)

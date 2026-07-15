@@ -89,7 +89,9 @@ Commands run in a persistent shell, so `cd` and `export` persist across calls.
 Omit `session` and your per-agent default session is used (state still persists).
 Create a named session with `session_create` and pass its `session_id` when you
 want a SECOND independent shell (a separate cwd/venv), or a remote one
-(`target=<server>`). Only one job runs per session at a time, including a job
+(`target=<server>`). Set the optional `workspace` label when parallel projects
+should stay distinct in the operator dashboard. Only one job runs per session
+at a time, including a job
 whose response was backgrounded; a second concurrent call returns
 `session_busy`. Either wait or use another session. Each owner may have at most
 32 sessions, with 128 total in the daemon. Close one you no longer need with

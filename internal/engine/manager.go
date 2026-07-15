@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"sort"
 	"strings"
 	"sync"
@@ -324,6 +325,7 @@ type SessionInfo struct {
 	Target        string `json:"target"`
 	Mode          string `json:"mode"`
 	Owner         string `json:"owner"`
+	Workspace     string `json:"workspace,omitempty"`
 	ActiveJobs    int    `json:"active_jobs"`
 	CreatedUnix   int64  `json:"created_unix,omitempty"`
 	CreatedUnixMS int64  `json:"created_unix_ms,omitempty"`
@@ -332,6 +334,12 @@ type SessionInfo struct {
 
 // CreateSession creates a persistent-shell session for the given owner.
 func (m *Manager) CreateSession(owner, target, mode string) (*Session, error) {
+	return m.CreateSessionWithWorkspace(owner, target, mode, "")
+}
+
+// CreateSessionWithWorkspace attaches an optional operator-facing workspace
+// label. It is metadata only: ownership and policy checks continue to use owner.
+func (m *Manager) CreateSessionWithWorkspace(owner, target, mode, workspace string) (*Session, error) {
 	if target == "" {
 		target = "local"
 	}
@@ -346,6 +354,9 @@ func (m *Manager) CreateSession(owner, target, mode string) (*Session, error) {
 	}
 	if owner != "" && !validAgentID(owner) {
 		return nil, errs.New(errs.InvalidArgument, "invalid session owner")
+	}
+	if len(workspace) > 255 || strings.TrimSpace(workspace) != workspace || strings.IndexFunc(workspace, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return nil, errs.New(errs.InvalidArgument, "workspace must be at most 255 bytes, trimmed, and contain no control characters")
 	}
 	if err := m.reserveSession(owner); err != nil {
 		return nil, err
@@ -374,6 +385,7 @@ func (m *Manager) CreateSession(owner, target, mode string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	sess.Workspace = workspace
 	m.mu.Lock()
 	m.releaseSessionReservationLocked(owner)
 	if m.closed {
@@ -385,8 +397,11 @@ func (m *Manager) CreateSession(owner, target, mode string) (*Session, error) {
 	m.sessions[sess.ID] = sess
 	reserved = false
 	m.mu.Unlock()
-	m.publish(bus.Event{Type: bus.EvSessionCreated, AgentID: owner, SessionID: sess.ID,
-		Data: map[string]any{"target": target, "mode": mode}})
+	data := map[string]any{"target": target, "mode": mode}
+	if workspace != "" {
+		data["workspace"] = workspace
+	}
+	m.publish(bus.Event{Type: bus.EvSessionCreated, AgentID: owner, SessionID: sess.ID, Data: data})
 	sess.setOnReset(func() {
 		m.publish(bus.Event{Type: bus.EvSessionReset, AgentID: sess.Owner, SessionID: sess.ID,
 			Message: "remote connection dropped; reconnected — cwd/env were reset"})
@@ -1302,26 +1317,33 @@ func (m *Manager) PollWait(owner, jobID, cursor string, waitMS int) (*PollResult
 	}
 }
 
-// PollFor returns incremental output from the cursor onward plus current status.
-// When human is false and the job's output is held, no new bytes are returned
-// (the agent is paused); the human dashboard passes human=true to always stream
-// and owner="" to see any agent's job. The returned chunk is capped at
-// maxOutputBytes per call (keeping sequential order) so one poll can't dump an
-// unbounded amount into the caller's context; HasMore tells the caller to fetch
-// the remainder from NextCursor.
-func (m *Manager) PollFor(owner, jobID, cursor string, human bool) (*PollResult, error) {
+// JobTailHandle retains an authorized job reference for one output stream.
+// Registry cleanup blocks new callers but does not interrupt a stream that is
+// already draining the job's bounded output buffer.
+type JobTailHandle struct {
+	manager *Manager
+	job     *Job
+}
+
+// OpenJobTailFor resolves and authorizes a stable job output handle.
+func (m *Manager) OpenJobTailFor(owner, jobID string) (*JobTailHandle, error) {
 	job, err := m.getJob(owner, jobID)
 	if err != nil {
 		return nil, err
 	}
+	return &JobTailHandle{manager: m, job: job}, nil
+}
+
+// Poll reads the next page from a stable job output handle.
+func (h *JobTailHandle) Poll(cursor string, human bool) (*PollResult, error) {
 	off, err := output.DecodeCursor(cursor)
 	if err != nil {
 		return nil, err
 	}
-	if _, ho := job.holds(); ho && !human {
-		return &PollResult{Info: job.info(), StdoutChunk: "", NextCursor: cursor, OutputHeld: true}, nil
+	if _, ho := h.job.holds(); ho && !human {
+		return &PollResult{Info: h.job.info(), StdoutChunk: "", NextCursor: cursor, OutputHeld: true}, nil
 	}
-	info, chunk, next, gap, capped := job.readOutput(off, m.maxOutputBytes())
+	info, chunk, next, gap, capped := h.job.readOutput(off, h.manager.maxOutputBytes())
 	return &PollResult{
 		Info:        info,
 		StdoutChunk: string(chunk),
@@ -1330,6 +1352,21 @@ func (m *Manager) PollFor(owner, jobID, cursor string, human bool) (*PollResult,
 		Truncated:   capped,
 		HasMore:     capped,
 	}, nil
+}
+
+// PollFor returns incremental output from the cursor onward plus current status.
+// When human is false and the job's output is held, no new bytes are returned
+// (the agent is paused); the human dashboard passes human=true to always stream
+// and owner="" to see any agent's job. The returned chunk is capped at
+// maxOutputBytes per call (keeping sequential order) so one poll can't dump an
+// unbounded amount into the caller's context; HasMore tells the caller to fetch
+// the remainder from NextCursor.
+func (m *Manager) PollFor(owner, jobID, cursor string, human bool) (*PollResult, error) {
+	handle, err := m.OpenJobTailFor(owner, jobID)
+	if err != nil {
+		return nil, err
+	}
+	return handle.Poll(cursor, human)
 }
 
 // TailResult is returned by logs_tail.
@@ -1415,11 +1452,6 @@ func (m *Manager) WriteAttributed(owner, jobID, input string, appendNewline, sec
 	if err := m.requireHumanInputAudit(human); err != nil {
 		return err
 	}
-	if secret {
-		if err := m.redactor.AddLiteral(input); err != nil {
-			return errs.New(errs.Internal, "cannot safely register secret for redaction: %v", err)
-		}
-	}
 	data := []byte(input)
 	if appendNewline {
 		data = append(data, '\n')
@@ -1427,7 +1459,41 @@ func (m *Manager) WriteAttributed(owner, jobID, input string, appendNewline, sec
 	if err := m.authorizeHumanInput(human, job.sess.Owner, job.SessionID, job.ID, len(input), appendNewline, secret, actor, source); err != nil {
 		return err
 	}
-	return job.sess.writeInput(job, data)
+	return m.writeWithLiteralReservation(input, secret, job, func() error {
+		return job.sess.writeInput(job, data)
+	})
+}
+
+// writeWithLiteralReservation keeps secret active across PTY delivery. A job
+// lifetime owns the reservation through its final output flush; nil means an
+// idle session write with no completion boundary, so success pins the literal.
+func (m *Manager) writeWithLiteralReservation(input string, secret bool, lifetime *Job, deliver func() error) error {
+	if !secret {
+		return deliver()
+	}
+	reservation, err := m.redactor.ReserveLiteral(input)
+	if err != nil {
+		return errs.New(errs.Internal, "cannot safely register secret for redaction: %v", err)
+	}
+	if reservation == nil {
+		return deliver()
+	}
+	defer func() {
+		if reservation != nil {
+			reservation.Rollback()
+		}
+	}()
+	if err := deliver(); err != nil {
+		return err
+	}
+	if lifetime != nil {
+		if lifetime.retainSecret(reservation) {
+			reservation = nil
+		}
+		return nil
+	}
+	reservation.Commit()
+	return nil
 }
 
 func (m *Manager) requireHumanInputAudit(human bool) error {
@@ -1473,12 +1539,18 @@ func (m *Manager) authorizeHumanInput(human bool, owner, sessionID, jobID string
 // agent receives, while still watching the live stream themselves. Dashboard-
 // only (not exposed as an MCP tool), so it sees any agent's job.
 func (m *Manager) Hold(jobID string, input, output *bool) error {
-	job, err := m.getJob("", jobID)
-	if err != nil {
-		return err
+	m.mu.Lock()
+	job := m.jobs[jobID]
+	if job == nil || m.sessions[job.SessionID] != job.sess {
+		m.mu.Unlock()
+		return errs.New(errs.NotFound, "job %s not found", jobID)
 	}
-	job.setHold(input, output)
-	if m.bus != nil {
+	changed, allowed := job.sess.setCurrentHold(job, input, output)
+	m.mu.Unlock()
+	if !allowed {
+		return errs.New(errs.NotFound, "job %s is not currently running", jobID)
+	}
+	if changed && m.bus != nil {
 		hi, ho := job.holds()
 		m.publish(bus.Event{Type: "job.hold", JobID: jobID, SessionID: job.SessionID,
 			Message: "human intervention", Data: map[string]any{"hold_input": hi, "hold_output": ho}})
@@ -1535,52 +1607,77 @@ func (m *Manager) Kill(owner, jobID string) error {
 	return m.Signal(owner, jobID, "SIGKILL")
 }
 
-// ListJobs returns job snapshots filtered by active|recent|all, scoped to owner
-// (MA-2): a non-empty owner sees only its own jobs (including its own recovered
-// jobs across a daemon restart). owner == "" is the trusted/human path and sees
-// every agent's jobs, as the dashboard needs.
+// ListJobs returns job snapshots filtered by active|recent|all, scoped to owner.
 func (m *Manager) ListJobs(owner, filter string) []Info {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	jobs, _ := m.ListJobsLimited(owner, filter, 0)
+	return jobs
+}
+
+// ListJobsLimited returns newest-first snapshots and the total eligible count.
+// For recent/all listings it sorts immutable metadata first and snapshots only
+// the requested page, keeping dashboard reads from holding the manager lock or
+// copying every job's mutable state.
+func (m *Manager) ListJobsLimited(owner, filter string, limit int) ([]Info, int) {
 	type row struct {
-		at   time.Time
-		info Info
+		at        time.Time
+		id        string
+		job       *Job
+		recovered *Info
 	}
-	rows := []row{}
-	keep := func(at time.Time, info Info) {
+	m.mu.Lock()
+	rows := make([]row, 0, len(m.jobs)+len(m.recovered))
+	for _, job := range m.jobs {
+		if owner == "" || job.sess.Owner == owner {
+			rows = append(rows, row{at: job.createdAt, id: job.ID, job: job})
+		}
+	}
+	for i := range m.recovered {
+		// Recovered entries are immutable after their registry snapshot is
+		// installed. A later slice replacement keeps this referenced backing
+		// array alive, so the page can be built after releasing m.mu.
+		info := &m.recovered[i]
 		if owner != "" && info.Owner != owner {
-			return
+			continue
 		}
-		if filter == "active" && info.Status.Terminal() {
-			return
-		}
-		rows = append(rows, row{at, info})
-	}
-	for _, j := range m.jobs {
-		keep(j.createdAt, j.info()) // createdAt is immutable after newJob
-	}
-	for _, in := range m.recovered {
 		at := time.Time{}
-		if in.CreatedUnixMS > 0 {
-			at = time.UnixMilli(in.CreatedUnixMS)
-		} else if in.CreatedUnix > 0 {
-			at = time.Unix(in.CreatedUnix, 0)
+		if info.CreatedUnixMS > 0 {
+			at = time.UnixMilli(info.CreatedUnixMS)
+		} else if info.CreatedUnix > 0 {
+			at = time.Unix(info.CreatedUnix, 0)
 		}
-		keep(at, in)
+		rows = append(rows, row{at: at, id: info.JobID, recovered: info})
 	}
-	// Newest first, so a default (capped) listing shows what just happened —
-	// deterministic order instead of Go's randomized map iteration.
+	m.mu.Unlock()
+
+	if filter == "active" {
+		active := rows[:0]
+		for _, candidate := range rows {
+			if candidate.job == nil || candidate.job.info().Status.Terminal() {
+				continue
+			}
+			active = append(active, candidate)
+		}
+		rows = active
+	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].at.Equal(rows[j].at) {
-			return rows[i].info.JobID > rows[j].info.JobID
+			return rows[i].id > rows[j].id
 		}
 		return rows[i].at.After(rows[j].at)
 	})
-	out := make([]Info, len(rows))
-	for i, r := range rows {
-		out[i] = r.info
+	total := len(rows)
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
 	}
-	return out
+	out := make([]Info, 0, len(rows))
+	for _, candidate := range rows {
+		if candidate.job != nil {
+			out = append(out, candidate.job.info())
+		} else if candidate.recovered != nil {
+			out = append(out, *candidate.recovered)
+		}
+	}
+	return out, total
 }
 
 // ListSessions returns all session snapshots for trusted/operator callers.
@@ -1598,7 +1695,7 @@ func (m *Manager) ListSessionsFor(owner string) []SessionInfo {
 		}
 		active := 0
 		currentJobID := ""
-		if current := s.currentJob(); current != nil {
+		if current := s.currentJob(); current != nil && m.jobs[current.ID] == current {
 			active = 1
 			currentJobID = current.ID
 		}
@@ -1607,6 +1704,7 @@ func (m *Manager) ListSessionsFor(owner string) []SessionInfo {
 			Target:        s.Target,
 			Mode:          s.Mode,
 			Owner:         s.Owner,
+			Workspace:     s.Workspace,
 			ActiveJobs:    active,
 			CreatedUnix:   unixSeconds(s.CreatedAt),
 			CreatedUnixMS: unixMilliseconds(s.CreatedAt),
@@ -1638,8 +1736,49 @@ func (m *Manager) CloseSession(owner, id string) error {
 			delete(m.defaults, owner)
 		}
 	}
+	cancelled := make([]*pendingConfirm, 0)
+	for confirmID, confirmation := range m.pending {
+		if confirmation.Sess != sess || confirmation.resolved {
+			continue
+		}
+		if confirmation.timer != nil {
+			confirmation.timer.Stop()
+		}
+		confirmation.resolved = true
+		delete(m.pending, confirmID)
+		cancelled = append(cancelled, confirmation)
+	}
 	m.mu.Unlock()
 	sess.close()
+	if len(cancelled) == 0 {
+		return nil
+	}
+	for _, confirmation := range cancelled {
+		confirmation.Job.finalize(-1, StatusFailed, "confirmation cancelled because session closed")
+	}
+	persistErr := m.persist()
+	var auditErr error
+	for _, confirmation := range cancelled {
+		if err := m.publish(bus.Event{
+			Type: bus.EvConfirmResolved, JobID: confirmation.Job.ID, AgentID: confirmation.Owner,
+			SessionID: confirmation.Sess.ID,
+			Data: map[string]any{
+				"confirmation_id": confirmation.ID, "approved": false,
+				"by": "session_close", "reason": "session closed",
+			},
+		}); err != nil {
+			auditErr = errors.Join(auditErr, err)
+		}
+	}
+	if auditErr != nil && persistErr != nil {
+		return errs.New(errs.Internal, "session closed but confirmation audit and persistence failed: audit: %v; persistence: %v", auditErr, persistErr)
+	}
+	if auditErr != nil {
+		return errs.New(errs.Internal, "session closed but confirmation audit failed: %v", auditErr)
+	}
+	if persistErr != nil {
+		return errs.New(errs.Internal, "session closed but confirmation persistence failed: %v", persistErr)
+	}
 	return nil
 }
 
@@ -1724,6 +1863,45 @@ type SessionStreamResult struct {
 	Prompt        string `json:"prompt,omitempty"`
 }
 
+// SessionTailHandle retains an authorized session reference for one stream.
+// Registry removal prevents new callers from opening a handle, while an
+// already-open stream can drain the closed session buffer to its final cursor.
+type SessionTailHandle struct {
+	manager *Manager
+	session *Session
+}
+
+// OpenSessionTailFor resolves and authorizes a stable session stream handle.
+func (m *Manager) OpenSessionTailFor(owner, sessionID string) (*SessionTailHandle, error) {
+	s, err := m.getSessionFor(owner, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return &SessionTailHandle{manager: m, session: s}, nil
+}
+
+// Tail reads the next session-stream page. Job prompt metadata is advertised
+// only when the current job is already committed to the manager registry.
+func (h *SessionTailHandle) Tail(cursor string) (*SessionStreamResult, error) {
+	off, err := output.DecodeCursor(cursor)
+	if err != nil {
+		return nil, err
+	}
+	m := h.manager
+	res := h.session.streamSnapshot(off, m.maxOutputBytes())
+	if res.JobID != "" {
+		m.mu.Lock()
+		job := m.jobs[res.JobID]
+		m.mu.Unlock()
+		if job == nil || job.sess != h.session {
+			res.JobID = ""
+			res.AwaitingInput = false
+			res.Prompt = ""
+		}
+	}
+	return &res, nil
+}
+
 // SessionTail returns the session's continuous terminal output from the cursor
 // onward (the whole shell, across all jobs) — what the dashboard streams as one
 // live terminal for the session.
@@ -1733,16 +1911,11 @@ func (m *Manager) SessionTail(sessionID, cursor string) (*SessionStreamResult, e
 
 // SessionTailFor is the owner-scoped session stream used by agent transports.
 func (m *Manager) SessionTailFor(owner, sessionID, cursor string) (*SessionStreamResult, error) {
-	s, err := m.getSessionFor(owner, sessionID)
+	handle, err := m.OpenSessionTailFor(owner, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	off, err := output.DecodeCursor(cursor)
-	if err != nil {
-		return nil, err
-	}
-	res := s.streamSnapshot(off, m.maxOutputBytes())
-	return &res, nil
+	return handle.Tail(cursor)
 }
 
 // SessionWriteInput sends operator input directly to a session's shell PTY.
@@ -1793,11 +1966,6 @@ func (m *Manager) SessionWriteAttributed(owner, sessionID, input string, appendN
 	if err := m.requireHumanInputAudit(human); err != nil {
 		return err
 	}
-	if secret {
-		if err := m.redactor.AddLiteral(input); err != nil {
-			return errs.New(errs.Internal, "cannot safely register secret for redaction: %v", err)
-		}
-	}
 	data := []byte(input)
 	if appendNewline {
 		data = append(data, '\n')
@@ -1809,10 +1977,12 @@ func (m *Manager) SessionWriteAttributed(owner, sessionID, input string, appendN
 	if err := m.authorizeHumanInput(human, s.Owner, s.ID, jobID, len(input), appendNewline, secret, actor, source); err != nil {
 		return err
 	}
-	if cur == nil {
-		return s.writeCurrent(nil, data, interactiveWriteTimeout, false)
-	}
-	return s.writeInput(cur, data)
+	return m.writeWithLiteralReservation(input, secret, cur, func() error {
+		if cur == nil {
+			return s.writeCurrent(nil, data, interactiveWriteTimeout, false)
+		}
+		return s.writeInput(cur, data)
+	})
 }
 
 func (m *Manager) getSessionFor(owner, id string) (*Session, error) {

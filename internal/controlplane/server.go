@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/termada/termada/internal/audit"
 	"github.com/termada/termada/internal/bus"
@@ -135,6 +137,7 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/api/approve", s.hApprove)
 	mux.HandleFunc("/api/deny", s.hDeny)
 	mux.HandleFunc("/api/status", s.hStatus)
+	mux.HandleFunc("/api/dashboard/state", s.hDashboardState)
 	mux.HandleFunc("/api/stop_all", s.hStopAll)
 	mux.HandleFunc("/api/audit", s.hAudit)
 	mux.HandleFunc("/api/policies", s.hPolicies)
@@ -706,6 +709,12 @@ func decode(r *http.Request, v any) error {
 
 const maxRequestBodyBytes = 8 << 20
 
+const (
+	maxExecListLimit       = 200
+	maxCommandSummaryArgs  = 16
+	maxCommandSummaryBytes = 512
+)
+
 func decodeRequest(w http.ResponseWriter, r *http.Request, v any) bool {
 	if err := decode(r, v); err != nil {
 		writeErr(w, errs.New(errs.InvalidArgument, "invalid request body: %v", err))
@@ -728,6 +737,7 @@ type execReq struct {
 	Secret        bool     `json:"secret"`
 	Signal        string   `json:"signal"`
 	Target        string   `json:"target"`
+	Workspace     string   `json:"workspace"`
 	SessionID     string   `json:"session_id"`
 	ConfirmID     string   `json:"confirmation_id"`
 	By            string   `json:"by"`
@@ -751,13 +761,13 @@ func (s *Server) hSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	sess, err := s.mgr.CreateSession(owner, req.Target, req.Mode)
+	sess, err := s.mgr.CreateSessionWithWorkspace(owner, req.Target, req.Mode, req.Workspace)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, engine.SessionInfo{
-		SessionID: sess.ID, Target: sess.Target, Mode: sess.Mode, Owner: sess.Owner,
+		SessionID: sess.ID, Target: sess.Target, Mode: sess.Mode, Owner: sess.Owner, Workspace: sess.Workspace,
 		CreatedUnix: sess.CreatedAt.Unix(), CreatedUnixMS: sess.CreatedAt.UnixMilli(),
 	})
 }
@@ -881,6 +891,11 @@ func (s *Server) hSessionStream(w http.ResponseWriter, r *http.Request) {
 	if cursor == "" {
 		cursor = r.URL.Query().Get("cursor")
 	}
+	tail, err := s.mgr.OpenSessionTailFor("", sessionID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -905,7 +920,7 @@ func (s *Server) hSessionStream(w http.ResponseWriter, r *http.Request) {
 			return
 		default:
 		}
-		res, err := s.mgr.SessionTailFor("", sessionID, cursor)
+		res, err := tail.Tail(cursor)
 		if err != nil {
 			send("", map[string]any{"error": err.Error()})
 			return
@@ -987,6 +1002,11 @@ func (s *Server) hExecStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobID := r.URL.Query().Get("job_id")
+	tail, err := s.mgr.OpenJobTailFor("", jobID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	cursor := r.Header.Get("Last-Event-ID")
 	if cursor == "" {
 		cursor = r.URL.Query().Get("cursor")
@@ -1014,7 +1034,7 @@ func (s *Server) hExecStream(w http.ResponseWriter, r *http.Request) {
 			return
 		default:
 		}
-		res, err := s.mgr.PollFor("", jobID, cursor, true) // dashboard live view: unscoped, always streams
+		res, err := tail.Poll(cursor, true) // dashboard live view: authorized once, then drains a stable job buffer
 		if err != nil {
 			send("", map[string]any{"error": err.Error()})
 			return
@@ -1090,7 +1110,119 @@ func (s *Server) hExecList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, map[string]any{"jobs": s.mgr.ListJobs(owner, filter)})
+	limit, bounded, err := execListLimit(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	summary, err := execListSummary(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	requestedLimit := 0
+	if bounded {
+		requestedLimit = limit
+	}
+	jobs, total := s.mgr.ListJobsLimited(owner, filter, requestedLimit)
+	if summary {
+		compacted := make([]engine.Info, len(jobs))
+		copy(compacted, jobs)
+		for i := range compacted {
+			compacted[i].Command = compactCommandSummary(compacted[i].Command)
+		}
+		jobs = compacted
+	}
+	response := map[string]any{"jobs": jobs}
+	if bounded {
+		response["limit"] = limit
+		if omitted := total - len(jobs); omitted > 0 {
+			response["omitted"] = omitted
+		}
+	}
+	writeJSON(w, response)
+}
+
+func compactJobSummaries(jobs []engine.Info) []engine.Info {
+	compacted := make([]engine.Info, len(jobs))
+	copy(compacted, jobs)
+	for i := range compacted {
+		compacted[i].Command = compactCommandSummary(compacted[i].Command)
+	}
+	return compacted
+}
+
+func execListLimit(r *http.Request) (limit int, bounded bool, err error) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return 0, false, nil
+	}
+	limit, parseErr := strconv.Atoi(raw)
+	if parseErr != nil || limit < 1 || limit > maxExecListLimit {
+		return 0, false, errs.New(errs.InvalidArgument, "exec list limit must be in 1..%d", maxExecListLimit)
+	}
+	return limit, true, nil
+}
+
+func execListSummary(r *http.Request) (bool, error) {
+	switch r.URL.Query().Get("summary") {
+	case "", "0":
+		return false, nil
+	case "1":
+		return true, nil
+	default:
+		return false, errs.New(errs.InvalidArgument, "exec list summary must be 0 or 1")
+	}
+}
+
+func compactCommandSummary(command []string) []string {
+	if len(command) == 0 {
+		return nil
+	}
+	out := make([]string, 0, min(len(command), maxCommandSummaryArgs+1))
+	used := 0
+	for i, arg := range command {
+		separatorBytes := 0
+		if len(out) > 0 {
+			separatorBytes = 1
+		}
+		remaining := maxCommandSummaryBytes - used - separatorBytes
+		if remaining <= 0 {
+			break
+		}
+		if i >= maxCommandSummaryArgs {
+			marker := "..."
+			if len(marker) > remaining {
+				marker = marker[:remaining]
+			}
+			out = append(out, marker)
+			break
+		}
+		if len(arg) > remaining {
+			out = append(out, truncateCommandSummaryArg(arg, remaining))
+			break
+		}
+		out = append(out, arg)
+		used += separatorBytes + len(arg)
+		if i == len(command)-1 {
+			break
+		}
+	}
+	return out
+}
+
+func truncateCommandSummaryArg(arg string, maxBytes int) string {
+	if len(arg) <= maxBytes {
+		return arg
+	}
+	if maxBytes <= 3 {
+		return "..."[:maxBytes]
+	}
+	end := maxBytes - 3
+	for end > 0 && !utf8.RuneStart(arg[end]) {
+		end--
+	}
+	return arg[:end] + "..."
 }
 
 func (s *Server) hLogsTail(w http.ResponseWriter, r *http.Request) {
@@ -1212,6 +1344,70 @@ func (s *Server) hStatus(w http.ResponseWriter, r *http.Request) {
 		"servers":       servers,
 		"agents":        s.mgr.Agents(),
 		"persistence":   s.mgr.PersistenceStatus(),
+	})
+}
+
+// hDashboardState returns one bounded bootstrap snapshot for the browser. Live
+// changes arrive over /api/events; state_revision lets the browser resume that
+// stream without replaying events already reflected in this response.
+func (s *Server) hDashboardState(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > maxExecListLimit {
+			writeErr(w, errs.New(errs.InvalidArgument, "dashboard state limit must be in 1..%d", maxExecListLimit))
+			return
+		}
+		limit = parsed
+	}
+	revision := uint64(0)
+	if s.bus != nil {
+		revision = s.bus.Sequence()
+	}
+	recent, total := s.mgr.ListJobsLimited("", "recent", limit)
+	active, _ := s.mgr.ListJobsLimited("", "active", 0)
+	byID := make(map[string]engine.Info, len(recent)+len(active))
+	for _, job := range recent {
+		byID[job.JobID] = job
+	}
+	for _, job := range active {
+		byID[job.JobID] = job
+	}
+	jobs := make([]engine.Info, 0, len(byID))
+	for _, job := range byID {
+		jobs = append(jobs, job)
+	}
+	sort.Slice(jobs, func(i, j int) bool {
+		left, right := jobs[i].CreatedUnixMS, jobs[j].CreatedUnixMS
+		if left == 0 {
+			left = jobs[i].CreatedUnix * 1000
+		}
+		if right == 0 {
+			right = jobs[j].CreatedUnix * 1000
+		}
+		if left == right {
+			return jobs[i].JobID > jobs[j].JobID
+		}
+		return left > right
+	})
+	servers := []fleet.ServerInfo{}
+	if s.fleet != nil {
+		servers = s.fleet.ServerList()
+	}
+	writeJSON(w, map[string]any{
+		"version":        s.version,
+		"dashboard_url":  s.getDashboardURL(),
+		"sessions":       s.mgr.ListSessionsFor(""),
+		"jobs":           compactJobSummaries(jobs),
+		"jobs_omitted":   max(0, total-limit),
+		"pending":        s.mgr.ListPending(),
+		"servers":        servers,
+		"agents":         s.mgr.Agents(),
+		"persistence":    s.mgr.PersistenceStatus(),
+		"state_revision": revision,
 	})
 }
 
@@ -1362,6 +1558,19 @@ func (s *Server) hEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+	sinceRaw := r.Header.Get("Last-Event-ID")
+	if sinceRaw == "" {
+		sinceRaw = r.URL.Query().Get("since")
+	}
+	since := uint64(0)
+	if sinceRaw != "" {
+		parsed, err := strconv.ParseUint(sinceRaw, 10, 64)
+		if err != nil {
+			writeErr(w, errs.New(errs.InvalidArgument, "event cursor must be an unsigned integer"))
+			return
+		}
+		since = parsed
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1369,8 +1578,17 @@ func (s *Server) hEvents(w http.ResponseWriter, r *http.Request) {
 	ch, cancel := s.bus.Subscribe(256)
 	defer cancel()
 
-	// Replay recent events so a fresh dashboard has context.
-	for _, e := range s.bus.Recent(50) {
+	// A cursor comes from the bootstrap snapshot or EventSource reconnect. Fresh
+	// feed-only clients still receive a short activity replay.
+	replay := s.bus.Recent(50)
+	gap := false
+	if since > 0 {
+		replay, gap = s.bus.RecentAfter(since, 256)
+	}
+	if gap {
+		writeSSE(w, bus.Event{Sequence: s.bus.Sequence(), Time: time.Now(), Type: "state.resync_required", Message: "event history gap"})
+	}
+	for _, e := range replay {
 		writeSSE(w, e)
 	}
 	flusher.Flush()
@@ -1397,6 +1615,9 @@ func (s *Server) hEvents(w http.ResponseWriter, r *http.Request) {
 func writeSSE(w http.ResponseWriter, e bus.Event) {
 	b, _ := json.Marshal(e)
 	var sb strings.Builder
+	if e.Sequence > 0 {
+		fmt.Fprintf(&sb, "id: %d\n", e.Sequence)
+	}
 	sb.WriteString("data: ")
 	sb.Write(b)
 	sb.WriteString("\n\n")

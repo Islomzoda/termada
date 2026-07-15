@@ -886,6 +886,55 @@ func TestAPISessionWriteSecretIsRedactedEverywhere(t *testing.T) {
 	}
 }
 
+func TestAPISecretInputDoesNotRedactOwnAuthorizationMetadata(t *testing.T) {
+	mux, m, auditLog, _ := newAuditedTestServer(t)
+	job, err := m.Start("agent", "", []string{"bash", "-c", "printf 'Value: '; read -r value"}, engine.ModeForeground)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !job.Snapshot().AwaitingInput && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !job.Snapshot().AwaitingInput {
+		t.Fatal("job did not expose its input prompt")
+	}
+
+	// The literal intentionally collides with both a metadata field name and the
+	// trusted principal. Authorization must be durable before the literal becomes
+	// active, or the audit redactor destroys its own attribution envelope.
+	const secret = "actor"
+	body, _ := json.Marshal(map[string]any{"job_id": job.ID, "input": secret, "secret": true})
+	if code, out := doOperatorSource(t, mux, secret, http.MethodPost, "/api/exec/write", string(body)); code != http.StatusOK {
+		t.Fatalf("exec write = %d %v", code, out)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("job did not finish after secret input")
+	}
+
+	records, err := auditLog.Tail(100)
+	if err != nil {
+		t.Fatalf("tail audit: %v", err)
+	}
+	var inputRecord *audit.Record
+	for i := range records {
+		if records[i].Type == bus.EvHumanInputAuthorized {
+			inputRecord = &records[i]
+		}
+	}
+	if inputRecord == nil {
+		t.Fatalf("audit omitted %s: %+v", bus.EvHumanInputAuthorized, records)
+	}
+	if inputRecord.Data["actor"] != secret || inputRecord.Data["source"] != secret {
+		t.Fatalf("secret input self-redacted authorization attribution: %+v", inputRecord.Data)
+	}
+	if inputRecord.Data["scope"] != "job" || inputRecord.Data["secret"] != true {
+		t.Fatalf("secret input self-redacted authorization metadata: %+v", inputRecord.Data)
+	}
+}
+
 func TestAPIExecWriteAuditsMetadataButNeverPlaintext(t *testing.T) {
 	mux, m, auditLog, auditPath := newAuditedTestServer(t)
 	job, err := m.Start("agent", "", []string{"bash", "-c", "printf 'Reply: '; read -r value"}, engine.ModeForeground)
@@ -1082,7 +1131,8 @@ func TestAPIHumanInputPreWriteAuditFailureDoesNotReachPTY(t *testing.T) {
 		}
 		return nil
 	})
-	body := `{"session_id":"` + sess.ID + `","input":"must-not-reach-pty"}`
+	const failedSecret = "failed-audit-secret-literal"
+	body := `{"session_id":"` + sess.ID + `","input":"` + failedSecret + `","secret":true}`
 	if code, _ := doOperatorSource(t, mux, "dashboard", http.MethodPost, "/api/session/write", body); code == http.StatusOK {
 		cancelFailure()
 		t.Fatal("input succeeded after pre-write audit authorization failed")
@@ -1109,6 +1159,9 @@ func TestAPIHumanInputPreWriteAuditFailureDoesNotReachPTY(t *testing.T) {
 	}
 	if !foundAuthorization {
 		t.Fatal("healthy audit sink did not retain the attempted authorization")
+	}
+	if got := m.Redactor().Redact(failedSecret); got != failedSecret {
+		t.Fatalf("failed audit authorization consumed secret literal capacity: %q", got)
 	}
 	cleanup := `{"session_id":"` + sess.ID + `","input":"cleanup"}`
 	if code, out := doOperatorSource(t, mux, "dashboard", http.MethodPost, "/api/session/write", cleanup); code != http.StatusOK {
@@ -1265,14 +1318,19 @@ func TestAPIPortForwardsAreOwnerScoped(t *testing.T) {
 
 func TestAPISessionLifecycle(t *testing.T) {
 	mux, _ := newTestServer(t)
-	code, out := do(t, mux, "POST", "/api/session/create", `{"owner":"t"}`)
+	code, out := do(t, mux, "POST", "/api/session/create", `{"owner":"t","workspace":"termada"}`)
 	if code != 200 || out["session_id"] == nil {
 		t.Fatalf("create session = %d %v", code, out)
 	}
 	sid := out["session_id"].(string)
+	if out["workspace"] != "termada" {
+		t.Fatalf("created workspace = %v, want termada", out["workspace"])
+	}
 	_, st := doOperator(t, mux, "GET", "/api/status", "")
 	if sessions, _ := st["sessions"].([]any); len(sessions) != 1 {
 		t.Fatalf("session not in status: %v", st["sessions"])
+	} else if session, _ := sessions[0].(map[string]any); session["workspace"] != "termada" {
+		t.Fatalf("status workspace = %v, want termada", session["workspace"])
 	}
 	if code, _ := do(t, mux, "POST", "/api/session/close", `{"owner":"t","session_id":"`+sid+`"}`); code != 200 {
 		t.Fatalf("close session failed")

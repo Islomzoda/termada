@@ -182,9 +182,9 @@ func (c *Client) ListJobs(owner, filter string) []engine.Info {
 	return out.Jobs
 }
 
-func (c *Client) CreateSession(owner, target, mode string) (engine.SessionInfo, error) {
+func (c *Client) CreateSession(owner, target, mode, workspace string) (engine.SessionInfo, error) {
 	var out engine.SessionInfo
-	err := c.post("/api/session/create", execReq{Owner: owner, Target: target, Mode: mode}, &out)
+	err := c.post("/api/session/create", execReq{Owner: owner, Target: target, Mode: mode, Workspace: workspace}, &out)
 	return out, err
 }
 

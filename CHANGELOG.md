@@ -6,6 +6,55 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-16
+
+### Changed
+- Add optional workspace metadata to named sessions and jobs so the dashboard
+  can keep parallel project contexts distinct without changing ownership rules.
+- Bootstrap the dashboard from one bounded state snapshot, then refresh from
+  cursor-resumable SSE events with an adaptive polling fallback.
+- Split the embedded dashboard into content-versioned HTML, CSS, and JavaScript
+  assets, localize its primary workflow in English and Russian, and lazy-load
+  the visual terminal until an operator opens it.
+- Restore English as the dashboard's default language and use a
+  platform-neutral name for the local target.
+- Reorganize the dashboard sidebar around compact conversations, dedicated
+  connection and policy views, search, and an off-canvas mobile drawer.
+- Replace the raw event wall with a searchable activity history grouped by
+  execution, session, and client, with focused operational filters.
+- Merge technical sessions by agent and target into one logical conversation,
+  replace per-job tabs with a single viewer, and select recent runs from an
+  inline `All | Active | Finished` list.
+- Fetch a bounded, compact recent-job list through a single-flight refresh and
+  batch short bursts of raw terminal input before durable authorization.
+- Apply recent-job limits inside the engine and snapshot only the selected page
+  outside the manager lock.
+
+### Fixed
+- Preserve typed prompt answers and disabled send controls across periodic
+  refreshes, keep operator replies in deterministic order, and update the
+  current response turn rather than a stale one.
+- Collapse completed request history by default, hide an empty attention area,
+  and preserve sidebar focus and scroll position across periodic refreshes.
+- Hide live-only controls and disable terminal input after a job finishes,
+  stop retrying permanent stream failures, and mark recovered metadata whose
+  terminal output is no longer available.
+- Render conversation output through xterm's parser so ANSI, carriage-return
+  progress, and wrapped lines remain readable while bounding retained output
+  and conversation turns.
+- Drain existing session streams through their final `done` event when a
+  session closes, cancel that session's pending approvals exactly once, and
+  reject holds for jobs that are no longer current.
+- Keep an already-open job stream readable after registry cleanup and show
+  unavailable completed output as archived instead of a misleading input or
+  reconnect error.
+
+### Security
+- Authorize human input before registering a secret for redaction, and use a
+  transactional literal reservation so failed audit or PTY writes cannot leak
+  redaction capacity or rewrite their own audit metadata. Job-scoped secrets
+  are released only after final output has been redacted.
+
 ## [0.9.0] — 2026-07-12
 
 ### Added

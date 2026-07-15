@@ -54,6 +54,8 @@ the agent and **transparent** for you:
 **Live control & observability**
 - A long-lived daemon with a control plane over a Unix socket; `serve --stdio` is a thin shim that proxies MCP to it — so **multiple agents share one daemon and one dashboard**.
 - Web dashboard where **each session renders as a real terminal** (xterm.js, streamed over SSE) with **operator take-over**: type into a job's PTY, hold the agent's input, or pause its output.
+- Workspace labels, bounded state bootstrap, cursor-resumable live updates,
+  English/Russian controls, and responsive desktop/mobile navigation.
 - Approval queue, activity feed, policy/server management, and a **Stop-All**
   kill-switch for active engine jobs.
 - A TUI (`termada top`) and a full inspection CLI.

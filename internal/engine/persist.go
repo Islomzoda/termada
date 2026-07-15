@@ -47,6 +47,9 @@ func (m *Manager) EnablePersistence(path string) (retErr error) {
 	}
 	recovered := make([]Info, 0, len(snap))
 	for _, in := range snap {
+		// Persistence stores metadata only. PTY buffers and stream handles never
+		// survive a daemon restart, even for jobs that were already terminal.
+		in.StreamAvailable = false
 		if !in.Status.Terminal() {
 			in.Status = StatusOrphaned
 			if in.Reason == "" {

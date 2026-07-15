@@ -1,0 +1,45 @@
+name: publish-mcp
+
+on:
+  workflow_run:
+    workflows:
+      - release
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Verify release version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_REF: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          version="$(jq -r '.version' server.json)"
+          test -n "$version"
+          test "$version" != "null"
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            test "v$version" = "$RELEASE_REF"
+          fi
+      - name: Install MCP publisher
+        shell: bash
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+      - name: Validate registry metadata
+        run: ./mcp-publisher validate server.json
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github-oidc
+      - name: Publish registry metadata
+        run: ./mcp-publisher publish

@@ -72,8 +72,13 @@ announcing it.
 
 ## MCP registry
 
-`server.json` points at the versioned GHCR image. After the image exists, follow
-the current [official publisher quickstart](https://modelcontextprotocol.io/registry/quickstart)
+`server.json` points at the versioned GHCR image. After the image exists,
+`.github/workflows/publish-mcp.yml` validates the metadata and publishes it with
+GitHub OIDC. It runs after a successful release workflow and can also be
+dispatched manually when the registry needs to be retried.
+
+For a local fallback, follow the current
+[official publisher quickstart](https://modelcontextprotocol.io/registry/quickstart)
 with an authenticated GitHub session:
 
 ```bash

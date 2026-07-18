@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Frame 5 - Verified outcome</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Space Grotesk";
+          src: local("Space Grotesk");
+        }
+
+        @font-face {
+          font-family: "IBM Plex Mono";
+          src: local("IBM Plex Mono");
+        }
+
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          overflow: hidden;
+          color: #eef2f6;
+          font-family: "Space Grotesk", Inter, system-ui, sans-serif;
+          letter-spacing: 0;
+        }
+
+        * {
+          box-sizing: border-box;
+        }
+
+        .scene-fill {
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          background: #0b0f14;
+        }
+
+        .top-rule {
+          position: absolute;
+          top: 72px;
+          right: 72px;
+          left: 72px;
+          height: 1px;
+          background: #26323d;
+        }
+
+        .scene-label {
+          position: absolute;
+          top: 34px;
+          left: 72px;
+          color: #93a1af;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 18px;
+          font-weight: 600;
+          line-height: 1;
+          text-transform: uppercase;
+        }
+
+        .capture {
+          position: absolute;
+          top: 112px;
+          left: 72px;
+          width: 1488px;
+          height: 930px;
+          overflow: hidden;
+          border: 1px solid #33414d;
+          background: #111820;
+          transform-origin: 50% 50%;
+        }
+
+        .capture-image {
+          position: absolute;
+          inset: 0;
+          display: block;
+          width: 1488px;
+          height: 930px;
+          max-width: none;
+          object-fit: fill;
+        }
+
+        .success-focus {
+          position: absolute;
+          top: 72px;
+          right: 20px;
+          width: 156px;
+          height: 45px;
+          border: 2px solid #3ecf8e;
+          background: rgba(62, 207, 142, 0.05);
+          pointer-events: none;
+        }
+
+        .plan-focus {
+          position: absolute;
+          top: 211px;
+          left: 250px;
+          width: 353px;
+          height: 392px;
+          border: 1px solid rgba(62, 207, 142, 0.78);
+          background: rgba(62, 207, 142, 0.025);
+          pointer-events: none;
+        }
+
+        .step-ring {
+          position: absolute;
+          left: 262px;
+          width: 28px;
+          height: 28px;
+          border: 2px solid #3ecf8e;
+          border-radius: 50%;
+          background: rgba(11, 15, 20, 0.48);
+          pointer-events: none;
+        }
+
+        .step-ring::after {
+          position: absolute;
+          top: 8px;
+          left: 8px;
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          background: #3ecf8e;
+          content: "";
+        }
+
+        .step-one {
+          top: 246px;
+        }
+
+        .step-two {
+          top: 317px;
+        }
+
+        .step-three {
+          top: 402px;
+        }
+
+        .step-four {
+          top: 472px;
+        }
+
+        .evidence-rail {
+          position: absolute;
+          top: 112px;
+          right: 72px;
+          width: 248px;
+          height: 930px;
+          padding-left: 39px;
+          border-left: 1px solid #33414d;
+        }
+
+        .rail-kicker {
+          margin: 3px 0 13px;
+          color: #3ecf8e;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 17px;
+          font-weight: 600;
+          line-height: 1.2;
+          text-transform: uppercase;
+        }
+
+        .rail-title {
+          margin: 0;
+          color: #eef2f6;
+          font-size: 37px;
+          font-weight: 800;
+          line-height: 1.04;
+        }
+
+        .rail-section {
+          padding: 38px 0 36px;
+          border-bottom: 1px solid #33414d;
+        }
+
+        .metric-label {
+          margin: 0 0 9px;
+          color: #93a1af;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 15px;
+          font-weight: 600;
+          line-height: 1.2;
+          text-transform: uppercase;
+        }
+
+        .metric-value {
+          margin: 0;
+          color: #3ecf8e;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 58px;
+          font-weight: 600;
+          line-height: 1;
+          font-variant-numeric: tabular-nums;
+        }
+
+        .progress-track {
+          width: 100%;
+          height: 4px;
+          margin-top: 20px;
+          overflow: hidden;
+          background: #26323d;
+        }
+
+        .progress-fill {
+          display: block;
+          width: 100%;
+          height: 100%;
+          background: #3ecf8e;
+          transform-origin: left center;
+        }
+
+        .proof-stack {
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+          padding-top: 39px;
+        }
+
+        .proof {
+          display: flex;
+          min-height: 82px;
+          flex-direction: column;
+          justify-content: center;
+          padding: 14px 15px;
+          border: 1px solid rgba(62, 207, 142, 0.42);
+          background: rgba(17, 24, 32, 0.92);
+        }
+
+        .proof-name {
+          margin-bottom: 8px;
+          color: #93a1af;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 13px;
+          font-weight: 600;
+          line-height: 1;
+          text-transform: uppercase;
+        }
+
+        .proof-value {
+          color: #3ecf8e;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 25px;
+          font-weight: 600;
+          line-height: 1.08;
+          font-variant-numeric: tabular-nums;
+        }
+
+        .rail-note {
+          margin: 35px 0 0;
+          color: #93a1af;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 15px;
+          font-weight: 500;
+          line-height: 1.55;
+        }
+      </style>
+
+      <div
+        id="root"
+        data-composition-id="05-verified"
+        data-width="1920"
+        data-height="1080"
+        data-duration="24.6"
+      >
+        <div
+          id="f05-stage"
+          class="clip"
+          data-start="0"
+          data-duration="24.6"
+          data-track-index="0"
+        >
+          <div id="f05-content" class="scene-fill">
+            <div class="top-rule"></div>
+            <div class="scene-label">Same mission / verified outcome</div>
+
+            <div id="f05-capture" class="capture">
+              <img
+                id="f05-shot"
+                class="capture-image"
+                src="assets/mission-complete-desktop.jpg"
+                alt="Termada Mission Control showing the completed four-step checkout recovery mission"
+              />
+              <div id="f05-success-focus" class="success-focus"></div>
+              <div id="f05-plan-focus" class="plan-focus"></div>
+              <div id="f05-step-one" class="step-ring step-one"></div>
+              <div id="f05-step-two" class="step-ring step-two"></div>
+              <div id="f05-step-three" class="step-ring step-three"></div>
+              <div id="f05-step-four" class="step-ring step-four"></div>
+            </div>
+
+            <aside id="f05-rail" class="evidence-rail" aria-label="Verified mission outcome">
+              <p class="rail-kicker">Runtime-backed</p>
+              <h2 class="rail-title">Verified outcome</h2>
+
+              <section id="f05-progress" class="rail-section">
+                <p class="metric-label">Mission plan</p>
+                <p class="metric-value">4/4</p>
+                <div class="progress-track">
+                  <span id="f05-progress-fill" class="progress-fill"></span>
+                </div>
+              </section>
+
+              <div class="proof-stack">
+                <div id="f05-http" class="proof">
+                  <span class="proof-name">Health probe</span>
+                  <span class="proof-value">HTTP 200</span>
+                </div>
+                <div id="f05-status" class="proof">
+                  <span class="proof-name">Mission status</span>
+                  <span class="proof-value">Succeeded</span>
+                </div>
+              </div>
+
+              <p id="f05-note" class="rail-note">
+                Four observed jobs, four passed steps, one recorded outcome.
+              </p>
+            </aside>
+          </div>
+        </div>
+      </div>
+
+      <script>
+        window.__timelines = window.__timelines || {};
+
+        const tl = gsap.timeline({ paused: true });
+
+        tl.fromTo(
+          "#f05-content",
+          { opacity: 0, x: 54 },
+          { opacity: 1, x: 0, duration: 0.55, ease: "power2.out" },
+          0
+        );
+        tl.fromTo(
+          "#f05-capture",
+          { opacity: 0.62, scale: 0.992 },
+          { opacity: 1, scale: 1, duration: 0.72, ease: "power2.out" },
+          0.12
+        );
+        tl.fromTo(
+          "#f05-rail",
+          { opacity: 0, x: 28 },
+          { opacity: 1, x: 0, duration: 0.48, ease: "power2.out" },
+          0.58
+        );
+        tl.fromTo(
+          "#f05-success-focus",
+          { opacity: 0, scale: 0.92 },
+          { opacity: 1, scale: 1, duration: 0.44, ease: "power2.out" },
+          1.35
+        );
+        tl.fromTo(
+          "#f05-progress",
+          { opacity: 0, y: 18 },
+          { opacity: 1, y: 0, duration: 0.45, ease: "power2.out" },
+          2.2
+        );
+        tl.fromTo(
+          "#f05-progress-fill",
+          { scaleX: 0 },
+          { scaleX: 1, duration: 0.9, ease: "power2.out" },
+          2.55
+        );
+        tl.fromTo(
+          "#f05-step-one",
+          { opacity: 0, scale: 0.7 },
+          { opacity: 1, scale: 1, duration: 0.4, ease: "power2.out" },
+          4.0
+        );
+        tl.fromTo(
+          "#f05-step-two",
+          { opacity: 0, scale: 0.7 },
+          { opacity: 1, scale: 1, duration: 0.4, ease: "power2.out" },
+          6.35
+        );
+        tl.fromTo(
+          "#f05-step-three",
+          { opacity: 0, scale: 0.7 },
+          { opacity: 1, scale: 1, duration: 0.4, ease: "power2.out" },
+          8.7
+        );
+        tl.fromTo(
+          "#f05-step-four",
+          { opacity: 0, scale: 0.7 },
+          { opacity: 1, scale: 1, duration: 0.4, ease: "power2.out" },
+          11.05
+        );
+        tl.fromTo(
+          "#f05-plan-focus",
+          { opacity: 0 },
+          { opacity: 1, duration: 0.5, ease: "power2.out" },
+          12.8
+        );
+        tl.fromTo(
+          "#f05-http",
+          { opacity: 0, y: 20 },
+          { opacity: 1, y: 0, duration: 0.46, ease: "power2.out" },
+          15.25
+        );
+        tl.fromTo(
+          "#f05-status",
+          { opacity: 0, y: 20 },
+          { opacity: 1, y: 0, duration: 0.46, ease: "power2.out" },
+          17.45
+        );
+        tl.fromTo(
+          "#f05-note",
+          { opacity: 0, y: 14 },
+          { opacity: 1, y: 0, duration: 0.44, ease: "power2.out" },
+          19.25
+        );
+
+        window.__timelines["05-verified"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

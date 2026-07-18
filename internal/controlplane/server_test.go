@@ -16,6 +16,7 @@ import (
 	"github.com/termada/termada/internal/bus"
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/fleet"
+	"github.com/termada/termada/internal/mission"
 	"github.com/termada/termada/internal/plugin"
 	"github.com/termada/termada/internal/policy"
 	"github.com/termada/termada/internal/vault"
@@ -214,6 +215,58 @@ func TestAPIExecRun(t *testing.T) {
 	}
 	if status != "exited" {
 		t.Fatalf("did not reach exited: status=%v", status)
+	}
+}
+
+func TestMissionAPITracksRealJobEvidenceAndOwnerScope(t *testing.T) {
+	m := engine.NewManager(engine.DefaultConfig())
+	t.Cleanup(m.Shutdown)
+	b := bus.New(100)
+	m.SetBus(b)
+	service, err := mission.New(filepath.Join(t.TempDir(), "missions.json"), m, b.Publish, m.Redactor().Redact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel := b.SubscribeReliable(service.RecordEvent)
+	t.Cleanup(cancel)
+	server := New(m, b, nil, nil, nil, nil, "test")
+	server.SetMissions(service)
+	mux := server.Mux()
+
+	code, created := do(t, mux, http.MethodPost, "/api/mission/create", `{"owner":"codex","goal":"repair demo","plan":["diagnose","verify"]}`)
+	if code != http.StatusOK {
+		t.Fatalf("create code=%d body=%v", code, created)
+	}
+	id, _ := created["id"].(string)
+	sessionID, _ := created["session_id"].(string)
+	if id == "" || sessionID == "" {
+		t.Fatalf("missing mission/session id: %v", created)
+	}
+	if code, _ := do(t, mux, http.MethodGet, "/api/mission/get?owner=other&id="+id, ""); code == http.StatusOK {
+		t.Fatal("other owner read mission")
+	}
+
+	job, err := m.Start("codex", sessionID, []string{"true"}, engine.ModeForeground)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-job.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("job did not finish")
+	}
+	for _, step := range []string{"step_1", "step_2"} {
+		body := `{"owner":"codex","mission_id":"` + id + `","step_id":"` + step + `","step_status":"passed","job_id":"` + job.ID + `"}`
+		if code, out := do(t, mux, http.MethodPost, "/api/mission/update", body); code != http.StatusOK {
+			t.Fatalf("update %s code=%d body=%v", step, code, out)
+		}
+	}
+	if code, out := do(t, mux, http.MethodPost, "/api/mission/update", `{"owner":"codex","mission_id":"`+id+`","status":"succeeded","summary":"verified"}`); code != http.StatusOK || out["status"] != mission.StatusSucceeded {
+		t.Fatalf("finish code=%d body=%v", code, out)
+	}
+	code, report := do(t, mux, http.MethodGet, "/api/mission/report?owner=codex&id="+id, "")
+	if code != http.StatusOK || !strings.Contains(report["report"].(string), job.ID) || report["sha256"] == "" {
+		t.Fatalf("report code=%d body=%v", code, report)
 	}
 }
 

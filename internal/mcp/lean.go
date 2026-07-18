@@ -9,11 +9,13 @@ import "github.com/termada/termada/internal/engine"
 // every tool result cheap in tokens without hiding anything actionable. The rich
 // structs still flow to the dashboard/control-plane unchanged.
 
-// leanRun shapes an exec_run result. A handle is included while the command is
-// running and for a terminal capped page whose remaining output is still
-// retrievable through next_cursor.
+// leanRun shapes an exec_run result. The job id is always evidence-bearing:
+// Mission Control uses it to bind completed plan steps to observed execution.
 func leanRun(r *engine.RunResult) map[string]any {
 	m := map[string]any{"status": r.Status}
+	if r.JobID != "" {
+		m["job_id"] = r.JobID
+	}
 	if r.ExitCode != nil {
 		m["exit_code"] = *r.ExitCode
 	}
@@ -42,9 +44,6 @@ func leanRun(r *engine.RunResult) map[string]any {
 		m["has_more"] = true
 	}
 	if !r.Status.Terminal() || r.HasMore {
-		if r.JobID != "" {
-			m["job_id"] = r.JobID
-		}
 		if r.NextCursor != "" {
 			m["next_cursor"] = r.NextCursor
 		}

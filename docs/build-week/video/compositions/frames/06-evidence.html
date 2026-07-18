@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Frame 6 - Evidence, roles, and CTA</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Space Grotesk";
+          src: local("Space Grotesk");
+        }
+
+        @font-face {
+          font-family: "IBM Plex Mono";
+          src: local("IBM Plex Mono");
+        }
+
+        * {
+          box-sizing: border-box;
+        }
+
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          overflow: hidden;
+          color: #eef2f6;
+          font-family: "Space Grotesk", Inter, system-ui, sans-serif;
+          letter-spacing: 0;
+        }
+
+        .f06-stage {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          overflow: hidden;
+          background: #0b0f14;
+        }
+
+        .f06-capture,
+        .f06-capture-shade {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+        }
+
+        .f06-capture {
+          display: block;
+          max-width: none;
+          object-fit: cover;
+          opacity: 0.54;
+          transform-origin: 50% 42%;
+        }
+
+        .f06-capture-shade {
+          background: rgba(11, 15, 20, 0.32);
+        }
+
+        .f06-header {
+          position: absolute;
+          top: 38px;
+          right: 96px;
+          left: 96px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          height: 58px;
+          border-bottom: 1px solid #33414d;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 18px;
+          font-weight: 600;
+          line-height: 1;
+          text-transform: uppercase;
+        }
+
+        .f06-header-label {
+          color: #93a1af;
+        }
+
+        .f06-header-status {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          color: #3ecf8e;
+        }
+
+        .f06-header-status::before {
+          width: 10px;
+          height: 10px;
+          border-radius: 50%;
+          background: #3ecf8e;
+          content: "";
+        }
+
+        .f06-report {
+          position: absolute;
+          top: 132px;
+          right: 96px;
+          left: 96px;
+          height: 444px;
+          padding: 38px 44px;
+          border: 1px solid #3c4b58;
+          background: rgba(17, 24, 32, 0.94);
+        }
+
+        .f06-report-grid {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 260px;
+          gap: 36px;
+          align-items: start;
+        }
+
+        .f06-kicker,
+        .f06-evidence-label,
+        .f06-role-kicker,
+        .f06-platforms {
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-weight: 600;
+          text-transform: uppercase;
+        }
+
+        .f06-kicker {
+          margin: 0 0 22px;
+          color: #5ed4d0;
+          font-size: 17px;
+          line-height: 1;
+        }
+
+        .f06-evidence-label {
+          margin: 0 0 10px;
+          color: #93a1af;
+          font-size: 15px;
+          line-height: 1;
+        }
+
+        .f06-mission-value,
+        .f06-hash-value {
+          margin: 0;
+          color: #eef2f6;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-weight: 600;
+          font-variant-numeric: tabular-nums;
+        }
+
+        .f06-mission-value {
+          font-size: 36px;
+          line-height: 1.15;
+        }
+
+        .f06-hash-block {
+          margin-top: 36px;
+          padding-top: 28px;
+          border-top: 1px solid #33414d;
+        }
+
+        .f06-hash-value {
+          color: #5ed4d0;
+          font-size: 24px;
+          line-height: 1.35;
+          white-space: nowrap;
+        }
+
+        .f06-status-block {
+          display: flex;
+          height: 144px;
+          flex-direction: column;
+          justify-content: center;
+          padding: 22px;
+          border-left: 2px solid #3ecf8e;
+          background: rgba(62, 207, 142, 0.06);
+        }
+
+        .f06-status-value {
+          margin: 7px 0 0;
+          color: #3ecf8e;
+          font-size: 36px;
+          font-weight: 800;
+          line-height: 1;
+          text-transform: uppercase;
+        }
+
+        .f06-role-strip {
+          position: absolute;
+          top: 612px;
+          right: 96px;
+          left: 96px;
+          display: grid;
+          height: 222px;
+          grid-template-columns: minmax(0, 1fr) 116px minmax(0, 1fr);
+          border-top: 1px solid #3c4b58;
+          border-bottom: 1px solid #3c4b58;
+          background: rgba(11, 15, 20, 0.94);
+        }
+
+        .f06-role {
+          display: flex;
+          min-width: 0;
+          flex-direction: column;
+          justify-content: center;
+          padding: 30px 38px;
+        }
+
+        .f06-role-model {
+          border-left: 3px solid #93a1af;
+        }
+
+        .f06-role-runtime {
+          border-right: 3px solid #3ecf8e;
+        }
+
+        .f06-role-kicker {
+          margin: 0 0 14px;
+          color: #93a1af;
+          font-size: 17px;
+          line-height: 1;
+        }
+
+        .f06-role-runtime .f06-role-kicker {
+          color: #3ecf8e;
+        }
+
+        .f06-role-title {
+          margin: 0;
+          color: #eef2f6;
+          font-size: 42px;
+          font-weight: 800;
+          line-height: 1.04;
+          text-transform: uppercase;
+        }
+
+        .f06-role-connector {
+          position: relative;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .f06-role-connector::before {
+          width: 72px;
+          height: 1px;
+          background: #5ed4d0;
+          content: "";
+        }
+
+        .f06-role-connector::after {
+          position: absolute;
+          right: 18px;
+          width: 12px;
+          height: 12px;
+          border-top: 2px solid #5ed4d0;
+          border-right: 2px solid #5ed4d0;
+          content: "";
+          transform: rotate(45deg);
+        }
+
+        .f06-proof-row {
+          position: absolute;
+          top: 854px;
+          right: 96px;
+          left: 96px;
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          height: 42px;
+        }
+
+        .f06-proof {
+          padding: 10px 15px;
+          border: 1px solid rgba(94, 212, 208, 0.52);
+          background: rgba(17, 24, 32, 0.96);
+          color: #5ed4d0;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 14px;
+          font-weight: 600;
+          line-height: 1;
+          text-transform: uppercase;
+        }
+
+        .f06-final {
+          position: absolute;
+          top: 116px;
+          right: 96px;
+          left: 96px;
+          display: flex;
+          height: 720px;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          border-top: 1px solid #3ecf8e;
+          border-bottom: 1px solid #3ecf8e;
+          background: rgba(11, 15, 20, 0.97);
+          text-align: center;
+        }
+
+        .f06-wordmark {
+          margin: 0;
+          color: #eef2f6;
+          font-size: 118px;
+          font-weight: 800;
+          line-height: 0.95;
+          text-transform: uppercase;
+        }
+
+        .f06-open-source {
+          margin: 26px 0 0;
+          color: #3ecf8e;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 25px;
+          font-weight: 600;
+          line-height: 1;
+          text-transform: uppercase;
+        }
+
+        .f06-platforms {
+          margin: 22px 0 0;
+          color: #93a1af;
+          font-size: 20px;
+          line-height: 1;
+        }
+
+        .f06-promise {
+          margin: 54px 0 0;
+          color: #eef2f6;
+          font-size: 54px;
+          font-weight: 700;
+          line-height: 1.1;
+        }
+
+        .f06-promise-accent {
+          color: #5ed4d0;
+        }
+      </style>
+
+      <div
+        id="root"
+        data-composition-id="06-evidence"
+        data-width="1920"
+        data-height="1080"
+        data-duration="17"
+      >
+        <div
+          id="f06-stage"
+          class="clip f06-stage"
+          data-start="0"
+          data-duration="17"
+          data-track-index="0"
+        >
+          <img
+            id="f06-capture"
+            class="f06-capture"
+            src="assets/mission-complete-desktop.jpg"
+            alt="Real Termada Mission Control mission completed with four of four verified steps"
+          />
+          <div class="f06-capture-shade" aria-hidden="true"></div>
+
+          <header id="f06-header" class="f06-header">
+            <span class="f06-header-label">Evidence report / Build Week mission</span>
+            <span class="f06-header-status">Succeeded</span>
+          </header>
+
+          <section id="f06-report" class="f06-report" aria-label="Mission evidence anchors">
+            <p class="f06-kicker">Tamper-evident mission evidence</p>
+            <div class="f06-report-grid">
+              <div>
+                <div id="f06-mission">
+                  <p class="f06-evidence-label">Mission ID</p>
+                  <p class="f06-mission-value">msn_d864e6ebf58a41c6</p>
+                </div>
+                <div id="f06-hash" class="f06-hash-block">
+                  <p class="f06-evidence-label">Report SHA-256</p>
+                  <p class="f06-hash-value">8e95a9a256df05089714d59255b3311f1aff5e29bec40e0e2552dc5c1bc163e1</p>
+                </div>
+              </div>
+              <div id="f06-status" class="f06-status-block">
+                <p class="f06-evidence-label">Recorded outcome</p>
+                <p class="f06-status-value">Succeeded</p>
+              </div>
+            </div>
+          </section>
+
+          <section id="f06-roles" class="f06-role-strip" aria-label="Model and runtime responsibilities">
+            <div id="f06-model-role" class="f06-role f06-role-model">
+              <p class="f06-role-kicker">GPT-5.6</p>
+              <p class="f06-role-title">Adaptive planning</p>
+            </div>
+            <div id="f06-role-connector" class="f06-role-connector" aria-hidden="true"></div>
+            <div id="f06-runtime-role" class="f06-role f06-role-runtime">
+              <p class="f06-role-kicker">Termada runtime</p>
+              <p class="f06-role-title">Deterministic execution + proof</p>
+            </div>
+          </section>
+
+          <div id="f06-proof-row" class="f06-proof-row" aria-label="Control and evidence guarantees">
+            <span class="f06-proof">Policy gate</span>
+            <span class="f06-proof">Human approval</span>
+            <span class="f06-proof">Runtime evidence</span>
+          </div>
+
+          <section id="f06-final" class="f06-final" aria-label="Termada availability">
+            <h2 id="f06-wordmark" class="f06-wordmark">Termada</h2>
+            <p id="f06-open-source" class="f06-open-source">Open source</p>
+            <p id="f06-platforms" class="f06-platforms">macOS + Linux</p>
+            <p id="f06-promise" class="f06-promise">
+              Control the boundary. <span class="f06-promise-accent">Prove the outcome.</span>
+            </p>
+          </section>
+        </div>
+      </div>
+
+      <script>
+        window.__timelines = window.__timelines || {};
+
+        const tl = gsap.timeline({ paused: true });
+
+        tl.fromTo(
+          "#f06-stage",
+          { opacity: 0 },
+          { opacity: 1, duration: 0.45, ease: "power2.out" },
+          0
+        );
+        tl.fromTo(
+          "#f06-capture",
+          { scale: 1.035 },
+          { scale: 1, duration: 10.5, ease: "power1.inOut" },
+          0
+        );
+        tl.fromTo(
+          "#f06-header",
+          { opacity: 0, y: -14 },
+          { opacity: 1, y: 0, duration: 0.42, ease: "power2.out" },
+          0.22
+        );
+        tl.fromTo(
+          "#f06-report",
+          { opacity: 0, scale: 0.992 },
+          { opacity: 1, scale: 1, duration: 0.52, ease: "power2.out" },
+          0.62
+        );
+        tl.fromTo(
+          "#f06-mission",
+          { opacity: 0, x: -20 },
+          { opacity: 1, x: 0, duration: 0.42, ease: "power2.out" },
+          1.28
+        );
+        tl.fromTo(
+          "#f06-hash",
+          { opacity: 0, y: 18 },
+          { opacity: 1, y: 0, duration: 0.48, ease: "power2.out" },
+          2.42
+        );
+        tl.fromTo(
+          "#f06-status",
+          { opacity: 0, x: 20 },
+          { opacity: 1, x: 0, duration: 0.44, ease: "power2.out" },
+          3.62
+        );
+        tl.fromTo(
+          "#f06-roles",
+          { opacity: 0, y: 22 },
+          { opacity: 1, y: 0, duration: 0.48, ease: "power2.out" },
+          4.92
+        );
+        tl.fromTo(
+          "#f06-model-role",
+          { opacity: 0, x: -22 },
+          { opacity: 1, x: 0, duration: 0.44, ease: "power2.out" },
+          5.46
+        );
+        tl.fromTo(
+          "#f06-role-connector",
+          { opacity: 0, scaleX: 0.25 },
+          { opacity: 1, scaleX: 1, duration: 0.46, ease: "power2.out" },
+          6.72
+        );
+        tl.fromTo(
+          "#f06-runtime-role",
+          { opacity: 0, x: 22 },
+          { opacity: 1, x: 0, duration: 0.44, ease: "power2.out" },
+          7.38
+        );
+        tl.fromTo(
+          "#f06-proof-row",
+          { opacity: 0, y: 12 },
+          { opacity: 1, y: 0, duration: 0.44, ease: "power2.out" },
+          8.82
+        );
+        tl.fromTo(
+          "#f06-final",
+          { opacity: 0, scale: 0.985 },
+          { opacity: 1, scale: 1, duration: 0.58, ease: "power2.out" },
+          10.38
+        );
+        tl.fromTo(
+          "#f06-wordmark",
+          { opacity: 0, y: 20 },
+          { opacity: 1, y: 0, duration: 0.46, ease: "power2.out" },
+          10.86
+        );
+        tl.fromTo(
+          "#f06-open-source",
+          { opacity: 0, y: 12 },
+          { opacity: 1, y: 0, duration: 0.38, ease: "power2.out" },
+          11.72
+        );
+        tl.fromTo(
+          "#f06-platforms",
+          { opacity: 0, y: 12 },
+          { opacity: 1, y: 0, duration: 0.38, ease: "power2.out" },
+          12.54
+        );
+        tl.fromTo(
+          "#f06-promise",
+          { opacity: 0, y: 18 },
+          { opacity: 1, y: 0, duration: 0.48, ease: "power2.out" },
+          13.42
+        );
+
+        window.__timelines["06-evidence"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

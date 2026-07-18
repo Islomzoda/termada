@@ -1,6 +1,6 @@
 <h1 align="center">Termada</h1>
 
-<p align="center"><b>The reliable, transparent terminal runtime for AI agents.</b></p>
+<p align="center"><b>Persistent, policy-controlled missions for AI agents operating real environments.</b></p>
 
 <p align="center">
   <a href="https://github.com/Islomzoda/termada/releases"><img alt="Release" src="https://img.shields.io/github/v/release/Islomzoda/termada?color=2ea043&label=release"></a>
@@ -11,12 +11,14 @@
 </p>
 
 Termada is a single-binary, local-first runtime that sits between an AI agent and
-the terminal — local, and remote over SSH. The agent talks to it over the
+the terminal, locally or over SSH. The agent talks to it over the
 [Model Context Protocol](https://modelcontextprotocol.io) and gets a sturdy
 toolset instead of a raw shell: bounded `exec_run` waits, persistent sessions
 that keep `cwd`/env, async jobs with streamed output, PTY input for interactive
 prompts, and structured results — while you watch and control active jobs from a
-live dashboard with a job kill-switch and an approval queue.
+live dashboard with a job kill-switch and an approval queue. **Mission Control**
+adds a durable goal, GPT/Codex-authored plan, runtime-verified steps, interruption
+recovery, and an exportable evidence report around that execution.
 
 <p align="center">
   <img alt="Termada — the live dashboard" src="docs/preview.jpg" width="860">
@@ -40,6 +42,39 @@ the agent and **transparent** for you:
 - **Transparent for you** — one dashboard shows every agent and every session as
   a real terminal; commands matched by `confirm` wait for your approval; one
   button stops all active engine jobs.
+- **Accountable as a mission** — an agent's plan, real commands, approval
+  decisions, verification jobs, outcome, and audit anchors stay together. A plan
+  step cannot pass without a real mission job that Termada observed exiting with
+  code zero.
+
+## Mission Control
+
+For a concrete operational outcome, Codex or another MCP agent starts with
+`mission_create(goal, plan)`. Termada allocates a dedicated persistent session;
+normal `exec_*` calls keep using the same policy, approval, PTY/SSH and audit
+paths. The agent attaches each successful `job_id` with `mission_update`, then
+exports `mission_report`.
+
+<p align="center">
+  <img alt="Termada Mission Control waiting for a human approval" src="docs/build-week/screenshots/approval-desktop.jpg" width="860">
+</p>
+
+The report separates runtime-observed evidence from agent notes, includes exact
+audit sequence/hash anchors, and returns a SHA-256 recorded in the audit. If the
+daemon restarts, a non-terminal mission becomes `interrupted`; `mission_resume`
+creates a fresh session attempt instead of pretending PTY state survived.
+
+Run the isolated real-execution demo:
+
+```bash
+./demo/mission-control/run.sh
+```
+
+It starts a broken loopback HTTP service and a separate demo daemon. The
+protected repair genuinely changes service state and waits for a human approval;
+the final probe must observe HTTP 200. See
+[`demo/mission-control`](demo/mission-control/README.md) and the
+[`2:40 demo script`](docs/build-week/DEMO_SCRIPT.md).
 
 ## Features
 
@@ -55,11 +90,20 @@ the agent and **transparent** for you:
 - A long-lived daemon with a control plane over a Unix socket; `serve --stdio` is a thin shim that proxies MCP to it — so **multiple agents share one daemon and one dashboard**.
 - Web dashboard where **each session renders as a real terminal** (xterm.js, streamed over SSE) with **operator take-over**: type into a job's PTY, hold the agent's input, or pause its output.
 - Workspace labels, bounded state bootstrap, cursor-resumable live updates,
-  English/Russian controls, and responsive desktop/mobile navigation.
+  English controls and responsive desktop/mobile navigation.
 - Approval queue, activity feed, policy/server management, and a **Stop-All**
   kill-switch for active engine jobs.
 - A TUI (`termada top`) and a full inspection CLI.
 - Synchronously recorded, hash-chained, best-effort-redacted audit log. `termada audit verify` verifies the continuous chain across rotated segments.
+
+**Mission Control**
+- Durable, owner-scoped missions with a goal, up to 24 plan steps, dedicated
+  session, multiple resume attempts, bounded evidence timeline and terminal
+  outcome.
+- Runtime enforcement for passed steps (`job_id` from a mission session,
+  `status=exited`, `exit_code=0`) and refusal to succeed while jobs remain active.
+- Mission-first desktop/mobile dashboard with pinned approval, stale/offline
+  states, compact plan/evidence views and Markdown report download.
 
 **Security**
 - Policy engine: every argv word is shell-quoted; allow / deny / confirm matching sees leading assignments, absolute paths, Darwin case variants, known wrappers and explicit shell payloads. Shell scripts/stdin/interactive shells and ambiguous compound commands fail closed when deny/confirm rules exist. Confirm-matched session commands park in a bounded operator queue and time out to deny; non-session actions that require confirmation are refused.
@@ -233,7 +277,9 @@ Agents like Claude Code and Cursor ship with a built-in shell and will reach for
    > for remote servers. Do **not** use the built-in shell or a raw `ssh` client:
    > everything must go through Termada so it is observable, reconnecting, and
    > policy-gated. If a server isn't in `server_list()`, ask me to register it
-   > rather than falling back to `ssh`.
+   > rather than falling back to `ssh`. For a concrete operational outcome,
+   > start with `mission_create`, use its session for every command, attach real
+   > successful job ids to plan steps, and finish with `mission_report`.
 
 <details><summary>Install as a Claude Code plugin</summary>
 
@@ -258,6 +304,7 @@ ambiguous compound payloads fail closed when deny/confirm rules are present.
 
 | Group | Tools |
 | --- | --- |
+| Missions | `mission_create` · `mission_list` · `mission_get` · `mission_update` · `mission_resume` · `mission_report` |
 | Run | `exec_run` · `exec_start` · `exec_poll` · `exec_write` · `exec_signal` · `exec_kill` · `exec_list` |
 | Sessions | `session_create` · `session_list` · `session_close` |
 | Files & logs | `file_read` · `file_write` · `logs_tail` |
@@ -291,6 +338,8 @@ termada update                       Unix self-update; Windows prints manual pat
 - [docs/SECURITY.md](docs/SECURITY.md) — threat model: what's protected and what isn't.
 - [docs/PLUGINS.md](docs/PLUGINS.md) — writing out-of-process tool plugins.
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — release & MCP-registry process.
+- [docs/build-week/SUBMISSION.md](docs/build-week/SUBMISSION.md) — OpenAI Build Week submission package.
+- [docs/build-week/ARCHITECTURE.md](docs/build-week/ARCHITECTURE.md) — Mission Control architecture and trust boundaries.
 
 ## Architecture
 
@@ -312,6 +361,7 @@ internal/tui           termada top
 internal/fleet         server selection + concurrent aggregation
 internal/sshx          SSH runner (vault / agent / key auth, TOFU host keys)
 internal/mcp           MCP JSON-RPC stdio server + tools
+internal/mission       durable missions, evidence validation, recovery, reports
 ```
 
 ## Development
@@ -319,6 +369,7 @@ internal/mcp           MCP JSON-RPC stdio server + tools
 ```bash
 make vet test    # vet + tests
 make race        # tests under the race detector
+./demo/mission-control/verify_demo.sh  # real MCP + approval + HTTP 503→200 flow
 ```
 
 Engine tests exercise a real PTY and `bash`; fleet logic is unit-tested with a

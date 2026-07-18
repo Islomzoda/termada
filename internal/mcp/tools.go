@@ -3,6 +3,7 @@ package mcp
 import (
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/errs"
+	"github.com/termada/termada/internal/mission"
 )
 
 type toolDef struct {
@@ -391,6 +392,96 @@ func (s *Server) registerTools() {
 				return nil, asErr(err)
 			}
 			return map[string]any{"ok": true}, nil
+		},
+	})
+
+	s.add(toolDef{
+		Name:        "mission_create",
+		Description: "Create a durable operational mission with a dedicated persistent session, goal, and GPT/Codex-authored plan. Use the returned session_id for every exec call in the mission so Termada can correlate commands, approvals, and outcomes into one evidence timeline. target defaults to local; remote targets must name a configured Termada server.",
+		InputSchema: obj(map[string]any{
+			"title":     map[string]any{"type": "string", "description": "short operator-facing mission title; derived from goal when omitted"},
+			"goal":      map[string]any{"type": "string", "description": "the concrete operational outcome to achieve"},
+			"target":    map[string]any{"type": "string", "description": "local or a configured Termada server name"},
+			"workspace": map[string]any{"type": "string", "description": "optional repository/service label shown in Mission Control"},
+			"plan":      map[string]any{"type": "array", "minItems": 1, "maxItems": 24, "items": map[string]any{"type": "string"}, "description": "ordered, testable plan steps authored before execution"},
+		}, "goal", "plan"),
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			created, err := mgr.MissionCreate(s.agentID, mission.CreateRequest{Title: argString(a, "title"), Goal: argString(a, "goal"), Target: argString(a, "target"), Workspace: argString(a, "workspace"), Plan: argStrings(a, "plan")})
+			if err != nil {
+				return nil, asErr(err)
+			}
+			return created, nil
+		},
+	})
+
+	s.add(toolDef{
+		Name:        "mission_list",
+		Description: "List your durable missions newest-first. Use status to filter; omit it for all. Results are compact summaries without the full timeline.",
+		InputSchema: obj(map[string]any{
+			"status": map[string]any{"type": "string", "enum": []string{mission.StatusPlanned, mission.StatusRunning, mission.StatusNeedsAttention, mission.StatusInterrupted, mission.StatusSucceeded, mission.StatusFailed, mission.StatusCancelled}},
+		}),
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			return map[string]any{"missions": mgr.MissionList(s.agentID, argString(a, "status"))}, nil
+		},
+	})
+
+	s.add(toolDef{
+		Name:        "mission_get",
+		Description: "Get one mission with its plan and bounded runtime evidence timeline. Use this to recover context before continuing work.",
+		InputSchema: obj(map[string]any{"mission_id": strSchema}, "mission_id"),
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			result, err := mgr.MissionGet(s.agentID, argString(a, "mission_id"))
+			if err != nil {
+				return nil, asErr(err)
+			}
+			return result, nil
+		},
+	})
+
+	s.add(toolDef{
+		Name:        "mission_update",
+		Description: "Update a mission step or finish the mission. A step can be pending/running/passed/failed/skipped. passed REQUIRES a job_id from this mission that Termada observed exiting with code 0; this prevents unsupported success claims. Mark succeeded only after every step is passed or explicitly skipped and all mission jobs have ended. summary is the agent-authored outcome and is labeled as such in the evidence report.",
+		InputSchema: obj(map[string]any{
+			"mission_id":  strSchema,
+			"step_id":     strSchema,
+			"step_status": map[string]any{"type": "string", "enum": []string{mission.StepPending, mission.StepRunning, mission.StepPassed, mission.StepFailed, mission.StepSkipped}},
+			"job_id":      map[string]any{"type": "string", "description": "runtime job evidence; required when step_status=passed"},
+			"note":        map[string]any{"type": "string", "description": "optional agent note for this step"},
+			"status":      map[string]any{"type": "string", "enum": []string{mission.StatusSucceeded, mission.StatusFailed, mission.StatusCancelled}},
+			"summary":     map[string]any{"type": "string", "description": "concise outcome, changes, and verification summary"},
+		}, "mission_id"),
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			result, err := mgr.MissionUpdate(s.agentID, argString(a, "mission_id"), mission.UpdateRequest{StepID: argString(a, "step_id"), StepStatus: argString(a, "step_status"), JobID: argString(a, "job_id"), Note: argString(a, "note"), Status: argString(a, "status"), Summary: argString(a, "summary")})
+			if err != nil {
+				return nil, asErr(err)
+			}
+			return result, nil
+		},
+	})
+
+	s.add(toolDef{
+		Name:        "mission_resume",
+		Description: "Resume a mission marked interrupted after a daemon restart. Termada creates a fresh session attempt and preserves the prior plan and evidence. Re-verify remote state before retrying any operation because an orphaned process may still be running.",
+		InputSchema: obj(map[string]any{"mission_id": strSchema}, "mission_id"),
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			result, err := mgr.MissionResume(s.agentID, argString(a, "mission_id"))
+			if err != nil {
+				return nil, asErr(err)
+			}
+			return result, nil
+		},
+	})
+
+	s.add(toolDef{
+		Name:        "mission_report",
+		Description: "Export the mission's Markdown evidence report: goal, outcome, verified plan steps, real command lifecycle, approvals, and integrity limitations. Terminal output is intentionally excluded; the separate hash-chained audit remains verifiable with `termada audit verify`.",
+		InputSchema: obj(map[string]any{"mission_id": strSchema}, "mission_id"),
+		Handler: func(a map[string]any) (any, *errs.Error) {
+			report, err := mgr.MissionReport(s.agentID, argString(a, "mission_id"))
+			if err != nil {
+				return nil, asErr(err)
+			}
+			return report, nil
 		},
 	})
 

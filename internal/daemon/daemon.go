@@ -35,6 +35,7 @@ import (
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/fleet"
 	"github.com/termada/termada/internal/ids"
+	"github.com/termada/termada/internal/mission"
 	"github.com/termada/termada/internal/notify"
 	"github.com/termada/termada/internal/plugin"
 	"github.com/termada/termada/internal/policy"
@@ -73,6 +74,7 @@ type Daemon struct {
 	vault    *vault.Vault
 	fleet    *fleet.Manager
 	plugins  *plugin.Manager
+	missions *mission.Service
 	token    string
 	cliToken string
 }
@@ -179,6 +181,10 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	if err := plugins.Load(); err != nil {
 		logger.Printf("warning: plugin load: %v", err)
 	}
+	missions, err := mission.New(filepath.Join(RuntimeDir(), "missions.json"), mgr, b.Publish, mgr.Redactor().Redact)
+	if err != nil {
+		return nil, fmt.Errorf("open mission store: %w", err)
+	}
 
 	token, err := loadOrCreateTokenAt(TokenPath())
 	if err != nil {
@@ -190,7 +196,7 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 	}
 
 	d := &Daemon{cfg: cfg, version: version, logger: logger, mgr: mgr, bus: b, audit: aud,
-		vault: v, fleet: fl, plugins: plugins, token: token, cliToken: cliToken}
+		vault: v, fleet: fl, plugins: plugins, missions: missions, token: token, cliToken: cliToken}
 	initialized = true
 	return d, nil
 }
@@ -198,9 +204,9 @@ func New(cfg config.Config, version string, logger *log.Logger) (*Daemon, error)
 // Run starts the listeners and blocks until ctx is cancelled.
 func (d *Daemon) Run(ctx context.Context) error {
 	ownsSocket := false
-	cancelAudit := func() {}
+	cancelDurable := func() {}
 	defer func() {
-		d.shutdownServices(cancelAudit)
+		d.shutdownServices(cancelDurable)
 		if ownsSocket {
 			_ = os.Remove(SocketPath())
 		}
@@ -218,7 +224,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	// Audit is a synchronous reliable sink: Publish does not return until the
 	// record is appended and fsynced, and delivery errors latch audit unhealthy.
-	cancelAudit = d.bus.SubscribeReliable(d.audit.FromBus)
+	// Keep one ordered durable sink: the tamper-evident audit is authoritative,
+	// then Mission Control records its bounded session projection. Execution
+	// fails closed if either record cannot be persisted.
+	cancelDurable = d.bus.SubscribeReliable(func(event bus.Event) error {
+		if err := d.audit.FromBus(event); err != nil {
+			return err
+		}
+		return d.missions.RecordEvent(event)
+	})
 
 	// Notifications (desktop + optional Telegram) on key events.
 	notifier := notify.New(d.cfg.Notifications.Desktop, notify.TelegramConfig{
@@ -266,6 +280,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}()
 
 	cp := controlplane.New(d.mgr, d.bus, d.audit, d.fleet, d.vault, d.plugins, d.version)
+	cp.SetMissions(d.missions)
 	root := daemonRootHandler(cp.Mux(), dashboard.Handler())
 
 	// Unix socket: agent operations are owner-scoped; operator operations require
@@ -337,10 +352,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 // shutdownServices keeps the reliable audit sink installed until the engine has
 // closed sessions and drained every tracked job watcher. Only then is delivery
 // cancelled and the audit file closed.
-func (d *Daemon) shutdownServices(cancelAudit func()) {
+func (d *Daemon) shutdownServices(cancelDurable func()) {
 	d.mgr.Shutdown()
-	if cancelAudit != nil {
-		cancelAudit()
+	if cancelDurable != nil {
+		cancelDurable()
 	}
 	_ = d.audit.Close()
 }

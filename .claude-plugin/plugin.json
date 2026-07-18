@@ -1,7 +1,7 @@
 {
   "name": "termada",
-  "description": "Reliable, transparent terminal runtime for AI agents — persistent local/SSH sessions, async jobs, interactive prompts, structured output, and a human dashboard with policy/approval/audit. Bundles the termada MCP server config and the usage skill. Requires the `termada` binary on PATH (brew install Islomzoda/tap/termada, or a GitHub release).",
-  "version": "0.10.0",
+  "description": "Persistent, policy-controlled missions for AI agents operating local and SSH environments, with durable plans, human approvals, runtime-verified evidence, and a live operator dashboard. Bundles the Termada MCP server config and usage skill. Requires the `termada` binary on PATH (brew install Islomzoda/tap/termada, or a GitHub release).",
+  "version": "0.11.0",
   "author": {
     "name": "Islomzoda",
     "url": "https://github.com/Islomzoda"
@@ -9,7 +9,7 @@
   "homepage": "https://github.com/Islomzoda/termada",
   "repository": "https://github.com/Islomzoda/termada",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "terminal", "shell", "ssh", "agent", "pty"],
+  "keywords": ["mcp", "terminal", "mission", "approval", "audit", "ssh", "agent", "pty"],
   "mcpServers": {
     "termada": {
       "command": "termada",

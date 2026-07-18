@@ -103,8 +103,13 @@ func TestDashboardAssetsStayWithinRuntimeBudgets(t *testing.T) {
 	index := dashboardIndexBody(t)
 	css := dashboardAsset(t, "assets/app.css")
 	js := dashboardAsset(t, "assets/app.js")
+	missionCSS := dashboardAsset(t, "assets/mission.css")
+	missionJS := dashboardAsset(t, "assets/mission.js")
 	if len(index) > 12<<10 || len(css) > 28<<10 || len(js) > 88<<10 {
 		t.Fatalf("dashboard asset budget exceeded: index=%d css=%d js=%d", len(index), len(css), len(js))
+	}
+	if len(missionCSS) > 10<<10 || len(missionJS) > 20<<10 {
+		t.Fatalf("mission asset budget exceeded: css=%d js=%d", len(missionCSS), len(missionJS))
 	}
 	for _, required := range []string{
 		`@media(max-width:780px)`,
@@ -315,6 +320,7 @@ func TestDashboardReconnectsFromCursorAndSurfacesAPIErrors(t *testing.T) {
 		`info.job.stream_available===false`,
 		`function currentResponsePart(`,
 		`info.streamErrors>=3`,
+		`data-action="retry-stream"`,
 		`es.onerror=`,
 		`if(!r.ok&&!data.error)`,
 		`data.error={code:'http_'+r.status`,
@@ -324,6 +330,27 @@ func TestDashboardReconnectsFromCursorAndSurfacesAPIErrors(t *testing.T) {
 	} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("dashboard is missing reconnect/error primitive %q", required)
+		}
+	}
+}
+
+func TestDashboardMissionControlIsEvidenceFirstAndResponsive(t *testing.T) {
+	body := dashboardBody(t)
+	for _, required := range []string{
+		`id="side-tab-missions"`,
+		`id="mission-panel"`,
+		`mission.js?v=`,
+		`MissionControl.receiveState(s.missions||[]`,
+		`function renderDetail(`,
+		`function renderEvent(`,
+		`data-action="mission-download"`,
+		`data-action="resolve" data-kind="approve"`,
+		`showingLastKnown`,
+		`controlPlaneUnavailable`,
+		`@media(max-width:780px)`,
+	} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("dashboard is missing Mission Control primitive %q", required)
 		}
 	}
 }
@@ -361,14 +388,17 @@ func TestDashboardPromptUsesOneSafeQueueInBothViews(t *testing.T) {
 	}
 }
 
-func TestDashboardLocalizesAndUsesEventDrivenBoundedRefreshes(t *testing.T) {
+func TestDashboardUsesEnglishAndEventDrivenBoundedRefreshes(t *testing.T) {
 	body := dashboardBody(t)
 	markup := dashboardIndexBody(t)
 	if !strings.Contains(markup, `<html lang="en">`) {
-		t.Fatal("dashboard does not declare English as its default language")
+		t.Fatal("dashboard does not declare English as its language")
 	}
-	if !strings.Contains(body, "const COPY={") || !strings.Contains(body, "termada_locale") {
-		t.Fatal("dashboard is missing its compact locale dictionary")
+	if !strings.Contains(body, "const COPY={") || !strings.Contains(body, "function tr(key){return COPY.en[key]||key;}") {
+		t.Fatal("dashboard is missing its English copy dictionary")
+	}
+	if strings.Contains(body, "termada_locale") || strings.Contains(body, "toggleLocale") || strings.Contains(body, "COPY.ru") || strings.Contains(markup, "toggle-locale") {
+		t.Fatal("dashboard still exposes language switching")
 	}
 	for _, required := range []string{
 		`let refreshInFlight=null,refreshQueued=false`,
@@ -387,7 +417,7 @@ func TestDashboardLocalizesAndUsesEventDrivenBoundedRefreshes(t *testing.T) {
 }
 
 func dashboardBody(t *testing.T) string {
-	return dashboardIndexBody(t) + dashboardAsset(t, "assets/app.css") + dashboardAsset(t, "assets/app.js")
+	return dashboardIndexBody(t) + dashboardAsset(t, "assets/app.css") + dashboardAsset(t, "assets/app.js") + dashboardAsset(t, "assets/mission.css") + dashboardAsset(t, "assets/mission.js")
 }
 
 func dashboardIndexBody(t *testing.T) string {

@@ -5,6 +5,7 @@ package controlplane
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/errs"
 	"github.com/termada/termada/internal/fleet"
+	"github.com/termada/termada/internal/mission"
 	"github.com/termada/termada/internal/plugin"
 	"github.com/termada/termada/internal/policy"
 	"github.com/termada/termada/internal/vault"
@@ -79,13 +81,14 @@ func operatorAttribution(r *http.Request) (actor, source string) {
 
 // Server exposes the engine over HTTP/JSON.
 type Server struct {
-	mgr     *engine.Manager
-	bus     *bus.Bus
-	audit   *audit.Logger
-	fleet   *fleet.Manager
-	vault   *vault.Vault
-	plugins *plugin.Manager
-	version string
+	mgr      *engine.Manager
+	bus      *bus.Bus
+	audit    *audit.Logger
+	fleet    *fleet.Manager
+	vault    *vault.Vault
+	plugins  *plugin.Manager
+	missions *mission.Service
+	version  string
 
 	runtimeMu    sync.RWMutex
 	dashboardURL string
@@ -95,6 +98,9 @@ type Server struct {
 func New(mgr *engine.Manager, b *bus.Bus, a *audit.Logger, fl *fleet.Manager, v *vault.Vault, pl *plugin.Manager, version string) *Server {
 	return &Server{mgr: mgr, bus: b, audit: a, fleet: fl, vault: v, plugins: pl, version: version}
 }
+
+// SetMissions enables the daemon-backed Mission Control API.
+func (s *Server) SetMissions(service *mission.Service) { s.missions = service }
 
 // SetDashboardURL publishes the actual browseable address selected by the
 // daemon. It may differ from config when serve --bind or port 0 is used.
@@ -168,8 +174,168 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/api/servers/remove", s.hServerRemove)
 	mux.HandleFunc("/api/servers/test", s.hServerTest)
 	mux.HandleFunc("/api/agent/connect", s.hAgentConnect)
+	mux.HandleFunc("/api/mission/create", s.hMissionCreate)
+	mux.HandleFunc("/api/mission/list", s.hMissionList)
+	mux.HandleFunc("/api/mission/get", s.hMissionGet)
+	mux.HandleFunc("/api/mission/update", s.hMissionUpdate)
+	mux.HandleFunc("/api/mission/resume", s.hMissionResume)
+	mux.HandleFunc("/api/mission/report", s.hMissionReport)
 	mux.HandleFunc("/metrics", s.hMetrics)
 	return mux
+}
+
+type missionRequest struct {
+	Owner      string   `json:"owner"`
+	MissionID  string   `json:"mission_id"`
+	Title      string   `json:"title"`
+	Goal       string   `json:"goal"`
+	Target     string   `json:"target"`
+	Workspace  string   `json:"workspace"`
+	Plan       []string `json:"plan"`
+	StepID     string   `json:"step_id"`
+	StepStatus string   `json:"step_status"`
+	JobID      string   `json:"job_id"`
+	Note       string   `json:"note"`
+	Status     string   `json:"status"`
+	Summary    string   `json:"summary"`
+}
+
+func (s *Server) requireMissions(w http.ResponseWriter) bool {
+	if s.missions != nil {
+		return true
+	}
+	writeErr(w, errs.New(errs.NotSupported, "Mission Control requires the termada daemon"))
+	return false
+}
+
+func (s *Server) hMissionCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireMissions(w) {
+		return
+	}
+	var req missionRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	created, err := s.missions.Create(owner, mission.CreateRequest{Title: req.Title, Goal: req.Goal, Target: req.Target, Workspace: req.Workspace, Plan: req.Plan})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, created)
+}
+
+func (s *Server) hMissionList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireMissions(w) {
+		return
+	}
+	owner, err := s.ownerFor(r, r.URL.Query().Get("owner"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"missions": s.missions.ListSummaries(owner, r.URL.Query().Get("status"))})
+}
+
+func (s *Server) hMissionGet(w http.ResponseWriter, r *http.Request) {
+	if !s.requireMissions(w) {
+		return
+	}
+	owner, err := s.ownerFor(r, r.URL.Query().Get("owner"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	result, err := s.missions.Get(owner, r.URL.Query().Get("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, result)
+}
+
+func (s *Server) hMissionUpdate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireMissions(w) {
+		return
+	}
+	var req missionRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	updated, err := s.missions.Update(owner, req.MissionID, mission.UpdateRequest{StepID: req.StepID, StepStatus: req.StepStatus, JobID: req.JobID, Note: req.Note, Status: req.Status, Summary: req.Summary})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, updated)
+}
+
+func (s *Server) hMissionResume(w http.ResponseWriter, r *http.Request) {
+	if !s.requireMissions(w) {
+		return
+	}
+	var req missionRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	owner, err := s.ownerFor(r, req.Owner)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	resumed, err := s.missions.Resume(owner, req.MissionID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, resumed)
+}
+
+func (s *Server) hMissionReport(w http.ResponseWriter, r *http.Request) {
+	if !s.requireMissions(w) {
+		return
+	}
+	owner, err := s.ownerFor(r, r.URL.Query().Get("owner"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	result, err := s.missions.Get(owner, r.URL.Query().Get("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var records []audit.Record
+	if s.audit != nil {
+		records, err = s.audit.Tail(10_000)
+		if err != nil {
+			writeErr(w, errs.New(errs.Internal, "read audit evidence: %v", err))
+			return
+		}
+	}
+	report := mission.ReportMarkdownWithAudit(result, records)
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(report)))
+	if err := s.publish(bus.Event{Type: "mission.report_generated", AgentID: result.Owner, SessionID: result.SessionID, Message: result.Title, Data: map[string]any{"mission_id": result.ID, "sha256": hash}}); err != nil {
+		writeErr(w, errs.New(errs.Internal, "record report generation: %v", err))
+		return
+	}
+	if r.URL.Query().Get("download") == "1" {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", result.ID+"-evidence.md"))
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.Header().Set("X-Termada-Report-SHA256", hash)
+		_, _ = io.WriteString(w, report)
+		return
+	}
+	writeJSON(w, map[string]any{"mission_id": result.ID, "format": "markdown", "sha256": hash, "report": report})
 }
 
 func (s *Server) hPing(w http.ResponseWriter, r *http.Request) {
@@ -1335,6 +1501,10 @@ func (s *Server) hStatus(w http.ResponseWriter, r *http.Request) {
 	if s.fleet != nil {
 		servers = s.fleet.ServerList()
 	}
+	missions := []mission.Summary{}
+	if s.missions != nil {
+		missions = s.missions.ListSummaries("", "")
+	}
 	writeJSON(w, map[string]any{
 		"version":       s.version,
 		"dashboard_url": s.getDashboardURL(),
@@ -1343,6 +1513,7 @@ func (s *Server) hStatus(w http.ResponseWriter, r *http.Request) {
 		"pending":       s.mgr.ListPending(),
 		"servers":       servers,
 		"agents":        s.mgr.Agents(),
+		"missions":      missions,
 		"persistence":   s.mgr.PersistenceStatus(),
 	})
 }
@@ -1397,6 +1568,10 @@ func (s *Server) hDashboardState(w http.ResponseWriter, r *http.Request) {
 	if s.fleet != nil {
 		servers = s.fleet.ServerList()
 	}
+	missions := []mission.Summary{}
+	if s.missions != nil {
+		missions = s.missions.ListSummaries("", "")
+	}
 	writeJSON(w, map[string]any{
 		"version":        s.version,
 		"dashboard_url":  s.getDashboardURL(),
@@ -1406,6 +1581,7 @@ func (s *Server) hDashboardState(w http.ResponseWriter, r *http.Request) {
 		"pending":        s.mgr.ListPending(),
 		"servers":        servers,
 		"agents":         s.mgr.Agents(),
+		"missions":       missions,
 		"persistence":    s.mgr.PersistenceStatus(),
 		"state_revision": revision,
 	})

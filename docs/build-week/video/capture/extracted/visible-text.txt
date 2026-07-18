@@ -1,0 +1,3 @@
+Termada Mission Control turns an operational goal into a durable, policy-gated
+mission. A real demo observes HTTP 503, waits for a human approval, applies the
+protected repair, verifies HTTP 200, and exports a SHA-256 evidence report.

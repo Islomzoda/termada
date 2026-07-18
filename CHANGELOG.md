@@ -6,6 +6,35 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-07-18
+
+### Added
+- Add Mission Control with durable owner-scoped goals, plans, dedicated session
+  attempts, interruption recovery, runtime-verified plan steps and Markdown
+  evidence reports containing retained audit chain anchors and a recorded
+  report SHA-256.
+- Add six MCP mission tools and retain `job_id` in completed `exec_run` results
+  so agents can attach real execution evidence to their plan.
+- Add a mission-first responsive dashboard with pinned approvals, explicit
+  offline/stale states, retryable streams, evidence download and Build Week
+  desktop/mobile screenshots.
+- Add an isolated one-command demo and automated MCP verification that performs
+  a real HTTP 503-to-200 repair through a confirm-gated operation.
+
+### Changed
+- Focus the dashboard on an English-only competition experience and remove
+  locale detection, language persistence, and the language switcher.
+
+### Fixed
+- Keep mobile header accessible names and mission timeline status labels aligned
+  with the visible English copy, prevent mission header/plan CSS collisions,
+  and keep approval actions in the first viewport on desktop and mobile.
+
+### Security
+- Refuse unsupported mission success claims unless plan evidence resolves to a
+  mission-owned job that exited with code zero; refuse success while mission
+  jobs remain active and keep agent notes distinct from runtime evidence.
+
 ## [0.10.0] — 2026-07-16
 
 ### Changed

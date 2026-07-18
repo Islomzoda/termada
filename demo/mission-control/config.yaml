@@ -1,0 +1,21 @@
+agent_transport: stdio
+http:
+  bind: 127.0.0.1:17717
+dashboard:
+  enabled: true
+  open_browser: false
+notifications:
+  desktop: false
+defaults:
+  timeout_ms: 30000
+  confirm_timeout_ms: 180000
+agents:
+  - id: build-week
+    policy: mission-demo
+policies:
+  mission-demo:
+    confirm:
+      - "apply-fix.sh*"
+vault:
+  backend: encrypted_file
+  file: ~/.config/termada/vault.age

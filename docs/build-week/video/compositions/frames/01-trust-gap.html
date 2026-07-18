@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Space Grotesk";
+          src: local("Space Grotesk");
+          font-style: normal;
+          font-weight: 300 800;
+        }
+
+        @font-face {
+          font-family: "IBM Plex Mono";
+          src: local("IBM Plex Mono");
+          font-style: normal;
+          font-weight: 300 700;
+        }
+
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          overflow: hidden;
+          background: #0b0f14;
+          color: #eef2f6;
+          font-family: "Space Grotesk", "Inter", system-ui, sans-serif;
+        }
+
+        .scene-fill {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          overflow: hidden;
+          background: #0b0f14;
+        }
+
+        .product-world {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          transform-origin: 68% 50%;
+          will-change: transform, opacity;
+        }
+
+        .product-capture {
+          display: block;
+          width: 1920px;
+          height: 1080px;
+          object-fit: cover;
+          opacity: 0.72;
+          filter: saturate(0.78) contrast(1.03);
+        }
+
+        .focus-layer {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          background: rgba(4, 8, 12, 0.46);
+        }
+
+        .edge-rail {
+          position: absolute;
+          inset: 0 auto 0 0;
+          display: flex;
+          width: 708px;
+          height: 1080px;
+          flex-direction: column;
+          padding: 84px 64px 72px 96px;
+          background: rgba(11, 15, 20, 0.94);
+          border-right: 1px solid rgba(147, 161, 175, 0.3);
+        }
+
+        .brand-lockup {
+          display: flex;
+          align-items: center;
+          gap: 18px;
+          width: 100%;
+        }
+
+        .brand-mark {
+          display: grid;
+          width: 34px;
+          height: 34px;
+          grid-template-columns: repeat(3, 1fr);
+          grid-template-rows: repeat(3, 1fr);
+          gap: 3px;
+        }
+
+        .brand-mark span {
+          display: block;
+          width: 100%;
+          height: 100%;
+          background: #eef2f6;
+        }
+
+        .brand-name {
+          font-size: 34px;
+          font-weight: 800;
+          line-height: 1;
+          letter-spacing: 0;
+        }
+
+        .brand-context {
+          margin-left: auto;
+          color: #5ed4d0;
+          font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+          font-size: 17px;
+          font-weight: 500;
+          line-height: 1;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+
+        .rail-divider {
+          display: block;
+          width: 100%;
+          height: 1px;
+          margin-top: 34px;
+          background: rgba(147, 161, 175, 0.3);
+          transform-origin: left center;
+        }
+
+        .promise {
+          max-width: 520px;
+          margin-top: 64px;
+          color: #93a1af;
+          font-size: 27px;
+          font-weight: 450;
+          line-height: 1.38;
+          letter-spacing: 0;
+        }
+
+        .trust-gap {
+          margin-top: 34px;
+        }
+
+        .command-state {
+          display: flex;
+          align-items: center;
+          gap: 13px;
+          color: #3ecf8e;
+          font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+          font-size: 21px;
+          font-weight: 500;
+          line-height: 1.2;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+
+        .state-dot {
+          display: block;
+          width: 11px;
+          height: 11px;
+          flex: 0 0 11px;
+          border-radius: 50%;
+          background: #3ecf8e;
+          box-shadow: 0 0 0 5px rgba(62, 207, 142, 0.12);
+        }
+
+        .trust-headline {
+          max-width: 540px;
+          margin-top: 18px;
+          font-size: 74px;
+          font-weight: 800;
+          line-height: 0.98;
+          letter-spacing: 0;
+        }
+
+        .trust-headline .not-equal {
+          color: #f2b84b;
+        }
+
+        .proof-list {
+          display: grid;
+          width: 100%;
+          margin-top: auto;
+          border-top: 1px solid rgba(147, 161, 175, 0.3);
+        }
+
+        .proof-item {
+          display: grid;
+          grid-template-columns: 38px 142px 1fr;
+          align-items: center;
+          min-height: 68px;
+          border-bottom: 1px solid rgba(147, 161, 175, 0.2);
+        }
+
+        .proof-index {
+          color: #5ed4d0;
+          font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+          font-size: 16px;
+          font-weight: 500;
+          font-variant-numeric: tabular-nums;
+          letter-spacing: 0;
+        }
+
+        .proof-word {
+          color: #eef2f6;
+          font-size: 23px;
+          font-weight: 700;
+          line-height: 1;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+
+        .proof-detail {
+          color: #93a1af;
+          font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+          font-size: 15px;
+          font-weight: 500;
+          line-height: 1.2;
+          letter-spacing: 0;
+          text-align: right;
+        }
+
+        .capture-label {
+          position: absolute;
+          top: 82px;
+          right: 96px;
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          padding: 14px 18px;
+          background: rgba(11, 15, 20, 0.86);
+          border: 1px solid rgba(62, 207, 142, 0.36);
+          border-radius: 4px;
+          color: #3ecf8e;
+          font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+          font-size: 17px;
+          font-weight: 500;
+          line-height: 1;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+
+        .capture-label .capture-dot {
+          display: block;
+          width: 9px;
+          height: 9px;
+          border-radius: 50%;
+          background: #3ecf8e;
+        }
+
+        .capture-caption {
+          position: absolute;
+          right: 96px;
+          bottom: 72px;
+          display: flex;
+          align-items: center;
+          gap: 16px;
+          padding: 16px 20px;
+          background: rgba(11, 15, 20, 0.9);
+          border-left: 3px solid #5ed4d0;
+          color: #eef2f6;
+          font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+          font-size: 19px;
+          font-weight: 500;
+          line-height: 1;
+          letter-spacing: 0;
+        }
+
+        .capture-caption .muted {
+          color: #93a1af;
+        }
+      </style>
+
+      <div
+        id="root"
+        data-composition-id="01-trust-gap"
+        data-duration="16.6"
+        data-width="1920"
+        data-height="1080"
+      >
+        <div
+          id="frame-01-trust-gap-scene"
+          class="clip scene-fill"
+          data-start="0"
+          data-duration="16.6"
+          data-track-index="1"
+        >
+          <div id="frame-01-trust-gap-product" class="product-world">
+            <img
+              id="frame-01-trust-gap-capture"
+              class="product-capture"
+              src="assets/mission-complete-desktop.jpg"
+              alt="Termada Mission Control showing a completed four-step repair mission"
+            />
+          </div>
+          <div class="focus-layer" aria-hidden="true"></div>
+
+          <div id="frame-01-trust-gap-rail" class="edge-rail">
+            <div id="frame-01-trust-gap-brand" class="brand-lockup">
+              <div class="brand-mark" aria-hidden="true">
+                <span></span><span></span><span></span>
+                <span></span><span></span><span></span>
+                <span></span><span></span><span></span>
+              </div>
+              <div class="brand-name">TERMADA</div>
+              <div class="brand-context">Mission Control</div>
+            </div>
+
+            <div id="frame-01-trust-gap-divider" class="rail-divider"></div>
+
+            <div id="frame-01-trust-gap-promise" class="promise">
+              AI agents can operate real environments without losing human control.
+            </div>
+
+            <div id="frame-01-trust-gap-gap" class="trust-gap">
+              <div class="command-state">
+                <span class="state-dot" aria-hidden="true"></span>
+                Command succeeded
+              </div>
+              <div class="trust-headline">
+                Success <span class="not-equal">is not</span> proof.
+              </div>
+            </div>
+
+            <div class="proof-list" aria-label="Trust controls">
+              <div id="frame-01-trust-gap-policy" class="proof-item">
+                <span class="proof-index">01</span>
+                <span class="proof-word">Policy</span>
+                <span class="proof-detail">may execute</span>
+              </div>
+              <div id="frame-01-trust-gap-approval" class="proof-item">
+                <span class="proof-index">02</span>
+                <span class="proof-word">Approval</span>
+                <span class="proof-detail">human decides</span>
+              </div>
+              <div id="frame-01-trust-gap-evidence" class="proof-item">
+                <span class="proof-index">03</span>
+                <span class="proof-word">Evidence</span>
+                <span class="proof-detail">runtime proves</span>
+              </div>
+            </div>
+          </div>
+
+          <div id="frame-01-trust-gap-capture-label" class="capture-label">
+            <span class="capture-dot" aria-hidden="true"></span>
+            Real mission / 4/4 succeeded
+          </div>
+
+          <div id="frame-01-trust-gap-caption" class="capture-caption">
+            <span class="muted">Outcome</span>
+            HTTP 200 verified
+          </div>
+        </div>
+      </div>
+
+      <script>
+        window.__timelines = window.__timelines || {};
+
+        const trustGapTimeline = gsap.timeline({ paused: true });
+
+        trustGapTimeline.fromTo(
+          "#frame-01-trust-gap-product",
+          { opacity: 0.34, scale: 1.035, x: 18 },
+          { opacity: 1, scale: 1, x: 0, duration: 1.25, ease: "power3.out" },
+          0,
+        );
+
+        trustGapTimeline.fromTo(
+          "#frame-01-trust-gap-rail",
+          { opacity: 0, x: -54 },
+          { opacity: 1, x: 0, duration: 0.72, ease: "power3.out" },
+          0.18,
+        );
+
+        trustGapTimeline.fromTo(
+          "#frame-01-trust-gap-brand",
+          { opacity: 0, y: 22 },
+          { opacity: 1, y: 0, duration: 0.52, ease: "power3.out" },
+          0.54,
+        );
+
+        trustGapTimeline.fromTo(
+          "#frame-01-trust-gap-divider",
+          { opacity: 0, scaleX: 0 },
+          { opacity: 1, scaleX: 1, duration: 0.48, ease: "power2.out" },
+          0.82,
+        );
+
+        trustGapTimeline.fromTo(
+          "#frame-01-trust-gap-promise",
+          { opacity: 0, y: 26 },
+          { opacity: 1, y: 0, duration: 0.62, ease: "power3.out" },
+          1.12,
+        );
+
+        trustGapTimeline.fromTo(
+          "#frame-01-trust-gap-gap",
+          { opacity: 0, y: 34 },
+          { opacity: 1, y: 0, duration: 0.68, ease: "power3.out" },
+          3.1,
+        );
+
+        trustGapTimeline.fromTo(
+          [
+            "#frame-01-trust-gap-policy",
+            "#frame-01-trust-gap-approval",
+            "#frame-01-trust-gap-evidence",
+          ],
+          { opacity: 0, x: -28 },
+          {
+            opacity: 1,
+            x: 0,
+            duration: 0.5,
+            stagger: 0.58,
+            ease: "power3.out",
+          },
+          6.05,
+        );
+
+        trustGapTimeline.fromTo(
+          "#frame-01-trust-gap-capture-label",
+          { opacity: 0, y: -18 },
+          { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" },
+          8.35,
+        );
+
+        trustGapTimeline.fromTo(
+          "#frame-01-trust-gap-caption",
+          { opacity: 0, y: 22 },
+          { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" },
+          9.05,
+        );
+
+        trustGapTimeline.to(
+          "#frame-01-trust-gap-product",
+          { scale: 1.012, x: -8, duration: 6.2, ease: "none" },
+          9.65,
+        );
+
+        window.__timelines["01-trust-gap"] = trustGapTimeline;
+      </script>
+    </template>
+  </body>
+</html>

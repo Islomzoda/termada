@@ -4,6 +4,7 @@ import (
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/errs"
 	"github.com/termada/termada/internal/fleet"
+	"github.com/termada/termada/internal/mission"
 	"github.com/termada/termada/internal/plugin"
 )
 
@@ -37,6 +38,12 @@ type Backend interface {
 	PortForwardClose(owner, id string) error
 	PluginTools() []plugin.ToolSpec
 	PluginCall(owner, name string, args map[string]any) (any, error)
+	MissionCreate(owner string, req mission.CreateRequest) (*mission.Mission, error)
+	MissionList(owner, status string) []mission.Summary
+	MissionGet(owner, id string) (*mission.Mission, error)
+	MissionUpdate(owner, id string, req mission.UpdateRequest) (*mission.Mission, error)
+	MissionResume(owner, id string) (*mission.Mission, error)
+	MissionReport(owner, id string) (*mission.Report, error)
 	RecordConnect(agent string)
 	// RemoteAvailable reports whether remote (SSH) sessions, fleet and plugins
 	// are reachable — true only when backed by a running daemon. The in-process
@@ -155,4 +162,21 @@ func (b *LocalBackend) PluginTools() []plugin.ToolSpec { return nil }
 
 func (b *LocalBackend) PluginCall(owner, name string, args map[string]any) (any, error) {
 	return nil, errs.New(errs.NotSupported, "plugins require a running daemon")
+}
+
+func (b *LocalBackend) MissionCreate(string, mission.CreateRequest) (*mission.Mission, error) {
+	return nil, errs.New(errs.NotSupported, "Mission Control requires a running daemon")
+}
+func (b *LocalBackend) MissionList(string, string) []mission.Summary { return nil }
+func (b *LocalBackend) MissionGet(string, string) (*mission.Mission, error) {
+	return nil, errs.New(errs.NotSupported, "Mission Control requires a running daemon")
+}
+func (b *LocalBackend) MissionUpdate(string, string, mission.UpdateRequest) (*mission.Mission, error) {
+	return nil, errs.New(errs.NotSupported, "Mission Control requires a running daemon")
+}
+func (b *LocalBackend) MissionResume(string, string) (*mission.Mission, error) {
+	return nil, errs.New(errs.NotSupported, "Mission Control requires a running daemon")
+}
+func (b *LocalBackend) MissionReport(string, string) (*mission.Report, error) {
+	return nil, errs.New(errs.NotSupported, "Mission Control requires a running daemon")
 }

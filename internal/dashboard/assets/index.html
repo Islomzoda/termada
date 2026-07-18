@@ -8,6 +8,7 @@
 <script src="vendor/xterm.js?v=__ASSET_VERSION__" defer></script>
 <script src="vendor/xterm-addon-fit.js?v=__ASSET_VERSION__" defer></script>
 <link rel="stylesheet" href="app.css?v=__ASSET_VERSION__">
+<link rel="stylesheet" href="mission.css?v=__ASSET_VERSION__">
 </head>
 <body>
 <div id="gate">
@@ -28,7 +29,6 @@
   <span class="stat header-count"><span data-i18n="needYou">need you</span> <b id="s-pend">0</b></span>
   <span class="spacer"></span>
   <span class="stat" id="ver"></span>
-  <button class="locale-button" data-action="toggle-locale" aria-label="Change language" title="Change language">RU</button>
   <button class="header-action" data-action="open-history" aria-label="History"><span class="wide-label" data-i18n="history">History</span><span class="mobile-only" aria-hidden="true">↺</span></button>
   <button class="danger header-action" data-action="stop-all" aria-label="Stop all"><span class="wide-label" data-i18n="stopAll">Stop all</span><span class="mobile-only" aria-hidden="true">■</span></button>
 </header>
@@ -53,11 +53,18 @@
 <div class="layout" id="layout">
   <aside id="sidebar" aria-label="Workspace navigation">
     <div class="side-nav" role="tablist" aria-label="Sidebar sections">
-      <button class="side-tab" id="side-tab-conversations" role="tab" data-action="set-sidebar-view" data-view="conversations" aria-controls="side-conversations" aria-selected="true" data-i18n="workspacesTitle">Workspaces</button>
+      <button class="side-tab" id="side-tab-missions" role="tab" data-action="set-sidebar-view" data-view="missions" aria-controls="side-missions" aria-selected="true" data-i18n="missions">Missions</button>
+      <button class="side-tab" id="side-tab-conversations" role="tab" data-action="set-sidebar-view" data-view="conversations" aria-controls="side-conversations" aria-selected="false" tabindex="-1" data-i18n="workspacesTitle">Workspaces</button>
       <button class="side-tab" id="side-tab-connections" role="tab" data-action="set-sidebar-view" data-view="connections" aria-controls="side-connections" aria-selected="false" tabindex="-1" data-i18n="connections">Connections</button>
       <button class="side-tab" id="side-tab-policies" role="tab" data-action="set-sidebar-view" data-view="policies" aria-controls="side-policies" aria-selected="false" tabindex="-1" data-i18n="policies">Policies</button>
     </div>
-    <section class="side-panel" id="side-conversations" data-sidebar-view="conversations" role="tabpanel" aria-labelledby="side-tab-conversations">
+    <section class="side-panel" id="side-missions" data-sidebar-view="missions" role="tabpanel" aria-labelledby="side-tab-missions">
+      <div class="side-scroll">
+        <div class="mission-list-head"><span data-i18n="missionControl">Mission Control</span><span class="section-count" id="mission-count">0</span></div>
+        <div id="mission-list" class="mission-list" aria-live="polite"><div class="empty" data-i18n="loading">Loading…</div></div>
+      </div>
+    </section>
+    <section class="side-panel" id="side-conversations" data-sidebar-view="conversations" role="tabpanel" aria-labelledby="side-tab-conversations" hidden>
       <div class="side-scroll">
         <div class="conversation-toolbar">
           <label for="conversation-filter"><span data-i18n="workspacesTitle">Workspaces</span> <span class="section-count" id="dialog-count">0</span></label>
@@ -114,7 +121,10 @@
   <button class="sidebar-backdrop" id="sidebar-backdrop" data-action="close-sidebar" aria-label="Close navigation" tabindex="-1" hidden></button>
   <main>
     <div class="workspace-head" id="workspace-head" hidden><div class="workspace-title"><div class="workspace-route" id="workspace-route"></div><div class="workspace-summary" id="workspace-summary"></div></div></div>
-    <div class="workspace-shell empty" id="workspace-shell">
+    <section id="mission-panel" class="mission-panel" aria-label="Mission Control" tabindex="-1">
+      <div id="mission-content" class="mission-empty"><div><h2 data-i18n="missionControl">Mission Control</h2><p data-i18n="waitingFirstMission">Waiting for the first mission</p></div></div>
+    </section>
+    <div class="workspace-shell empty" id="workspace-shell" hidden>
       <section class="execution-panel" id="execution-panel" aria-label="Conversation runs" hidden>
         <div class="execution-head"><div class="execution-headline"><strong data-i18n="runsTitle">Runs</strong><span id="execution-count"></span></div><div class="execution-filters" role="group" aria-label="Filter runs">
           <button class="execution-filter" data-action="set-execution-filter" data-filter="all" aria-pressed="true">All</button>
@@ -131,5 +141,6 @@
 </div>
 <div id="toast" role="status" aria-live="polite"></div>
 <script src="app.js?v=__ASSET_VERSION__" defer></script>
+<script src="mission.js?v=__ASSET_VERSION__" defer></script>
 </body>
 </html>

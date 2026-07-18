@@ -53,7 +53,10 @@ func TestExecRunIsLean(t *testing.T) {
 	if s, _ := out["stdout"].(string); s == "" {
 		t.Fatalf("stdout empty: %v", out)
 	}
-	for _, k := range []string{"command", "hold_input", "hold_output", "awaiting_input", "job_id", "truncated"} {
+	if out["job_id"] == "" {
+		t.Fatalf("exec_run must retain job_id evidence: %v", out)
+	}
+	for _, k := range []string{"command", "hold_input", "hold_output", "awaiting_input", "truncated"} {
 		if _, present := out[k]; present {
 			t.Fatalf("lean exec_run should not include %q for a finished command: %v", k, out)
 		}
@@ -259,5 +262,23 @@ func TestSignalToolDescriptionsDistinguishRemotePTY(t *testing.T) {
 	}
 	if description := s.tools["exec_signal"].Description; !strings.Contains(description, "SIGHUP") || !strings.Contains(description, "error") {
 		t.Fatalf("exec_signal description omits unsupported remote signal behavior: %s", description)
+	}
+}
+
+func TestMissionToolsExposeEvidenceContract(t *testing.T) {
+	s := newTestServer(t)
+	for _, name := range []string{"mission_create", "mission_list", "mission_get", "mission_update", "mission_resume", "mission_report"} {
+		if s.tools[name].Name != name {
+			t.Fatalf("missing mission tool %q", name)
+		}
+	}
+	for _, required := range []string{"REQUIRES a job_id", "exiting with code 0", "every step", "all mission jobs"} {
+		if !strings.Contains(s.tools["mission_update"].Description, required) {
+			t.Fatalf("mission_update description omits %q", required)
+		}
+	}
+	_, e := s.tools["mission_create"].Handler(map[string]any{"goal": "repair", "plan": []any{"verify"}})
+	if e == nil || e.Code != errs.NotSupported {
+		t.Fatalf("in-process mission_create should require daemon, got %v", e)
 	}
 }

@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js" integrity="sha384-sG0Hv1tP1lZCk9KQmrIbY/XNwi+OY84GQqhMscbnsoBFqAz8KNCil1kvfL3Hbbk2" crossorigin="anonymous"></script>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: #000;
+      }
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+      }
+      .scene {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="141"
+      data-width="1920"
+      data-height="1080"
+    >
+      <div
+        id="el-01-trust-gap"
+        class="scene"
+        data-composition-id="01-trust-gap"
+        data-composition-src="compositions/frames/01-trust-gap.html"
+        data-start="0"
+        data-duration="16.6"
+        data-track-index="0"
+      ></div>
+
+      <div
+        id="el-02-build-week-delta"
+        class="scene"
+        data-composition-id="02-build-week-delta"
+        data-composition-src="compositions/frames/02-build-week-delta.html"
+        data-start="16"
+        data-duration="24.6"
+        data-track-index="1"
+      ></div>
+
+      <div
+        id="el-03-diagnosis"
+        class="scene"
+        data-composition-id="03-diagnosis"
+        data-composition-src="compositions/frames/03-diagnosis.html"
+        data-start="40"
+        data-duration="30.6"
+        data-track-index="0"
+      ></div>
+
+      <div
+        id="el-04-approval"
+        class="scene"
+        data-composition-id="04-approval"
+        data-composition-src="compositions/frames/04-approval.html"
+        data-start="70"
+        data-duration="30.6"
+        data-track-index="1"
+      ></div>
+
+      <div
+        id="el-05-verified"
+        class="scene"
+        data-composition-id="05-verified"
+        data-composition-src="compositions/frames/05-verified.html"
+        data-start="100"
+        data-duration="24.6"
+        data-track-index="0"
+      ></div>
+
+      <div
+        id="el-06-evidence"
+        class="scene"
+        data-composition-id="06-evidence"
+        data-composition-src="compositions/frames/06-evidence.html"
+        data-start="124"
+        data-duration="17"
+        data-track-index="1"
+      ></div>
+
+      <audio
+        id="el-narration"
+        src="narration.mp3"
+        data-start="0"
+        data-duration="137.435"
+        data-track-index="10"
+        data-volume="1"
+      ></audio>
+
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      window.__timelines["main"] = gsap.timeline({ paused: true });
+      // ── frame transitions (injected by transitions.mjs) ──
+      (function () { var tl = window.__timelines["main"];
+        tl.to("#el-01-trust-gap", { filter: "blur(10px)", scale: 1.03, opacity: 0, duration: 0.6, ease: "power2.inOut" }, 16);
+        tl.fromTo("#el-02-build-week-delta", { filter: "blur(10px)", scale: 0.97, opacity: 0 }, { filter: "blur(0px)", scale: 1, opacity: 1, duration: 0.6, ease: "power2.inOut" }, 16);
+        tl.to("#el-02-build-week-delta", { filter: "blur(10px)", scale: 1.03, opacity: 0, duration: 0.6, ease: "power2.inOut" }, 40);
+        tl.fromTo("#el-03-diagnosis", { filter: "blur(10px)", scale: 0.97, opacity: 0 }, { filter: "blur(0px)", scale: 1, opacity: 1, duration: 0.6, ease: "power2.inOut" }, 40);
+        tl.to("#el-03-diagnosis", { filter: "blur(10px)", scale: 1.03, opacity: 0, duration: 0.6, ease: "power2.inOut" }, 70);
+        tl.fromTo("#el-04-approval", { filter: "blur(10px)", scale: 0.97, opacity: 0 }, { filter: "blur(0px)", scale: 1, opacity: 1, duration: 0.6, ease: "power2.inOut" }, 70);
+        tl.to("#el-04-approval", { filter: "blur(10px)", scale: 1.03, opacity: 0, duration: 0.6, ease: "power2.inOut" }, 100);
+        tl.fromTo("#el-05-verified", { filter: "blur(10px)", scale: 0.97, opacity: 0 }, { filter: "blur(0px)", scale: 1, opacity: 1, duration: 0.6, ease: "power2.inOut" }, 100);
+        tl.to("#el-05-verified", { filter: "blur(10px)", scale: 1.03, opacity: 0, duration: 0.6, ease: "power2.inOut" }, 124);
+        tl.fromTo("#el-06-evidence", { filter: "blur(10px)", scale: 0.97, opacity: 0 }, { filter: "blur(0px)", scale: 1, opacity: 1, duration: 0.6, ease: "power2.inOut" }, 124);
+        tl.to({}, { duration: 141 }, 0); // full-span anchor — main.duration() == composition total (Studio master duration)
+      })();
+    </script>
+  </body>
+</html>

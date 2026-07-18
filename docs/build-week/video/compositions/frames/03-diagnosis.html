@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Frame 3 - A real 503 diagnosis</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Space Grotesk";
+          src: local("Space Grotesk");
+        }
+
+        @font-face {
+          font-family: "IBM Plex Mono";
+          src: local("IBM Plex Mono");
+        }
+
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          overflow: hidden;
+          color: #eef2f6;
+          font-family: "Space Grotesk", Inter, system-ui, sans-serif;
+        }
+
+        .scene-fill {
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          background: #0b0f14;
+        }
+
+        .top-rule {
+          position: absolute;
+          top: 72px;
+          right: 72px;
+          left: 72px;
+          height: 1px;
+          background: #26323d;
+        }
+
+        .scene-label {
+          position: absolute;
+          top: 35px;
+          left: 72px;
+          color: #93a1af;
+          font-size: 18px;
+          font-weight: 700;
+          line-height: 1;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+
+        .capture {
+          position: absolute;
+          top: 112px;
+          left: 64px;
+          width: 1450px;
+          height: 900px;
+          overflow: hidden;
+          background: #111820;
+          border: 1px solid #33414d;
+          box-shadow: 0 24px 64px rgba(0, 0, 0, 0.34);
+        }
+
+        .capture-image {
+          position: absolute;
+          top: 0;
+          left: 0;
+          display: block;
+          width: 1500px;
+          height: 938px;
+          max-width: none;
+          object-fit: fill;
+          transform-origin: center center;
+        }
+
+        .proof-focus {
+          position: absolute;
+          top: 332px;
+          left: 342px;
+          width: 350px;
+          height: 184px;
+          box-sizing: border-box;
+          border: 2px solid #5ed4d0;
+          box-shadow: inset 0 0 0 1px rgba(94, 212, 208, 0.28);
+          pointer-events: none;
+        }
+
+        .evidence-rail {
+          position: absolute;
+          top: 112px;
+          right: 64px;
+          width: 304px;
+          height: 900px;
+          box-sizing: border-box;
+          padding: 4px 0 0 40px;
+          border-left: 1px solid #33414d;
+        }
+
+        .rail-title {
+          margin: 0 0 62px;
+          color: #93a1af;
+          font-size: 18px;
+          font-weight: 700;
+          line-height: 1;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+
+        .fact {
+          position: relative;
+          margin: 0;
+          padding: 0 0 44px;
+          border-bottom: 1px solid #33414d;
+        }
+
+        .fact + .fact {
+          margin-top: 45px;
+        }
+
+        .fact-label {
+          margin-bottom: 13px;
+          color: #93a1af;
+          font-size: 16px;
+          font-weight: 700;
+          line-height: 1;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+
+        .fact-value {
+          color: #eef2f6;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 42px;
+          font-weight: 600;
+          line-height: 1.08;
+          letter-spacing: 0;
+          white-space: nowrap;
+        }
+
+        .fact-value.http {
+          color: #f2b84b;
+          font-size: 50px;
+        }
+
+        .fact-value.mode {
+          color: #5ed4d0;
+          font-size: 20px;
+        }
+
+        .fact-value.progress {
+          color: #3ecf8e;
+          font-size: 35px;
+        }
+
+        .progress-rule {
+          position: relative;
+          width: 100%;
+          height: 3px;
+          margin-top: 24px;
+          overflow: hidden;
+          background: #26323d;
+        }
+
+        .progress-fill {
+          width: 50%;
+          height: 100%;
+          background: #3ecf8e;
+          transform-origin: left center;
+        }
+      </style>
+
+      <div
+        id="root"
+        data-composition-id="03-diagnosis"
+        data-width="1920"
+        data-height="1080"
+        data-duration="30.6"
+      >
+        <div
+          id="f03-stage"
+          class="clip"
+          data-start="0"
+          data-duration="30.6"
+          data-track-index="0"
+        >
+          <div id="f03-content" class="scene-fill">
+            <div class="top-rule"></div>
+            <div class="scene-label">Real environment / diagnosis</div>
+
+            <div id="f03-capture" class="capture">
+              <img
+                id="f03-shot"
+                class="capture-image"
+                data-layout-allow-overflow
+                src="assets/approval-desktop.jpg"
+                alt="Termada Mission Control showing a mission at two of four verified steps"
+              />
+              <div id="f03-focus" class="proof-focus"></div>
+            </div>
+
+            <aside id="f03-rail" class="evidence-rail" aria-label="Diagnosis evidence">
+              <h2 class="rail-title">Diagnosis</h2>
+
+              <section id="f03-http" class="fact">
+                <div class="fact-label">Runtime</div>
+                <div class="fact-value http">HTTP 503</div>
+              </section>
+
+              <section id="f03-mode" class="fact">
+                <div class="fact-label">Configuration</div>
+                <div class="fact-value mode">service.mode = broken</div>
+              </section>
+
+              <section id="f03-progress" class="fact">
+                <div class="fact-label">Mission</div>
+                <div class="fact-value progress">2/4 verified</div>
+                <div class="progress-rule">
+                  <div id="f03-progress-fill" class="progress-fill"></div>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </div>
+      </div>
+
+      <script>
+        window.__timelines = window.__timelines || {};
+
+        const tl = gsap.timeline({ paused: true });
+
+        tl.fromTo(
+          "#f03-content",
+          { opacity: 0, x: 54 },
+          { opacity: 1, x: 0, duration: 0.65, ease: "power2.out" },
+          0
+        );
+        tl.fromTo(
+          "#f03-capture",
+          { opacity: 0.48, scale: 0.988 },
+          { opacity: 1, scale: 1, duration: 0.72, ease: "power2.out" },
+          0.14
+        );
+        tl.fromTo(
+          "#f03-shot",
+          { x: 0 },
+          { x: -50, duration: 20, ease: "none" },
+          0.9
+        );
+        tl.fromTo(
+          "#f03-rail",
+          { opacity: 0, x: 24 },
+          { opacity: 1, x: 0, duration: 0.5, ease: "power2.out" },
+          1.2
+        );
+        tl.fromTo(
+          "#f03-http",
+          { opacity: 0, y: 22 },
+          { opacity: 1, y: 0, duration: 0.48, ease: "power2.out" },
+          2.7
+        );
+        tl.fromTo(
+          "#f03-mode",
+          { opacity: 0, y: 22 },
+          { opacity: 1, y: 0, duration: 0.48, ease: "power2.out" },
+          7.2
+        );
+        tl.fromTo(
+          "#f03-focus",
+          { opacity: 0 },
+          { opacity: 1, duration: 0.45, ease: "power1.out" },
+          10.3
+        );
+        tl.fromTo(
+          "#f03-progress",
+          { opacity: 0, y: 22 },
+          { opacity: 1, y: 0, duration: 0.48, ease: "power2.out" },
+          12.5
+        );
+        tl.fromTo(
+          "#f03-progress-fill",
+          { scaleX: 0 },
+          { scaleX: 1, duration: 0.7, ease: "power2.out" },
+          12.7
+        );
+
+        window.__timelines["03-diagnosis"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

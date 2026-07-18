@@ -57,6 +57,30 @@ the human dashboard.
 
 ## Pick the right call
 
+### Use a mission for an operational outcome
+
+When the user gives a concrete diagnosis, repair, deployment, or verification
+goal, call `mission_create` before executing commands. Provide an ordered plan of
+testable steps, then use the returned dedicated `session_id` for every
+`exec_run`/`exec_start` call in that mission.
+
+- Update a step to `running` when work begins.
+- Update it to `passed` only with a real `job_id` from that mission that exited
+  with code zero. `exec_run` always returns its evidence-bearing `job_id`.
+- Use `failed` for a failed attempt and keep diagnosing; use `skipped` only with
+  an explicit reason.
+- If a command is awaiting confirmation, tell the human and wait. Never bypass
+  the policy or mark the step passed early.
+- Mark the mission `succeeded` only after every step is passed/skipped and all
+  jobs have ended, with a concise summary of changes and verification.
+- Finish with `mission_report`. Treat its audit anchors as runtime evidence and
+  keep agent notes clearly labeled as agent-supplied.
+
+After a daemon restart, use `mission_list`/`mission_get` to recover context. An
+unfinished mission is `interrupted`; call `mission_resume` for a fresh session,
+then re-check remote state before retrying a non-idempotent action. Do not assume
+cwd, env, or an orphaned remote process survived in a known state.
+
 - **Quick command, want the result now:** `exec_run` with `command` as an argv
   array, e.g. `{"command":["ls","-la"]}`. It waits up to `timeout_ms` and returns
   `{status, exit_code, stdout}` (empty/false fields are omitted to stay light).

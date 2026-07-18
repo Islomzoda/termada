@@ -13,6 +13,7 @@ import (
 	"github.com/termada/termada/internal/engine"
 	"github.com/termada/termada/internal/errs"
 	"github.com/termada/termada/internal/fleet"
+	"github.com/termada/termada/internal/mission"
 	"github.com/termada/termada/internal/plugin"
 )
 
@@ -299,6 +300,44 @@ func (c *Client) PluginCall(owner, name string, args map[string]any) (any, error
 	var out any
 	err := c.post("/api/plugin/call", map[string]any{"owner": owner, "name": name, "args": args}, &out)
 	return out, err
+}
+
+func (c *Client) MissionCreate(owner string, req mission.CreateRequest) (*mission.Mission, error) {
+	var out mission.Mission
+	err := c.post("/api/mission/create", missionRequest{Owner: owner, Title: req.Title, Goal: req.Goal, Target: req.Target, Workspace: req.Workspace, Plan: req.Plan}, &out)
+	return &out, err
+}
+
+func (c *Client) MissionList(owner, status string) []mission.Summary {
+	var out struct {
+		Missions []mission.Summary `json:"missions"`
+	}
+	_ = c.get("/api/mission/list?owner="+url.QueryEscape(owner)+"&status="+url.QueryEscape(status), &out)
+	return out.Missions
+}
+
+func (c *Client) MissionGet(owner, id string) (*mission.Mission, error) {
+	var out mission.Mission
+	err := c.get("/api/mission/get?owner="+url.QueryEscape(owner)+"&id="+url.QueryEscape(id), &out)
+	return &out, err
+}
+
+func (c *Client) MissionUpdate(owner, id string, req mission.UpdateRequest) (*mission.Mission, error) {
+	var out mission.Mission
+	err := c.post("/api/mission/update", missionRequest{Owner: owner, MissionID: id, StepID: req.StepID, StepStatus: req.StepStatus, JobID: req.JobID, Note: req.Note, Status: req.Status, Summary: req.Summary}, &out)
+	return &out, err
+}
+
+func (c *Client) MissionResume(owner, id string) (*mission.Mission, error) {
+	var out mission.Mission
+	err := c.post("/api/mission/resume", missionRequest{Owner: owner, MissionID: id}, &out)
+	return &out, err
+}
+
+func (c *Client) MissionReport(owner, id string) (*mission.Report, error) {
+	var out mission.Report
+	err := c.get("/api/mission/report?owner="+url.QueryEscape(owner)+"&id="+url.QueryEscape(id), &out)
+	return &out, err
 }
 
 // RecordConnect notifies the daemon that an agent connected (best-effort).

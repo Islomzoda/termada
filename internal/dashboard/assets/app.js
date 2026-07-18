@@ -16,19 +16,14 @@ function withToken(path){
 const FitAddon = window.FitAddon ? window.FitAddon.FitAddon : null;
 const COPY={
   en:{workspaces:'workspaces',workspacesTitle:'Workspaces',active:'active',needYou:'need you',history:'History',stopAll:'Stop all',connections:'Connections',policies:'Policies',filterWorkspaces:'Filter by agent, workspace, target, or command',needsAttention:'Needs attention',connected:'connected',connecting:'connecting…',reconnecting:'reconnecting…',offline:'offline',locked:'locked',defaultWorkspace:'Default workspace',operator:'Operator',local:'Local',unknownAgent:'Unknown agent',unknownTarget:'Unknown target',all:'All',failed:'Failed',finished:'Finished',running:'Running',needsInput:'Needs input',needsApproval:'Needs approval',background:'Background',completed:'Completed',stopped:'Stopped',timedOut:'Timed out',unavailable:'Result unavailable',pending:'Pending',run:'run',runs:'runs',runsTitle:'Runs',loaded:'loaded',output:'Output',terminal:'Terminal',request:'Request',session:'Session',agentRequest:'Agent request',agentSession:'Agent session',runWith:'Run with',on:'on',liveSessionFrom:'Live session output from',terminalResponse:'Terminal response',responseContinued:'Response continued',waitingOutput:'Waiting for output…',waitingMore:'Waiting for more output…',sessionActive:'Session active',sessionClosed:'Session closed',liveTerminal:'Live terminal stream',streamEnded:'Stream ended',live:'live',archived:'archived',answered:'answered',sendingAnswer:'sending answer…',answerNotDelivered:'answer not delivered',noRuns:'No runs yet',noWorkspaces:'No workspaces yet',noMatchingWorkspaces:'No matching workspaces',selectWorkspace:'Select a workspace',waitingFirstRun:'Waiting for the first run',selectRun:'Select a run',now:'now'},
-  ru:{workspaces:'пространства',workspacesTitle:'Пространства',active:'активно',needYou:'ждут вас',history:'История',stopAll:'Остановить всё',connections:'Подключения',policies:'Политики',filterWorkspaces:'Агент, проект, цель или команда',needsAttention:'Требует внимания',connected:'подключено',connecting:'подключение…',reconnecting:'переподключение…',offline:'нет связи',locked:'заблокировано',defaultWorkspace:'Основное пространство',operator:'Оператор',local:'Этот компьютер',unknownAgent:'Неизвестный агент',unknownTarget:'Неизвестная цель',all:'Все',failed:'Ошибки',finished:'Завершено',running:'Выполняется',needsInput:'Нужен ответ',needsApproval:'Нужно подтверждение',background:'В фоне',completed:'Готово',stopped:'Остановлено',timedOut:'Превышено время',unavailable:'Результат недоступен',pending:'Ожидание',run:'запуск',runs:'запусков',runsTitle:'Запуски',loaded:'загружено',output:'Вывод',terminal:'Терминал',request:'Запрос',session:'Сессия',agentRequest:'Запрос агента',agentSession:'Сессия агента',runWith:'Запуск через',on:'на',liveSessionFrom:'Вывод сессии с',terminalResponse:'Ответ терминала',responseContinued:'Продолжение ответа',waitingOutput:'Ожидание вывода…',waitingMore:'Ожидание продолжения…',sessionActive:'Сессия активна',sessionClosed:'Сессия закрыта',liveTerminal:'Поток терминала',streamEnded:'Поток завершён',live:'выполняется',archived:'архив',answered:'ответ отправлен',sendingAnswer:'отправка ответа…',answerNotDelivered:'ответ не доставлен',noRuns:'Запусков пока нет',noWorkspaces:'Пространств пока нет',noMatchingWorkspaces:'Ничего не найдено',selectWorkspace:'Выберите пространство',waitingFirstRun:'Ожидание первого запуска',selectRun:'Выберите запуск',now:'сейчас'}
 };
 Object.assign(COPY.en,{error:'Error',inputNeeded:'Input needed',answerNotSent:'Answer not sent',programWaiting:'The program is waiting for your answer',yes:'Yes',no:'No',send:'Send',sendSecret:'Send secret',secretAnswer:'Secret answer',enterAnswer:'Enter an answer',blockInput:'Block agent input',pauseOutput:'Pause agent output',stop:'Stop'});
-Object.assign(COPY.ru,{error:'Ошибка',inputNeeded:'Нужен ответ',answerNotSent:'Ответ не отправлен',programWaiting:'Программа ожидает ваш ответ',yes:'Да',no:'Нет',send:'Отправить',sendSecret:'Отправить секрет',secretAnswer:'Секретный ответ',enterAnswer:'Введите ответ',blockInput:'Блокировать ввод агента',pauseOutput:'Приостановить вывод агента',stop:'Остановить'});
 Object.assign(COPY.en,{activityHistory:'Activity history',filterActivity:'Agent, command, or event',attention:'Attention',system:'System',activities:'activities',events:'events',noActivity:'No matching activity',verifyLog:'Verify log integrity with',execution:'Execution',connection:'Connection',systemActivity:'System activity',olderEventsHidden:'older events hidden'});
-Object.assign(COPY.ru,{activityHistory:'История активности',filterActivity:'Агент, команда или событие',attention:'Внимание',system:'Система',activities:'действий',events:'событий',noActivity:'Подходящих действий нет',verifyLog:'Проверить целостность журнала:',execution:'Запуск',connection:'Подключение',systemActivity:'Системное событие',olderEventsHidden:'старых событий скрыто'});
 Object.assign(COPY.en,{serversTitle:'Servers',connectedAgents:'Connected agents',noServers:'No servers configured',noConnections:'No connections',test:'Test',online:'online',idle:'idle',jobsLabel:'jobs',sessionsLabel:'sessions',deniedLabel:'denied',statusOk:'available',statusTesting:'testing',statusUnreachable:'unreachable'});
-Object.assign(COPY.ru,{serversTitle:'Серверы',connectedAgents:'Подключённые агенты',noServers:'Серверы не настроены',noConnections:'Нет подключений',test:'Проверить',online:'онлайн',idle:'неактивен',jobsLabel:'запусков',sessionsLabel:'сессий',deniedLabel:'отклонено',statusOk:'доступен',statusTesting:'проверка',statusUnreachable:'недоступен'});
-let locale='en';try{locale=sessionStorage.getItem('termada_locale')||((navigator.language||'').toLowerCase().startsWith('ru')?'ru':'en');}catch(_){}
-function tr(key){return(COPY[locale]&&COPY[locale][key])||COPY.en[key]||key;}
-function applyLocale(){document.documentElement.lang=locale;document.querySelectorAll('[data-i18n]').forEach(el=>{el.textContent=tr(el.dataset.i18n);});document.querySelectorAll('[data-i18n-placeholder]').forEach(el=>{el.placeholder=tr(el.dataset.i18nPlaceholder);});document.querySelectorAll('[data-stream-state]').forEach(el=>{el.textContent=tr(el.dataset.streamState);});const button=document.querySelector('.locale-button');if(button)button.textContent=locale==='en'?'RU':'EN';const conn=document.getElementById('conn');if(conn)conn.textContent=tr(conn.dataset.connectionState||'connecting');}
+Object.assign(COPY.en,{openNavigation:'Open navigation',closeNavigation:'Close navigation'});
+function tr(key){return COPY.en[key]||key;}
+function applyCopy(){document.documentElement.lang='en';document.querySelectorAll('[data-i18n]').forEach(el=>{el.textContent=tr(el.dataset.i18n);});document.querySelectorAll('[data-i18n-placeholder]').forEach(el=>{el.placeholder=tr(el.dataset.i18nPlaceholder);});document.querySelectorAll('[data-stream-state]').forEach(el=>{el.textContent=tr(el.dataset.streamState);});const conn=document.getElementById('conn');if(conn)conn.textContent=tr(conn.dataset.connectionState||'connecting');const toggle=document.getElementById('sidebar-toggle');if(toggle){const key=toggle.getAttribute('aria-expanded')==='true'?'closeNavigation':'openNavigation';toggle.setAttribute('aria-label',tr(key));toggle.title=tr(key);}const historyButton=document.querySelector('[data-action="open-history"]');if(historyButton)historyButton.setAttribute('aria-label',tr('history'));const stopButton=document.querySelector('[data-action="stop-all"]');if(stopButton)stopButton.setAttribute('aria-label',tr('stopAll'));}
 function setConnectionState(state){const conn=document.getElementById('conn');if(!conn)return;conn.dataset.connectionState=state;conn.textContent=tr(state);}
-function toggleLocale(){locale=locale==='en'?'ru':'en';try{sessionStorage.setItem('termada_locale',locale);}catch(_){}applyLocale();Object.values(terms).forEach(localizeTerm);refreshDialogTree();renderAttention(lastPending,Object.values(lastJobs));renderWorkspace();if(auditRecs.length)renderAudit();scheduleStateRefresh(0);}
 
 async function api(path, opts={}){
   opts.headers = Object.assign({'Content-Type':'application/json'}, authHeaders(), opts.headers||{});
@@ -60,14 +55,14 @@ function shellArg(v){v=String(v==null?'':v);return /^[a-zA-Z0-9_@%+=:,./-]+$/.te
 function cmd(c){return Array.isArray(c)?c.map(shellArg).join(' '):(c||'');}
 function displayCommand(c){if(Array.isArray(c)&&c.length>=3&&/^(?:bash|sh|zsh)$/.test(c[0])&&/^-?[lc]+$/.test(c[1]))return c.slice(2).join(' ');return cmd(c);}
 function commandRunner(c){return Array.isArray(c)&&c.length>=2&&/^(?:bash|sh|zsh)$/.test(c[0])&&/^-?[lc]+$/.test(c[1])?c[0]+' '+c[1]:'';}
-function approvalReason(reason){if(!reason)return'';if(/ambiguous shell or wrapper/i.test(reason))return'The command uses a shell and needs manual review';if(/matched confirm rule/i.test(reason))return'The command matched a required-approval rule';return reason;}
+function approvalReason(reason){if(!reason)return'';if(/ambiguous shell or wrapper/i.test(reason))return tr('approvalShellReview');if(/matched confirm rule/i.test(reason))return tr('approvalRuleReview');return reason;}
 function short(s,n){s=s||'';return s.length>n?s.slice(0,n)+'…':s;}
-function relTime(unix){if(!unix)return'';const d=Math.max(0,Math.floor(Date.now()/1000-unix));if(d<5)return tr('now');if(locale==='ru'){if(d<60)return d+' сек назад';if(d<3600)return Math.floor(d/60)+' мин назад';if(d<86400)return Math.floor(d/3600)+' ч назад';return Math.floor(d/86400)+' дн назад';}if(d<60)return d+'s ago';if(d<3600)return Math.floor(d/60)+'m ago';if(d<86400)return Math.floor(d/3600)+'h ago';return Math.floor(d/86400)+'d ago';}
+function relTime(unix){if(!unix)return'';const d=Math.max(0,Math.floor(Date.now()/1000-unix));if(d<5)return tr('now');if(d<60)return d+'s ago';if(d<3600)return Math.floor(d/60)+'m ago';if(d<86400)return Math.floor(d/3600)+'h ago';return Math.floor(d/86400)+'d ago';}
 function timeSec(obj,name='created'){return obj&&obj[name+'_unix_ms']?obj[name+'_unix_ms']/1000:(obj&&obj[name+'_unix'])||0;}
 function timeMS(obj,name='created'){return obj&&obj[name+'_unix_ms']||((obj&&obj[name+'_unix'])||0)*1000;}
 function targetName(target){return !target||target==='local'?tr('local'):target;}
 function duration(ms){if(!ms)return'';if(ms<1000)return ms+'ms';if(ms<60000)return(Math.round(ms/100)/10)+'s';return(Math.round(ms/6000)/10)+'m';}
-function initials(name){const p=String(name||'AI').replace(/[^a-zA-Zа-яА-Я0-9]+/g,' ').trim().split(/\s+/);return(p.length>1?p[0][0]+p[1][0]:String(name||'AI').slice(0,2)).toUpperCase();}
+function initials(name){const p=String(name||'AI').replace(/[^a-zA-Z0-9]+/g,' ').trim().split(/\s+/);return(p.length>1?p[0][0]+p[1][0]:String(name||'AI').slice(0,2)).toUpperCase();}
 function errorText(r,fallback){return r&&r.error?(r.error.message||r.error.code||fallback):fallback;}
 function serverStatusLabel(status){return tr(status==='ok'?'statusOk':status==='testing'?'statusTesting':status==='unreachable'?'statusUnreachable':status||'statusUnreachable');}
 function showToast(message,kind='ok'){const el=document.getElementById('toast');el.textContent=message;el.className='visible '+kind;clearTimeout(showToast.timer);showToast.timer=setTimeout(()=>{el.className='';},4500);}
@@ -77,11 +72,11 @@ const STATUS_KEYS={running:'running',awaiting_input:'needsInput',awaiting_confir
 function statusLabel(j){if(!j)return tr('pending');if(j.status==='exited'&&j.exit_code!=null&&j.exit_code!==0)return tr('failed')+' · exit '+j.exit_code;return STATUS_KEYS[j.status]?tr(STATUS_KEYS[j.status]):j.status||tr('pending');}
 function statusClass(j){if(!j)return'running';if(j.status==='exited'&&j.exit_code!=null&&j.exit_code!==0)return'failed';return j.status||'running';}
 function jobFailed(j){return!!j&&(['failed','killed','timed_out','orphaned'].includes(j.status)||(j.status==='exited'&&j.exit_code!=null&&j.exit_code!==0));}
-function runWord(count){if(locale!=='ru')return count===1?tr('run'):tr('runs');const n=Math.abs(count)%100,n1=n%10;return n>10&&n<20?'запусков':n1===1?'запуск':n1>=2&&n1<=4?'запуска':'запусков';}
+function runWord(count){return count===1?tr('run'):tr('runs');}
 function runCountLabel(count){return count+' '+runWord(count);}
-function failureWord(count){if(locale!=='ru')return tr('failed').toLowerCase();const n=Math.abs(count)%100,n1=n%10;return n>10&&n<20?'ошибок':n1===1?'ошибка':n1>=2&&n1<=4?'ошибки':'ошибок';}
-function secretPrompt(prompt){return /pass(word|phrase)|парол|секрет|secret|token|токен|private\s*key|ключ/i.test(prompt||'');}
-function binaryPrompt(prompt){return /\[[^\]]*(?:y\s*\/\s*n|yes\s*\/\s*no|д\s*\/\s*н)[^\]]*\]|\((?:y\s*\/\s*n|yes\s*\/\s*no|да\s*\/\s*нет)\)|continue\?|proceed\?|allow\?|разрешить\?|продолжить\?/i.test(prompt||'');}
+function failureWord(){return tr('failed').toLowerCase();}
+function secretPrompt(prompt){return /pass(word|phrase)|secret|token|private\s*key/i.test(prompt||'');}
+function binaryPrompt(prompt){return /\[[^\]]*(?:y\s*\/\s*n|yes\s*\/\s*no)[^\]]*\]|\((?:y\s*\/\s*n|yes\s*\/\s*no)\)|continue\?|proceed\?|allow\?/i.test(prompt||'');}
 
 // ---- live conversation + advanced terminal -------------------------------
 const terms = {};
@@ -94,7 +89,7 @@ let stateRevision=0,activeJobsCount=0,fallbackTimer=null,stateRefreshTimer=null;
 function fitActiveTerm(){const info=active&&terms[active];if(info&&info.fit)setTimeout(()=>{try{info.fit.fit();}catch(_){}} ,0);}
 function setSidebarOpen(open,focusTarget=''){
   const mobile=mobileSidebarQuery.matches,layout=document.getElementById('layout'),sidebar=document.getElementById('sidebar'),toggle=document.getElementById('sidebar-toggle'),backdrop=document.getElementById('sidebar-backdrop'),main=document.querySelector('main'),header=document.querySelector('header');
-  sidebarOpen=mobile&&!!open;layout.classList.toggle('sidebar-open',sidebarOpen);toggle.setAttribute('aria-expanded',String(sidebarOpen));toggle.setAttribute('aria-label',sidebarOpen?'Close navigation':'Open navigation');toggle.title=sidebarOpen?'Close navigation':'Open navigation';backdrop.hidden=!sidebarOpen;backdrop.setAttribute('aria-hidden',String(!sidebarOpen));
+	  sidebarOpen=mobile&&!!open;layout.classList.toggle('sidebar-open',sidebarOpen);toggle.setAttribute('aria-expanded',String(sidebarOpen));const toggleKey=sidebarOpen?'closeNavigation':'openNavigation';toggle.setAttribute('aria-label',tr(toggleKey));toggle.title=tr(toggleKey);backdrop.hidden=!sidebarOpen;backdrop.setAttribute('aria-hidden',String(!sidebarOpen));
   if(mobile){sidebar.inert=!sidebarOpen;sidebar.setAttribute('aria-hidden',String(!sidebarOpen));main.inert=sidebarOpen;Array.from(header.children).forEach(child=>{if(child!==toggle)child.inert=sidebarOpen;});}else{sidebar.inert=false;sidebar.removeAttribute('aria-hidden');main.inert=false;Array.from(header.children).forEach(child=>child.inert=false);}
   if(sidebarOpen){setTimeout(()=>{if(!sidebarOpen)return;const selected=sidebar.querySelector('.side-tab[aria-selected="true"]');if(selected)selected.focus();},220);}
   else if(focusTarget==='main'){setTimeout(()=>{const info=active&&terms[active],target=info&&info.host.querySelector('.transcript');if(target)target.focus();},0);}
@@ -104,9 +99,10 @@ function setSidebarOpen(open,focusTarget=''){
 }
 function syncSidebarMode(event){const toggle=document.getElementById('sidebar-toggle'),focusTarget=event&&event.matches?'toggle':event&&lastFocusedControl===toggle?'sidebar':'';setSidebarOpen(false,focusTarget);}
 function setSidebarView(view,focusTab=false){
-  if(!['conversations','connections','policies'].includes(view))return;sidebarView=view;
+  if(!['missions','conversations','connections','policies'].includes(view))return;sidebarView=view;
   document.querySelectorAll('.side-tab').forEach(tab=>{const selected=tab.dataset.view===view;tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;});
-  document.querySelectorAll('.side-panel').forEach(panel=>{panel.hidden=panel.dataset.sidebarView!==view;});
+	  document.querySelectorAll('.side-panel').forEach(panel=>{panel.hidden=panel.dataset.sidebarView!==view;});
+	  if(view==='missions'&&window.MissionControl)MissionControl.activateMode();
   if(focusTab){const tab=document.querySelector('.side-tab[data-view="'+view+'"]');if(tab)tab.focus();}
   fitActiveTerm();
 }
@@ -149,6 +145,8 @@ function buildConversationGroups(sessions,jobs){
 }
 function renderWorkspace(){
   const group=conversationGroup(activeConversationKey),head=document.getElementById('workspace-head'),panel=document.getElementById('execution-panel'),shell=document.getElementById('workspace-shell'),nudge=document.getElementById('nudge');
+  if(window.MissionControl&&MissionControl.isActive()){head.hidden=true;shell.hidden=true;return;}
+	  shell.hidden=false;
   head.hidden=!group;panel.hidden=!group;shell.classList.toggle('empty',!group);
 	  if(!group){renderStableHTML(document.getElementById('execution-list'),'');nudge.querySelector('.nudge-title').textContent=tr('selectWorkspace');nudge.style.display=active?'none':'flex';return;}
 	  const activeJobs=group.jobs.filter(job=>executionCategory(job)==='active'),failedJobs=group.jobs.filter(job=>executionCategory(job)==='failed');
@@ -224,7 +222,7 @@ function setTermNotice(info,kind,message){
 	  notice.querySelector('.prompt-heading').textContent=tr(kind==='error'?'answerNotSent':'programWaiting');
   notice.querySelector('.notice-text').textContent=kind==='error'?text:prompt;
   const actions=notice.querySelector('.prompt-actions'),hint=notice.querySelector('.prompt-hint');actions.innerHTML='';hint.textContent='';
-  if(text&&prompt){
+	  if(text&&prompt){
     if(binaryPrompt(prompt)){
 	      actions.innerHTML=`<button class="primary" data-action="answer-prompt" data-key="${esc(info.key)}" data-answer="y">${esc(tr('yes'))} (Y)</button><button data-action="answer-prompt" data-key="${esc(info.key)}" data-answer="n">${esc(tr('no'))} (N)</button>`;
       hint.textContent='These buttons send Y or N to the program.';
@@ -232,8 +230,9 @@ function setTermNotice(info,kind,message){
       const secret=secretPrompt(prompt);info.promptSecret=secret;
 	      actions.innerHTML=`<input class="prompt-input" type="${secret?'password':'text'}" data-key="${esc(info.key)}" placeholder="${esc(tr(secret?'secretAnswer':'enterAnswer'))}" autocomplete="off" spellcheck="false"><button class="primary" data-action="send-prompt" data-key="${esc(info.key)}">${esc(tr(secret?'sendSecret':'send'))}</button>`;
       hint.textContent=secret?'The value is hidden and registered for output redaction.':'The answer is sent to the waiting program.';
-    }
-  }
+	    }
+	  }
+	  if(kind==='error'&&/Stream disconnected/i.test(text))actions.innerHTML=`<button class="primary" data-action="retry-stream" data-key="${esc(info.key)}">${esc(tr('retry'))}</button>`;
   if(info.fit&&(wasVisible!==!!text||info.view==='terminal'))setTimeout(()=>{try{info.fit.fit();}catch(_){}} ,0);
 }
 function queueTermInput(info,onInput,data,options={}){
@@ -375,6 +374,7 @@ function closeTerm(key){
 }
 
 function openSession(id){
+	  if(window.MissionControl)MissionControl.closeDetail();
   const session=lastSessions[id]||{session_id:id,target:'local',owner:'agent'};
 	  const route=routeForSession(session);activeConversationKey=conversationKey(route.owner,route.target,route.workspace);
   makeTerm({key:'sess:'+id,kind:'session',session,controlsHTML:'',streamPath:'/api/session/stream?session_id='+encodeURIComponent(id),
@@ -383,6 +383,7 @@ function openSession(id){
   renderWorkspace();refreshDialogTree();setSidebarOpen(false,'main');
 }
 function openJob(job){
+	  if(window.MissionControl)MissionControl.closeDetail();
   const id=job.job_id;
 	  const route=routeForJob(job);activeConversationKey=conversationKey(route.owner,route.target,route.workspace);
 	  const controls=TERMINAL.includes(job.status)?'':`<span class="hold-tag" id="ht-${esc(id)}"></span><button class="ghost" id="hi-${esc(id)}" data-action="toggle-hold" data-id="${esc(id)}" data-kind="input" aria-pressed="false">${esc(tr('blockInput'))}</button><button class="ghost" id="ho-${esc(id)}" data-action="toggle-hold" data-id="${esc(id)}" data-kind="output" aria-pressed="false">${esc(tr('pauseOutput'))}</button><button class="danger" data-action="kill-job" data-id="${esc(id)}">${esc(tr('stop'))}</button>`;
@@ -393,6 +394,7 @@ function openJob(job){
 async function openJobById(id){ let j=lastJobs[id]; if(j) openJob(j); }
 function preferredConversationJob(group){if(!group)return null;const currentIDs=new Set(group.sessions.map(session=>session.current_job_id).filter(Boolean)),activeJobs=group.jobs.filter(job=>executionCategory(job)==='active');return activeJobs.find(job=>job.awaiting_input)||activeJobs.find(job=>currentIDs.has(job.job_id))||activeJobs[0]||group.jobs[0]||null;}
 function openConversation(key){
+	  if(window.MissionControl)MissionControl.closeDetail();
   const group=conversationGroup(key);if(!group)return;const current=active&&terms[active];if(activeConversationKey!==key)executionFilter='all';activeConversationKey=key;renderWorkspace();refreshDialogTree();
   if(current&&termConversationKey(current)===key){focusTab(active);setSidebarOpen(false,'main');return;}
   const job=preferredConversationJob(group);if(job){openJob(job);return;}const session=group.sessions[0];if(session){openSession(session.session_id);return;}Object.keys(terms).forEach(disposeTerm);renderWorkspace();setSidebarOpen(false,'main');
@@ -511,9 +513,9 @@ function scheduleStateRefresh(delay=80){clearTimeout(stateRefreshTimer);stateRef
 async function refreshOnce(){
 	  let s;
 	  try{s=await api('/api/dashboard/state?limit=100');if(s.error)throw new Error(errorText(s,'status error'));setConnectionState('connected');document.getElementById('dot').classList.add('live');}
-  catch(e){
-	    setConnectionState(gated?'locked':'offline');
-    document.getElementById('dot').classList.remove('live'); return; }
+	catch(e){
+		    setConnectionState(gated?'locked':'offline');
+	    document.getElementById('dot').classList.remove('live');if(window.MissionControl)MissionControl.setOffline(e); return; }
   document.getElementById('ver').textContent='v'+(s.version||'?');
 
 	  stateRevision=Math.max(stateRevision,Number(s.state_revision||0));const jobs=(s.jobs||[]).slice().sort((a,b)=>timeMS(b)-timeMS(a));lastJobs={};lastSessions={};lastJobsOmitted=Number(s.jobs_omitted||0);lastDialogSessions=(s.sessions||[]).map(session=>Object.assign({_live:true},session));jobs.forEach(j=>lastJobs[j.job_id]=j);lastDialogSessions.forEach(x=>lastSessions[x.session_id]=x);
@@ -521,7 +523,7 @@ async function refreshOnce(){
 	  activeJobsCount=active_jobs.length;
   document.getElementById('s-jobs').textContent=active_jobs.length;
   document.getElementById('s-pend').textContent=(s.pending||[]).length+jobs.filter(j=>j.awaiting_input&&j.status!=='awaiting_confirmation').length;
-  renderAttention(s.pending||[],jobs);renderDialogTree(s.sessions||[],jobs);
+	  renderAttention(s.pending||[],jobs);if(window.MissionControl)MissionControl.receiveState(s.missions||[],s.pending||[]);renderDialogTree(s.sessions||[],jobs);
 
   const serverHTML=(s.servers&&s.servers.length)? s.servers.map(x=>{
     const st=srvStatus[x.name]||x.status||'';
@@ -603,7 +605,7 @@ async function deletePolicy(name){
   loadPolicies();
 }
 async function loadPolicies(){
-  let p={}; try{ p=await api('/api/policies'); }catch(e){ return; }
+	let p={}; try{p=await api('/api/policies');if(p.error)throw new Error(errorText(p,'Could not load policies'));}catch(e){document.getElementById('policies').innerHTML=`<div class="mission-offline" role="status"><b>${esc(tr('controlPlaneUnavailable'))}</b><button data-action="reload-policies">${esc(tr('retry'))}</button></div>`;return;}
   const pols=p.policies||{}, agents=p.agents||{}, managed=p.managed||{};
   lastPolicies=pols;
   const byPol={}; for(const a in agents){ (byPol[agents[a]]=byPol[agents[a]]||[]).push(a); }
@@ -623,7 +625,7 @@ async function loadPolicies(){
 }
 
 // ---- history / replay (persistent hash-chained audit) --------------------
-let auditRecs=[],auditFilter='all';
+let auditRecs=[],auditFilter='all',historyFocused=null;
 function auditActor(record){return record&&record.data&&(record.data.actor||record.data.source)||record&&record.agent_id||tr('operator');}
 function auditTime(record){const value=record&&record.time?Date.parse(record.time):0;return Number.isFinite(value)?value:0;}
 function auditCategory(record){const type=record&&record.type||'';if(/^confirm\.|^human_input\./.test(type))return'attention';if(/^job\./.test(type)||record&&record.job_id)return'runs';if(/^agent\.|^session\./.test(type))return'connections';return'system';}
@@ -663,13 +665,13 @@ function auditGroupState(group){
   return{kind:'idle',label:group.category==='connections'?tr('connection'):tr(group.category==='system'?'system':'events')};
 }
 async function openHistory(){
-  document.getElementById('history').style.display='flex';
+	  const historyModal=document.getElementById('history');if(historyModal.style.display!=='flex'){historyFocused=document.activeElement;document.getElementById('layout').inert=true;document.querySelector('body>header').inert=true;}historyModal.style.display='flex';
   document.getElementById('hist-list').innerHTML='<div class="empty">'+esc(tr('waitingOutput'))+'</div>';
-  let r={}; try{ r=await api('/api/audit?n=500'); }catch(e){}
+	  let r={};try{r=await api('/api/audit?n=500');if(r.error)throw new Error(errorText(r,'Could not load history'));}catch(e){document.getElementById('hist-list').innerHTML=`<div class="mission-offline" role="status"><b>${esc(tr('controlPlaneUnavailable'))}</b><button data-action="reload-history">${esc(tr('retry'))}</button></div>`;return;}
   auditRecs = (r&&r.records) || (Array.isArray(r)?r:[]) || [];
   renderAudit();setTimeout(()=>document.getElementById('hist-filter').focus(),0);
 }
-function closeHistory(){ document.getElementById('history').style.display='none'; }
+function closeHistory(){const modal=document.getElementById('history');if(modal.style.display!=='flex')return;modal.style.display='none';document.getElementById('layout').inert=false;document.querySelector('body>header').inert=false;if(historyFocused&&historyFocused.focus)historyFocused.focus();historyFocused=null;}
 function setAuditFilter(filter){auditFilter=['all','runs','attention','connections','system'].includes(filter)?filter:'all';document.querySelectorAll('.hist-filters button').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.filter===auditFilter)));renderAudit();}
 function renderAudit(){
   const q=(document.getElementById('hist-filter').value||'').trim().toLowerCase(),allGroups=buildAuditGroups(auditRecs);
@@ -693,7 +695,7 @@ function startFeed(){
 	    const sequence=Number(e.sequence||ev.lastEventId||0),eventKey=sequence?'seq:'+sequence:JSON.stringify([e.time,e.type,e.agent_id,e.session_id,e.job_id,e.message,e.data]);if(sequence&&sequence<=stateRevision)return;if(sequence)stateRevision=sequence;if(feedSeen.has(eventKey))return;feedSeen.add(eventKey);if(feedSeen.size>500)feedSeen.delete(feedSeen.values().next().value);
 	    if(feed&&!feed.hidden){const d=document.createElement('div');d.className='e';const t=new Date(e.time||Date.now()).toLocaleTimeString(),ts=document.createElement('span'),ty=document.createElement('span'),msg=document.createElement('span');ts.className='t';ts.textContent=t;ty.className='ty';ty.textContent=e.type||'';msg.className='cmd';msg.textContent=e.message||'';d.append(ts,ty,msg);feed.prepend(d);while(feed.children.length>80)feed.removeChild(feed.lastChild);}
 	    if(e.type==='state.resync_required')scheduleStateRefresh(0);
-	    else if(['job.start_requested','job.started','job.finished','job.killed','confirm.requested','confirm.resolved','session.created','session.closed','session.reset','job.hold','human_input.authorized','agent.connected','persistence.error'].includes(e.type))scheduleStateRefresh();
+	    else if(['job.start_requested','job.started','job.finished','job.killed','confirm.requested','confirm.resolved','session.created','session.closed','session.reset','job.hold','human_input.authorized','agent.connected','persistence.error'].includes(e.type)||String(e.type||'').startsWith('mission.'))scheduleStateRefresh();
 	  };
 	  es.onerror=()=>{if(feedES===es)setConnectionState('reconnecting');};
 }
@@ -703,7 +705,6 @@ document.addEventListener('click',e=>{
   if(!el) return;
   const id=el.dataset.id||'', name=el.dataset.name||'';
 	  switch(el.dataset.action){
-	  case 'toggle-locale': toggleLocale(); break;
   case 'toggle-sidebar': setSidebarOpen(!sidebarOpen,sidebarOpen?'toggle':''); break;
   case 'close-sidebar': setSidebarOpen(false,'toggle'); break;
   case 'set-sidebar-view': setSidebarView(el.dataset.view||'conversations',false); break;
@@ -730,6 +731,9 @@ document.addEventListener('click',e=>{
   case 'send-prompt': sendPromptAnswer(el.dataset.key||'',null); break;
   case 'toggle-hold': runAction(toggleHold(id,el.dataset.kind||''),'Could not change takeover mode'); break;
   case 'kill-job': runAction(killJob(id),'Could not stop command'); break;
+	  case 'reload-policies': loadPolicies(); break;
+	  case 'reload-history': openHistory(); break;
+	  case 'retry-stream': {const info=terms[el.dataset.key||''];if(info){info.streamErrors=0;setTermNotice(info,'','');connectTermStream(info);}} break;
   }
 });
 document.getElementById('gate-token').addEventListener('keydown',e=>{ if(e.key==='Enter') submitGate(); });
@@ -745,6 +749,6 @@ document.addEventListener('keydown',e=>{
 window.addEventListener('resize',()=>{ if(active&&terms[active]&&terms[active].fit){try{terms[active].fit.fit();}catch(_){}}});
 document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(fallbackTimer);return;}scheduleStateRefresh(0);});
 if(mobileSidebarQuery.addEventListener)mobileSidebarQuery.addEventListener('change',syncSidebarMode);else mobileSidebarQuery.addListener(syncSidebarMode);
-applyLocale();setSidebarView('conversations');syncSidebarMode();
+applyCopy();setSidebarView('missions');syncSidebarMode();
 refresh().then(()=>startFeed()).catch(()=>{}); // a missing/invalid token receives 401 and opens the gate
 loadPolicies();

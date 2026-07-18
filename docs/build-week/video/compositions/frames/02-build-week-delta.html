@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Build Week Delta</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Space Grotesk";
+          src: local("Space Grotesk");
+        }
+
+        @font-face {
+          font-family: "IBM Plex Mono";
+          src: local("IBM Plex Mono");
+        }
+
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          overflow: hidden;
+          box-sizing: border-box;
+          color: #eef2f6;
+          font-family: "Space Grotesk", Inter, system-ui, sans-serif;
+          letter-spacing: 0;
+        }
+
+        * {
+          box-sizing: border-box;
+        }
+
+        .scene-fill {
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          background: #0b0f14;
+        }
+
+        .product-capture {
+          position: absolute;
+          inset: -54px;
+          width: 2028px;
+          height: 1188px;
+          object-fit: cover;
+          opacity: 0.18;
+          filter: saturate(0.65) contrast(1.08);
+          transform-origin: 50% 50%;
+        }
+
+        .capture-shade {
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(
+            90deg,
+            rgba(11, 15, 20, 0.96) 0%,
+            rgba(11, 15, 20, 0.88) 48%,
+            rgba(11, 15, 20, 0.74) 100%
+          );
+        }
+
+        .top-rule {
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 4px;
+          background: linear-gradient(90deg, #5ed4d0 0 50%, #3ecf8e 50% 100%);
+          transform-origin: 50% 50%;
+        }
+
+        .content {
+          position: absolute;
+          inset: 0;
+          display: flex;
+          flex-direction: column;
+          padding: 76px 96px 116px;
+        }
+
+        .title-block {
+          display: flex;
+          align-items: flex-end;
+          justify-content: space-between;
+          gap: 80px;
+          min-height: 206px;
+          padding-bottom: 34px;
+          border-bottom: 1px solid rgba(147, 161, 175, 0.28);
+        }
+
+        .eyebrow {
+          margin: 0 0 15px;
+          color: #5ed4d0;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 23px;
+          font-weight: 600;
+          line-height: 1.25;
+          text-transform: uppercase;
+        }
+
+        .headline {
+          max-width: 1200px;
+          margin: 0;
+          font-size: 72px;
+          font-weight: 800;
+          line-height: 0.98;
+        }
+
+        .week-stamp {
+          flex: 0 0 272px;
+          padding: 16px 0 13px;
+          border-top: 1px solid rgba(94, 212, 208, 0.55);
+          border-bottom: 1px solid rgba(94, 212, 208, 0.55);
+          color: #eef2f6;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 22px;
+          font-weight: 500;
+          line-height: 1.45;
+          text-align: right;
+          text-transform: uppercase;
+        }
+
+        .ledger {
+          display: grid;
+          flex: 1;
+          grid-template-columns: minmax(0, 1fr) 94px minmax(0, 1fr);
+          align-items: stretch;
+          min-height: 0;
+          padding-top: 42px;
+        }
+
+        .layer {
+          position: relative;
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+          padding: 35px 42px 32px;
+          overflow: hidden;
+          border: 1px solid rgba(147, 161, 175, 0.3);
+          background: rgba(17, 24, 32, 0.9);
+        }
+
+        .layer-new {
+          border-color: rgba(62, 207, 142, 0.6);
+          background: rgba(14, 33, 31, 0.9);
+        }
+
+        .layer-label {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 20px;
+          margin-bottom: 14px;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 20px;
+          font-weight: 600;
+          line-height: 1.25;
+          text-transform: uppercase;
+        }
+
+        .layer-existing .layer-label {
+          color: #93a1af;
+        }
+
+        .layer-new .layer-label {
+          color: #3ecf8e;
+        }
+
+        .status-mark {
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          color: #eef2f6;
+          font-size: 17px;
+          font-weight: 500;
+        }
+
+        .status-mark::before {
+          width: 9px;
+          height: 9px;
+          border-radius: 50%;
+          background: currentColor;
+          content: "";
+        }
+
+        .layer-new .status-mark {
+          color: #3ecf8e;
+        }
+
+        .layer-title {
+          margin: 0 0 27px;
+          font-size: 43px;
+          font-weight: 700;
+          line-height: 1.08;
+        }
+
+        .capability-list {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 13px;
+          margin: 0;
+          padding: 0;
+          list-style: none;
+        }
+
+        .capability {
+          position: relative;
+          display: flex;
+          min-height: 79px;
+          align-items: center;
+          gap: 17px;
+          padding: 17px 18px;
+          border: 1px solid rgba(147, 161, 175, 0.2);
+          background: rgba(11, 15, 20, 0.62);
+          font-size: 26px;
+          font-weight: 500;
+          line-height: 1.18;
+        }
+
+        .layer-new .capability {
+          border-color: rgba(62, 207, 142, 0.2);
+          background: rgba(7, 22, 22, 0.68);
+        }
+
+        .capability-code {
+          display: inline-flex;
+          flex: 0 0 38px;
+          height: 38px;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid rgba(147, 161, 175, 0.42);
+          color: #93a1af;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 17px;
+          font-weight: 600;
+        }
+
+        .layer-new .capability-code {
+          border-color: rgba(62, 207, 142, 0.52);
+          color: #3ecf8e;
+        }
+
+        .layer-footnote {
+          margin: auto 0 0;
+          padding-top: 25px;
+          color: #93a1af;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 19px;
+          font-weight: 500;
+          line-height: 1.35;
+        }
+
+        .layer-new .layer-footnote {
+          color: #a9d8c5;
+        }
+
+        .join {
+          position: relative;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .join-line {
+          position: absolute;
+          top: 50%;
+          left: 14px;
+          width: 66px;
+          height: 1px;
+          background: #5ed4d0;
+          transform-origin: 0 50%;
+        }
+
+        .join-arrow {
+          position: absolute;
+          top: calc(50% - 6px);
+          right: 13px;
+          width: 12px;
+          height: 12px;
+          border-top: 1px solid #5ed4d0;
+          border-right: 1px solid #5ed4d0;
+          transform: rotate(45deg);
+        }
+
+        .join-label {
+          position: absolute;
+          top: calc(50% - 88px);
+          left: 50%;
+          color: #5ed4d0;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 15px;
+          font-weight: 600;
+          line-height: 1.25;
+          text-align: center;
+          text-transform: uppercase;
+          transform: translateX(-50%) rotate(-90deg);
+          white-space: nowrap;
+        }
+
+        .proof-line {
+          position: absolute;
+          right: 96px;
+          bottom: 30px;
+          left: 96px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 54px;
+          border: 1px solid rgba(94, 212, 208, 0.5);
+          background: rgba(7, 21, 24, 0.96);
+          color: #eef2f6;
+          font-family: "IBM Plex Mono", ui-monospace, monospace;
+          font-size: 22px;
+          font-weight: 600;
+          line-height: 1.25;
+          text-align: center;
+          text-transform: uppercase;
+        }
+
+        .proof-line strong {
+          color: #3ecf8e;
+          font-weight: 700;
+        }
+      </style>
+
+      <div
+        id="root"
+        data-composition-id="02-build-week-delta"
+        data-width="1920"
+        data-height="1080"
+        data-duration="24.6"
+      >
+        <div class="scene-fill">
+          <img
+            class="product-capture"
+            src="assets/approval-desktop.jpg"
+            alt="Termada Mission Control approval interface"
+          />
+          <div class="capture-shade"></div>
+          <div class="top-rule"></div>
+        </div>
+
+        <main class="content">
+          <header class="title-block">
+            <div>
+              <p class="eyebrow">OpenAI Build Week · Product Delta</p>
+              <h1 class="headline">The runtime was already real. Mission Control made outcomes accountable.</h1>
+            </div>
+            <div class="week-stamp">Existing project<br />Meaningful extension</div>
+          </header>
+
+          <section class="ledger" aria-label="Before and during Build Week comparison">
+            <article class="layer layer-existing">
+              <div class="layer-label">
+                <span>Before Build Week</span>
+                <span class="status-mark">Existing</span>
+              </div>
+              <h2 class="layer-title">Operational runtime</h2>
+              <ul class="capability-list">
+                <li class="capability"><span class="capability-code">PTY</span><span>Local execution</span></li>
+                <li class="capability"><span class="capability-code">SSH</span><span>Remote sessions</span></li>
+                <li class="capability"><span class="capability-code">POL</span><span>Policy engine</span></li>
+                <li class="capability"><span class="capability-code">VLT</span><span>Encrypted vault</span></li>
+                <li class="capability"><span class="capability-code">AUD</span><span>Append-only audit</span></li>
+              </ul>
+              <p class="layer-footnote">Executes real jobs under policy.</p>
+            </article>
+
+            <div class="join" aria-hidden="true">
+              <span class="join-label">Built on</span>
+              <span class="join-line"></span>
+              <span class="join-arrow"></span>
+            </div>
+
+            <article class="layer layer-new">
+              <div class="layer-label">
+                <span>During Build Week</span>
+                <span class="status-mark">Added</span>
+              </div>
+              <h2 class="layer-title">Durable mission layer</h2>
+              <ul class="capability-list">
+                <li class="capability"><span class="capability-code">PLN</span><span>Mission plan</span></li>
+                <li class="capability"><span class="capability-code">RCV</span><span>Restart recovery</span></li>
+                <li class="capability"><span class="capability-code">CHK</span><span>Verified steps</span></li>
+                <li class="capability"><span class="capability-code">RPT</span><span>Evidence report</span></li>
+              </ul>
+              <p class="layer-footnote">Connects intent, execution, approval, and proof.</p>
+            </article>
+          </section>
+        </main>
+
+        <div class="proof-line">The runtime executes. The mission layer <strong>&nbsp;proves.</strong></div>
+      </div>
+
+      <script>
+        window.__timelines = window.__timelines || {};
+        const tl = gsap.timeline({ paused: true });
+
+        tl.fromTo(
+          ".product-capture",
+          { scale: 1.07, x: 14, opacity: 0.12 },
+          { scale: 1.025, x: -14, opacity: 0.18, duration: 24, ease: "none" },
+          0,
+        );
+        tl.fromTo(
+          ".top-rule",
+          { scaleX: 0 },
+          { scaleX: 1, duration: 0.45, ease: "power3.out" },
+          0,
+        );
+        tl.fromTo(
+          ".eyebrow",
+          { y: 24, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.45, ease: "power3.out" },
+          0.18,
+        );
+        tl.fromTo(
+          ".headline",
+          { y: 40, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.55, ease: "power3.out" },
+          0.34,
+        );
+        tl.fromTo(
+          ".week-stamp",
+          { x: 42, opacity: 0 },
+          { x: 0, opacity: 1, duration: 0.45, ease: "power3.out" },
+          0.58,
+        );
+
+        tl.fromTo(
+          ".layer-existing",
+          { x: -120, opacity: 0 },
+          { x: 0, opacity: 1, duration: 0.65, ease: "power3.out" },
+          1.25,
+        );
+        tl.fromTo(
+          ".layer-existing .capability",
+          { y: 24, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.42, stagger: 0.1, ease: "power2.out" },
+          2.05,
+        );
+        tl.fromTo(
+          ".join-line",
+          { scaleX: 0 },
+          { scaleX: 1, duration: 0.45, ease: "power2.out" },
+          5.0,
+        );
+        tl.fromTo(
+          [".join-arrow", ".join-label"],
+          { opacity: 0 },
+          { opacity: 1, duration: 0.35, stagger: 0.08, ease: "power1.out" },
+          5.2,
+        );
+        tl.fromTo(
+          ".layer-new",
+          { x: 120, opacity: 0 },
+          { x: 0, opacity: 1, duration: 0.65, ease: "power3.out" },
+          5.45,
+        );
+        tl.fromTo(
+          ".layer-new .capability",
+          { y: 24, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.42, stagger: 0.12, ease: "power2.out" },
+          6.25,
+        );
+        tl.to(
+          ".layer-new",
+          {
+            borderColor: "rgba(62, 207, 142, 0.95)",
+            backgroundColor: "rgba(14, 40, 35, 0.94)",
+            duration: 0.6,
+            ease: "power2.inOut",
+          },
+          9.0,
+        );
+        tl.fromTo(
+          ".proof-line",
+          { y: 72, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.55, ease: "power3.out" },
+          16.0,
+        );
+
+        window.__timelines["02-build-week-delta"] = tl;
+      </script>
+    </template>
+  </body>
+</html>
